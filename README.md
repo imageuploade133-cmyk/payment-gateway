@@ -89,3 +89,51 @@ npm test
   "message": "Unable to verify account details. Please check the bank and account number."
 }
 ```
+
+---
+
+#### Initiate Outward Transfer
+- **Endpoint:** `POST /api/flutterwave/transfer`
+- **Description:** Securely executes an outward single bank transfer using Flutterwave with built-in in-memory idempotency defense, automatic transient error retries, and request ID log binding.
+- **Rate Limit:** 10 requests per 15 minutes per IP.
+- **Headers:**
+  - `Content-Type: application/json`
+  - `X-Request-ID: <optional-unique-uuid>` (Auto-generated if omitted)
+- **Request Body:**
+```json
+{
+  "amount": 5000,
+  "account_number": "0123456789",
+  "bank_code": "044",
+  "account_name": "SARAH SMITH CONNOR",
+  "currency": "NGN",
+  "narration": "E-Tech Salary Payout",
+  "reference": "salary-999-2026-07"
+}
+```
+- **Success Response (HTTP 200):**
+```json
+{
+  "success": true,
+  "reference": "salary-999-2026-07",
+  "provider_reference": "778899",
+  "status": "pending",
+  "message": "Transfer initiated successfully."
+}
+```
+- **Error Response (HTTP 400 - Validation/Provider Error):**
+```json
+{
+  "success": false,
+  "reference": "salary-999-2026-07",
+  "message": "Transfer could not be processed. Please check account details or try again later."
+}
+```
+- **Error Response (HTTP 400 - Duplicate Reference):**
+```json
+{
+  "success": false,
+  "reference": "salary-999-2026-07",
+  "message": "Duplicate transfer reference. This transaction has already been initiated."
+}
+```

@@ -1,0 +1,150 @@
+import request from "supertest";
+import app from "../app";
+import { getFlutterwaveClient } from "../providers/flutterwave";
+import { InMemoryIdempotency } from "../services/transferService";
+
+// Mock the Flutterwave client singleton helper
+jest.mock("../providers/flutterwave", () => {
+  const mClient = {
+    request: jest.fn(),
+  };
+  return {
+    getFlutterwaveClient: () => mClient,
+  };
+});
+
+const mockFlwClient = getFlutterwaveClient() as jest.Mocked<any>;
+
+describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
+  const validPayload = {
+    amount: 5000,
+    account_number: "0123456789",
+    bank_code: "044",
+    account_name: "SARAH SMITH CONNOR",
+    currency: "NGN",
+    narration: "E-Tech Salary Payout",
+    reference: "salary-999-2026-07",
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Clear in-memory idempotency cache for test isolation
+    const idempotency = InMemoryIdempotency.getInstance();
+    (idempotency as any).cache.clear();
+  });
+
+  describe("POST /api/flutterwave/transfer - Request Validation (Zod)", () => {
+    it("should return HTTP 400 with a descriptive validation error if amount is missing", async () => {
+      const { amount, ...invalidPayload } = validPayload;
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send(invalidPayload);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Validation Error");
+    });
+
+    it("should return HTTP 400 if amount is negative", async () => {
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send({ ...validPayload, amount: -100 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Validation Error");
+    });
+
+    it("should return HTTP 400 if account_number contains non-digits", async () => {
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send({ ...validPayload, account_number: "0123abc45" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Validation Error");
+    });
+
+    it("should return HTTP 400 if bank_code is malformed", async () => {
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send({ ...validPayload, bank_code: "abc" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Validation Error");
+    });
+  });
+
+  describe("POST /api/flutterwave/transfer - Execution & Reliability", () => {
+    it("should return normalized success object with HTTP 200 on successful provider transfer", async () => {
+      mockFlwClient.request.mockResolvedValue({
+        status: "success",
+        message: "Transfer queued",
+        data: {
+          id: 778899,
+          status: "NEW",
+          amount: 5000,
+          reference: validPayload.reference,
+        },
+      });
+
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send(validPayload);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        success: true,
+        reference: validPayload.reference,
+        provider_reference: "778899",
+        status: "pending",
+        message: "Transfer queued",
+      });
+
+      expect(mockFlwClient.request).toHaveBeenCalledWith("post", "/transfers", {
+        account_bank: validPayload.bank_code,
+        account_number: validPayload.account_number,
+        amount: validPayload.amount,
+        narration: validPayload.narration,
+        currency: validPayload.currency,
+        reference: validPayload.reference,
+        callback_url: undefined,
+      });
+    });
+
+    it("should reject with duplicate reference warning if reference is sent twice (Idempotency check)", async () => {
+      mockFlwClient.request.mockResolvedValue({
+        status: "success",
+        data: { id: 778899, status: "NEW" },
+      });
+
+      // Send first transfer
+      const res1 = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send(validPayload);
+      expect(res1.status).toBe(200);
+
+      // Send identical transfer reference again
+      const res2 = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send(validPayload);
+
+      expect(res2.status).toBe(400);
+      expect(res2.body.success).toBe(false);
+      expect(res2.body.message).toContain("Duplicate transfer reference");
+    });
+
+    it("should return normalized failure on provider failure", async () => {
+      mockFlwClient.request.mockRejectedValue(new Error("Unable to execute transfer"));
+
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .send(validPayload);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Transfer could not be processed");
+    });
+  });
+});
