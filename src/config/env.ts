@@ -7,9 +7,9 @@ export interface EnvConfig {
   PORT: number;
   NODE_ENV: string;
   FLW_BASE_URL: string;
-  FLW_SECRET_KEY?: string;
-  FLW_PUBLIC_KEY?: string;
-  FLW_WEBHOOK_SECRET?: string;
+  FLW_SECRET_KEY: string;
+  FLW_PUBLIC_KEY: string;
+  FLW_WEBHOOK_SECRET: string;
   PAYSTACK_BASE_URL: string;
   PAYSTACK_SECRET_KEY?: string;
   PAYSTACK_PUBLIC_KEY?: string;
@@ -24,13 +24,24 @@ function validateEnv(): EnvConfig {
   const FLW_BASE_URL = process.env.FLW_BASE_URL || "https://api.flutterwave.com/v3";
   const PAYSTACK_BASE_URL = process.env.PAYSTACK_BASE_URL || "https://api.paystack.co";
 
+  const missingFlwVars: string[] = [];
+  if (!process.env.FLW_SECRET_KEY) missingFlwVars.push("FLW_SECRET_KEY");
+  if (!process.env.FLW_PUBLIC_KEY) missingFlwVars.push("FLW_PUBLIC_KEY");
+  if (!process.env.FLW_WEBHOOK_SECRET) missingFlwVars.push("FLW_WEBHOOK_SECRET");
+
+  if (missingFlwVars.length > 0) {
+    const errorMsg = `Configuration Error: Missing required Flutterwave variables: ${missingFlwVars.join(", ")}`;
+    logger.error(errorMsg);
+    throw new Error(errorMsg);
+  }
+
   const config: EnvConfig = {
     PORT,
     NODE_ENV,
     FLW_BASE_URL,
-    FLW_SECRET_KEY: process.env.FLW_SECRET_KEY,
-    FLW_PUBLIC_KEY: process.env.FLW_PUBLIC_KEY,
-    FLW_WEBHOOK_SECRET: process.env.FLW_WEBHOOK_SECRET,
+    FLW_SECRET_KEY: process.env.FLW_SECRET_KEY!,
+    FLW_PUBLIC_KEY: process.env.FLW_PUBLIC_KEY!,
+    FLW_WEBHOOK_SECRET: process.env.FLW_WEBHOOK_SECRET!,
     PAYSTACK_BASE_URL,
     PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY,
     PAYSTACK_PUBLIC_KEY: process.env.PAYSTACK_PUBLIC_KEY,
@@ -39,8 +50,7 @@ function validateEnv(): EnvConfig {
     JWT_SECRET: process.env.JWT_SECRET,
   };
 
-  // Log active state
-  logger.info(`[Config] Environment successfully loaded. Mode: ${NODE_ENV}, Port: ${PORT}`);
+  logger.info(`[Config] Environment validated successfully. Mode: ${NODE_ENV}`);
 
   return config;
 }
