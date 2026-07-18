@@ -2,6 +2,7 @@ import request from "supertest";
 import app from "../app";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { InMemoryIdempotency } from "../services/transferService";
+import { env } from "../config/env";
 
 // Mock the Flutterwave client singleton helper
 jest.mock("../providers/flutterwave", () => {
@@ -15,6 +16,9 @@ jest.mock("../providers/flutterwave", () => {
 });
 
 const mockFlwClient = getFlutterwaveClient() as jest.Mocked<any>;
+
+// Resolve API Key dynamically to avoid evaluations order issues in Jest
+const getTestApiKey = () => env.GATEWAY_API_KEYS[0];
 
 describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
   beforeEach(() => {
@@ -37,6 +41,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
     it("should return HTTP 400 with validation error if email is invalid", async () => {
       const res = await request(app)
         .post("/api/flutterwave/create-virtual-account")
+        .set("X-API-Key", getTestApiKey())
         .send({ ...validVirtualAccountPayload, email: "invalid-email" });
 
       expect(res.status).toBe(400);
@@ -57,6 +62,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
 
       const res = await request(app)
         .post("/api/flutterwave/create-virtual-account")
+        .set("X-API-Key", getTestApiKey())
         .send(validVirtualAccountPayload);
 
       expect(res.status).toBe(200);
@@ -84,6 +90,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
     it("should return HTTP 400 validation error if transaction_id is missing", async () => {
       const res = await request(app)
         .post("/api/flutterwave/verify")
+        .set("X-API-Key", getTestApiKey())
         .send({});
 
       expect(res.status).toBe(400);
@@ -110,6 +117,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
 
       const res = await request(app)
         .post("/api/flutterwave/verify")
+        .set("X-API-Key", getTestApiKey())
         .send({ transaction_id: "567890" });
 
       expect(res.status).toBe(200);

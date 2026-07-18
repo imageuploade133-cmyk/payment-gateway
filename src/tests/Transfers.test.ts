@@ -2,6 +2,7 @@ import request from "supertest";
 import app from "../app";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { InMemoryIdempotency } from "../services/transferService";
+import { env } from "../config/env";
 
 // Mock the Flutterwave client singleton helper
 jest.mock("../providers/flutterwave", () => {
@@ -14,6 +15,7 @@ jest.mock("../providers/flutterwave", () => {
 });
 
 const mockFlwClient = getFlutterwaveClient() as jest.Mocked<any>;
+const testApiKey = env.GATEWAY_API_KEYS[0];
 
 describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
   const validPayload = {
@@ -38,6 +40,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       const { amount, ...invalidPayload } = validPayload;
       const res = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send(invalidPayload);
 
       expect(res.status).toBe(400);
@@ -48,6 +51,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
     it("should return HTTP 400 if amount is negative", async () => {
       const res = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send({ ...validPayload, amount: -100 });
 
       expect(res.status).toBe(400);
@@ -58,6 +62,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
     it("should return HTTP 400 if account_number contains non-digits", async () => {
       const res = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send({ ...validPayload, account_number: "0123abc45" });
 
       expect(res.status).toBe(400);
@@ -68,6 +73,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
     it("should return HTTP 400 if bank_code is malformed", async () => {
       const res = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send({ ...validPayload, bank_code: "abc" });
 
       expect(res.status).toBe(400);
@@ -91,6 +97,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
 
       const res = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send(validPayload);
 
       expect(res.status).toBe(200);
@@ -122,12 +129,14 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       // Send first transfer
       const res1 = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send(validPayload);
       expect(res1.status).toBe(200);
 
       // Send identical transfer reference again
       const res2 = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send(validPayload);
 
       expect(res2.status).toBe(400);
@@ -140,6 +149,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
 
       const res = await request(app)
         .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
         .send(validPayload);
 
       expect(res.status).toBe(400);

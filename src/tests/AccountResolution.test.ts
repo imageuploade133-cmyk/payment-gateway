@@ -1,6 +1,7 @@
 import request from "supertest";
 import app from "../app";
 import { getFlutterwaveClient } from "../providers/flutterwave";
+import { env } from "../config/env";
 
 // Mock the Flutterwave client singleton helper
 jest.mock("../providers/flutterwave", () => {
@@ -13,6 +14,7 @@ jest.mock("../providers/flutterwave", () => {
 });
 
 const mockFlwClient = getFlutterwaveClient() as jest.Mocked<any>;
+const testApiKey = env.GATEWAY_API_KEYS[0];
 
 describe("Flutterwave Account Resolution Endpoint Tests", () => {
   beforeEach(() => {
@@ -23,6 +25,7 @@ describe("Flutterwave Account Resolution Endpoint Tests", () => {
     it("should return HTTP 400 with a descriptive validation error if account_number is missing", async () => {
       const res = await request(app)
         .post("/api/flutterwave/resolve-account")
+        .set("X-API-Key", testApiKey)
         .send({ bank_code: "044" });
 
       expect(res.status).toBe(400);
@@ -33,6 +36,7 @@ describe("Flutterwave Account Resolution Endpoint Tests", () => {
     it("should return HTTP 400 if account_number contains non-digits", async () => {
       const res = await request(app)
         .post("/api/flutterwave/resolve-account")
+        .set("X-API-Key", testApiKey)
         .send({ account_number: "01234abc89", bank_code: "044" });
 
       expect(res.status).toBe(400);
@@ -43,6 +47,7 @@ describe("Flutterwave Account Resolution Endpoint Tests", () => {
     it("should return HTTP 400 if bank_code contains non-digits", async () => {
       const res = await request(app)
         .post("/api/flutterwave/resolve-account")
+        .set("X-API-Key", testApiKey)
         .send({ account_number: "0123456789", bank_code: "abc" });
 
       expect(res.status).toBe(400);
@@ -65,6 +70,7 @@ describe("Flutterwave Account Resolution Endpoint Tests", () => {
 
       const res = await request(app)
         .post("/api/flutterwave/resolve-account")
+        .set("X-API-Key", testApiKey)
         .send({ account_number: "0123456789", bank_code: "044" });
 
       expect(res.status).toBe(200);
@@ -86,6 +92,7 @@ describe("Flutterwave Account Resolution Endpoint Tests", () => {
 
       const res = await request(app)
         .post("/api/flutterwave/resolve-account")
+        .set("X-API-Key", testApiKey)
         .send({ account_number: "9999999999", bank_code: "044" });
 
       expect(res.status).toBe(400);
@@ -107,6 +114,7 @@ describe("Flutterwave Account Resolution Endpoint Tests", () => {
       const customRequestId = "test-uuid-9999-8888";
       const res = await request(app)
         .post("/api/flutterwave/resolve-account")
+        .set("X-API-Key", testApiKey)
         .set("X-Request-ID", customRequestId)
         .send({ account_number: "0123456789", bank_code: "044" });
 

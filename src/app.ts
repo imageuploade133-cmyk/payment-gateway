@@ -8,27 +8,42 @@ import { errorHandler } from "./middleware/errorHandler";
 import { requestIdMiddleware } from "./middleware/requestId";
 import routes from "./routes";
 import logger from "./config/logger";
+import { env } from "./config/env";
 
 const app = express();
 
 // Request ID middleware (must be first)
 app.use(requestIdMiddleware);
 
-// Security middleware
+// Security headers
 app.use(helmet());
+
+// Hardened CORS origin whitelisting
 app.use(cors({
-  origin: "*", // Adjust as necessary for Next.js security
+  origin: (origin, callback) => {
+    // If no origin is supplied (e.g. backend curl or local requests) or if allowed origin is wildcard
+    if (!origin || env.CORS_ALLOWED_ORIGINS.includes("*")) {
+      return callback(null, true);
+    }
+    if (env.CORS_ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    logger.warn(`[CORS] Request origin blocked: ${origin}`);
+    callback(new Error("CORS policy violation: origin not whitelisted."));
+  },
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Request-ID"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Request-ID", "X-API-Key"],
 }));
 
 // Request limiting
 app.use(standardRateLimiter);
 
-// Compression & parsing
+// Compression
 app.use(compression());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+
+// Strict Request Size Limits (prevents payload-bloat/denial-of-service memory exhaustions)
+app.use(express.json({ limit: "10kb" }));
+app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 
 // HTTP Request logging with Request ID
 const morganStream = {

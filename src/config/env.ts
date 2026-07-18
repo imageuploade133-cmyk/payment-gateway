@@ -14,8 +14,9 @@ export interface EnvConfig {
   PAYSTACK_SECRET_KEY?: string;
   PAYSTACK_PUBLIC_KEY?: string;
   PAYSTACK_WEBHOOK_SECRET?: string;
-  GATEWAY_API_KEY?: string;
-  JWT_SECRET?: string;
+  GATEWAY_API_KEYS: string[]; // List of valid API Keys supporting rotation
+  JWT_SECRET: string;
+  CORS_ALLOWED_ORIGINS: string[];
 }
 
 function validateEnv(): EnvConfig {
@@ -35,6 +36,18 @@ function validateEnv(): EnvConfig {
     throw new Error(errorMsg);
   }
 
+  // Load API Keys for rotation
+  const rawApiKeys = process.env.GATEWAY_API_KEY || process.env.GATEWAY_API_KEYS || "default_gateway_secure_key_12345";
+  const GATEWAY_API_KEYS = rawApiKeys.split(",").map(k => k.trim()).filter(Boolean);
+
+  const JWT_SECRET = process.env.JWT_SECRET || "default_secure_jwt_secret_998877";
+
+  // Load CORS Allowed Origins
+  const rawAllowedOrigins = process.env.CORS_ALLOWED_ORIGINS || "";
+  const CORS_ALLOWED_ORIGINS = rawAllowedOrigins
+    ? rawAllowedOrigins.split(",").map(o => o.trim()).filter(Boolean)
+    : ["*"]; // Default to wildcard or restrict as configured
+
   const config: EnvConfig = {
     PORT,
     NODE_ENV,
@@ -46,11 +59,12 @@ function validateEnv(): EnvConfig {
     PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY,
     PAYSTACK_PUBLIC_KEY: process.env.PAYSTACK_PUBLIC_KEY,
     PAYSTACK_WEBHOOK_SECRET: process.env.PAYSTACK_WEBHOOK_SECRET,
-    GATEWAY_API_KEY: process.env.GATEWAY_API_KEY,
-    JWT_SECRET: process.env.JWT_SECRET,
+    GATEWAY_API_KEYS,
+    JWT_SECRET,
+    CORS_ALLOWED_ORIGINS,
   };
 
-  logger.info(`[Config] Environment validated successfully. Mode: ${NODE_ENV}`);
+  logger.info(`[Config] Environment validated successfully. Mode: ${NODE_ENV} | Active API Keys loaded: ${GATEWAY_API_KEYS.length}`);
 
   return config;
 }
