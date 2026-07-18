@@ -137,3 +137,75 @@ npm test
   "message": "Duplicate transfer reference. This transaction has already been initiated."
 }
 ```
+
+---
+
+#### Create Permanent Virtual Account
+- **Endpoint:** `POST /api/flutterwave/create-virtual-account`
+- **Description:** Provisions a permanent virtual account for a user securely over the whitelisted static IP node.
+- **Request Body:**
+```json
+{
+  "email": "test-user@e-tech-hub.com",
+  "is_permanent": true,
+  "bvn": "22222222222",
+  "tx_ref": "va-user-123-999",
+  "phonenumber": "08012345678",
+  "firstname": "Sarah",
+  "lastname": "Connor"
+}
+```
+- **Success Response (HTTP 200):**
+```json
+{
+  "success": true,
+  "bank_name": "Wema Bank",
+  "account_number": "9981452901",
+  "account_name": "Sarah Connor - E-Tech",
+  "currency": "NGN",
+  "reference": "va-user-123-999"
+}
+```
+
+---
+
+#### Payment Verification
+- **Endpoint:** `POST /api/flutterwave/verify`
+- **Description:** Explicitly queries and verifies a transaction ID directly against Flutterwave's ledger.
+- **Request Body:**
+```json
+{
+  "transaction_id": "567890"
+}
+```
+- **Success Response (HTTP 200):**
+```json
+{
+  "success": true,
+  "status": "successful",
+  "amount": 2500,
+  "currency": "NGN",
+  "reference": "flw-tx-999-12345",
+  "flw_id": "567890",
+  "customer": {
+    "name": "John Doe",
+    "email": "john@doe.com",
+    "phone": "09088887777"
+  }
+}
+```
+
+---
+
+#### Transaction Webhook Handler
+- **Endpoint:** `POST /api/flutterwave/webhook`
+- **Description:** Secure webhook endpoint that processes signed Flutterwave transaction events (`charge.completed`) with built-in replay attack protection.
+- **Headers:**
+  - `verif-hash`: `<hash>`
+- **Response (HTTP 200):**
+```json
+{
+  "success": true,
+  "message": "Webhook payload verified and captured."
+}
+```

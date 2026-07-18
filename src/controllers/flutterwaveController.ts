@@ -2,15 +2,16 @@ import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import logger from "../config/logger";
 import { AccountResolutionService } from "../services/accountResolutionService";
-import { TransferService } from "../services/transferService";
+import { TransferService, InMemoryIdempotency } from "../services/transferService";
+import { PaymentVerificationService } from "../services/paymentVerificationService";
+import { getFlutterwaveClient } from "../providers/flutterwave";
 
-// Zod Schema for account resolution
+// Zod Schemas
 const resolveAccountSchema = z.object({
   account_number: z.string().regex(/^\d+$/, "Account number must contain only digits").min(5, "Account number is too short").max(15, "Account number is too long"),
   bank_code: z.string().regex(/^\d+$/, "Bank code must contain only digits").min(3, "Bank code is too short").max(10, "Bank code is too long"),
 });
 
-// Zod Schema for transfer execution
 const transferSchema = z.object({
   amount: z.number().positive("Amount must be greater than zero"),
   account_number: z.string().regex(/^\d+$/, "Account number must contain only digits").min(5, "Account number is too short").max(15, "Account number is too long"),
@@ -19,6 +20,20 @@ const transferSchema = z.object({
   currency: z.string().length(3, "Currency must be a 3-letter code (e.g. NGN)"),
   narration: z.string().min(1, "Narration is required"),
   reference: z.string().min(3, "Reference is required"),
+});
+
+const createVirtualAccountSchema = z.object({
+  email: z.string().email("Invalid email address"),
+  is_permanent: z.boolean(),
+  bvn: z.string().regex(/^\d*$/, "BVN must contain only digits").max(11, "BVN must be up to 11 digits").optional().or(z.literal("")),
+  tx_ref: z.string().min(3, "tx_ref is required"),
+  phonenumber: z.string().min(5, "Phone number is too short"),
+  firstname: z.string().min(1, "Firstname is required"),
+  lastname: z.string().min(1, "Lastname is required"),
+});
+
+const verifyPaymentSchema = z.object({
+  transaction_id: z.string().min(1, "transaction_id is required"),
 });
 
 const transferService = new TransferService();
@@ -75,7 +90,6 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
   logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId}`);
 
   try {
-    // 1. Validate request body using Zod
     const validationResult = transferSchema.safeParse(req.body);
     if (!validationResult.success) {
       const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
@@ -89,7 +103,6 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
 
     const payload = validationResult.data;
 
-    // 2. Execute Transfer via service layer
     const result = await transferService.executeTransfer({
       ...payload,
       requestId: reqId,
@@ -120,48 +133,168 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
   }
 };
 
+export const createVirtualAccount = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received createVirtualAccount request | reqId=${reqId}`);
+
+  try {
+    const validationResult = createVirtualAccountSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
+      logger.warn(`[Flutterwave Controller] Create Virtual Account validation failed | errors=${errorMsg} | reqId=${reqId}`);
+      res.status(400).json({
+        success: false,
+        message: `Validation Error: ${errorMsg}`,
+      });
+      return;
+    }
+
+    const payload = validationResult.data;
+
+    const result = await PaymentVerificationService.createVirtualAccount({
+      ...payload,
+      bvn: payload.bvn || "",
+      requestId: reqId,
+    });
+
+    if (result.success) {
+      res.status(200).json(result);
+    } else {
+      res.status(400).json(result);
+    }
+
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] createVirtualAccount exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while creating virtual account.",
+    });
+  }
+};
+
+export const verifyPayment = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received verifyPayment request | reqId=${reqId}`);
+
+  try {
+    const validationResult = verifyPaymentSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
+      logger.warn(`[Flutterwave Controller] Verify Payment validation failed | errors=${errorMsg} | reqId=${reqId}`);
+      res.status(400).json({
+        success: false,
+        message: `Validation Error: ${errorMsg}`,
+      });
+      return;
+    }
+
+    const { transaction_id } = validationResult.data;
+
+    const result = await PaymentVerificationService.verifyTransaction({
+      transaction_id,
+      requestId: reqId,
+    });
+
+    if (result.success) {
+      res.status(200).json(result);
+    } else {
+      res.status(400).json(result);
+    }
+
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] verifyPayment exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while verifying payment.",
+    });
+  }
+};
+
+export const handleWebhook = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received Webhook request | reqId=${reqId}`);
+
+  try {
+    const signature = req.headers["verif-hash"] as string || "";
+    const rawBodyString = JSON.stringify(req.body);
+
+    const client = getFlutterwaveClient();
+
+    // 1. Signature validation
+    const isValidSignature = client.verifyWebhookSignature(signature, rawBodyString);
+    if (!isValidSignature) {
+      logger.warn(`[Flutterwave Controller] Unauthorized Webhook Signature received | reqId=${reqId}`);
+      res.status(401).json({
+        success: false,
+        message: "Unauthorized signature hash mismatch.",
+      });
+      return;
+    }
+
+    const payload = req.body;
+    logger.info(`[Flutterwave Controller] Webhook signature verified successfully | event=${payload.event || payload["event.type"]} | reqId=${reqId}`);
+
+    // 2. Validate Event Type
+    const eventType = payload.event || payload["event.type"];
+    if (eventType !== "charge.completed") {
+      logger.info(`[Flutterwave Controller] Ignoring non-charge event: ${eventType} | reqId=${reqId}`);
+      res.status(200).json({
+        success: true,
+        message: "Webhook event ignored gracefully.",
+      });
+      return;
+    }
+
+    // 3. Duplicate Webhook Protection (Idempotency)
+    const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref;
+    if (!transactionId) {
+      logger.warn(`[Flutterwave Controller] Webhook payload missing transaction identifier | reqId=${reqId}`);
+      res.status(400).json({
+        success: false,
+        message: "Invalid webhook payload structure.",
+      });
+      return;
+    }
+
+    const idempotency = InMemoryIdempotency.getInstance();
+    const isDuplicate = await idempotency.isDuplicate(transactionId);
+    if (isDuplicate) {
+      logger.warn(`[Flutterwave Controller] Webhook already processed (Duplicate protection) | transactionId=${transactionId} | reqId=${reqId}`);
+      res.status(200).json({
+        success: true,
+        message: "Webhook already processed successfully.",
+      });
+      return;
+    }
+
+    // Mark as processed immediately
+    await idempotency.saveReference(transactionId);
+
+    logger.info(
+      `[Flutterwave Controller] Webhook processed successfully | transactionId=${transactionId} | ref=${payload.data?.tx_ref} | reqId=${reqId}`
+    );
+
+    // Secure response format: Return 200 OK without executing user wallet updates (done in Next.js)
+    res.status(200).json({
+      success: true,
+      message: "Webhook payload verified and captured.",
+    });
+
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] handleWebhook exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while handling webhook.",
+    });
+  }
+};
+
 export const initiateBulkTransfer = async (req: Request, res: Response, next: NextFunction) => {
   try {
     logger.info("[Flutterwave Controller] initiateBulkTransfer stub called");
     res.status(501).json({
       success: false,
       message: "Bulk transfer is not implemented yet in this phase.",
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const createVirtualAccount = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    logger.info("[Flutterwave Controller] createVirtualAccount stub called");
-    res.status(501).json({
-      success: false,
-      message: "Virtual account creation is not implemented yet in this phase.",
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const verifyPayment = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    logger.info("[Flutterwave Controller] verifyPayment stub called");
-    res.status(501).json({
-      success: false,
-      message: "Payment verification is not implemented yet in this phase.",
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const handleWebhook = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    logger.info("[Flutterwave Controller] handleWebhook stub called");
-    res.status(501).json({
-      success: false,
-      message: "Webhook verification is not implemented yet in this phase.",
     });
   } catch (error) {
     next(error);
