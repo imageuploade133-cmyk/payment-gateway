@@ -1,9 +1,10 @@
 import { Router } from "express";
 import * as flwController from "../controllers/flutterwaveController";
+import { accountResolutionRateLimiter } from "../middleware/rateLimiter";
 
 const router = Router();
 
-router.post("/resolve-account", flwController.resolveAccount);
+router.post("/resolve-account", accountResolutionRateLimiter, flwController.resolveAccount);
 router.post("/transfer", flwController.initiateTransfer);
 router.post("/bulk-transfer", flwController.initiateBulkTransfer);
 router.post("/create-virtual-account", flwController.createVirtualAccount);

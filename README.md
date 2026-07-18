@@ -16,33 +16,6 @@ This microservice runs on a Google Cloud VM with a Static IP to fulfill IP white
 
 ---
 
-## Project Structure
-```
-payment-gateway/
-├── src/
-│   ├── config/            # Environment validation, logging setup
-│   ├── controllers/       # Route request handlers
-│   ├── middleware/        # Authentication, Error handling, Rate limiting
-│   ├── routes/            # Express endpoint maps
-│   ├── services/          # Business workflows
-│   ├── providers/         # Low-level payment provider APIs
-│   │   ├── flutterwave/
-│   │   ├── paystack/
-│   │   └── firebase/
-│   ├── utils/             # Helper libraries
-│   ├── types/             # Common TypeScript definitions
-│   ├── app.ts             # Express App definition
-│   └── server.ts          # Server entrypoint
-├── .github/workflows/     # CI/CD deployment
-├── ecosystem.config.js    # PM2 process config
-├── .env.example           # Reference environment parameters
-├── README.md              # Documentation
-├── package.json           # Dependencies
-└── tsconfig.json          # TS compilation profile
-```
-
----
-
 ## Getting Started
 
 ### Installation
@@ -59,4 +32,60 @@ npm run dev
 ```bash
 npm run build
 npm start
+```
+
+### Running Tests
+```bash
+npm test
+```
+
+---
+
+## API Documentation
+
+### System & Health
+
+#### Get Service Health
+- **Endpoint:** `GET /health`
+- **Description:** Returns the current operational status of the gateway.
+- **Response:**
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+### Flutterwave Provider
+
+#### Account Resolution
+- **Endpoint:** `POST /api/flutterwave/resolve-account`
+- **Description:** Securely resolves and verifies bank account details using the whitelisted Flutterwave provider bridge.
+- **Rate Limit:** 30 attempts per 15 minutes per IP.
+- **Headers:**
+  - `Content-Type: application/json`
+  - `X-Request-ID: <optional-unique-uuid>` (Auto-generated if omitted)
+- **Request Body:**
+```json
+{
+  "account_number": "0123456789",
+  "bank_code": "044"
+}
+```
+- **Success Response (HTTP 200):**
+```json
+{
+  "success": true,
+  "account_name": "JOHN DOE",
+  "account_number": "0123456789",
+  "bank_code": "044"
+}
+```
+- **Error Response (HTTP 400):**
+```json
+{
+  "success": false,
+  "message": "Unable to verify account details. Please check the bank and account number."
+}
 ```
