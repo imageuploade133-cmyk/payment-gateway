@@ -19,20 +19,30 @@ app.use(requestIdMiddleware);
 app.use(helmet());
 
 // Hardened CORS origin whitelisting
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || env.CORS_ALLOWED_ORIGINS.includes("*")) {
-      return callback(null, true);
-    }
-    if (env.CORS_ALLOWED_ORIGINS.includes(origin)) {
-      return callback(null, true);
-    }
-    logger.warn(`[CORS] Request origin blocked: ${origin}`);
-    callback(new Error("CORS policy violation: origin not whitelisted."));
-  },
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Request-ID", "X-API-Key"],
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || env.CORS_ALLOWED_ORIGINS.includes("*")) {
+        return callback(null, true);
+      }
+
+      if (env.CORS_ALLOWED_ORIGINS.includes(origin)) {
+        return callback(null, true);
+      }
+
+      logger.warn(`[CORS] Request origin blocked: ${origin}`);
+      callback(new Error("CORS policy violation: origin not whitelisted."));
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "X-Request-ID",
+      "X-API-Key",
+    ],
+  })
+);
 
 // Request limiting
 app.use(standardRateLimiter);
@@ -40,7 +50,7 @@ app.use(standardRateLimiter);
 // Compression
 app.use(compression());
 
-// Strict Request Size Limits + Raw Body Capture for exact byte-for-byte webhook cryptographic validations
+// Strict Request Size Limits + Raw Body Capture
 app.use(
   express.json({
     limit: "10kb",
@@ -49,6 +59,7 @@ app.use(
     },
   })
 );
+
 app.use(
   express.urlencoded({
     extended: true,
@@ -63,14 +74,35 @@ app.use(
 const morganStream = {
   write: (message: string) => logger.http(message.trim()),
 };
+
 app.use(
   morgan(
     ":method :url :status :res[content-length] - :response-time ms | reqId=:req[x-request-id]",
-    { stream: morganStream }
+    {
+      stream: morganStream,
+    }
   )
 );
 
-// Mount all routes
+/**
+ * Root Route
+ * Shows a friendly message instead of "Cannot GET /"
+ */
+app.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    service: "E-Tech Payment Gateway",
+    status: "Running",
+    version: "1.0.0",
+    environment: env.NODE_ENV,
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: "/health",
+    },
+  });
+});
+
+// Mount all API routes
 app.use(routes);
 
 // Central error handler
