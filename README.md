@@ -10,9 +10,81 @@ This microservice runs on a Google Cloud VM with a Static IP to fulfill IP white
 - **Node.js 22 LTS**
 - **TypeScript**
 - **Express.js**
+- **Firebase Admin SDK** (Firestore-backed idempotency & transaction audit logs)
 - **Winston** (Structured logging)
 - **Helmet, CORS, Compression, Morgan** (Standard production middleware)
 - **Express Rate Limit** (DDoS/enumeration defense)
+
+---
+
+## Architecture Summary & High Availability (HA)
+The microservice strictly handles communication with payment providers (IP bound) and provides database-backed idempotency protection. The Next.js application remains the absolute source of truth for user profiles, wallet balances, PIN validation, and business rules.
+
+To guarantee maximum system availability, the gateway implements **Fault-Tolerant High Availability Fallbacks**:
+- If Firebase Admin credentials are not supplied or if Firestore experiences an outage, the microservice gracefully degrades and automatically switches to **`InMemoryIdempotency`** for processed references, ensuring payment flows never crash or block.
+
+---
+
+## Firestore Collection Design
+
+### 1. `gateway_idempotency_references`
+- **Purpose:** Prevents duplicate S2S payment/transfer execution (double-spending protection).
+- **Schema:**
+```typescript
+{
+  "reference": string,            // Document ID (Transaction Reference)
+  "provider": "flutterwave" | "paystack",
+  "provider_reference": string | null, // Provider transaction/transfer ID
+  "timestamp": string,            // ISO DateTime
+  "status": "success" | "pending" | "failed"
+}
+```
+
+### 2. `gateway_processed_webhooks`
+- **Purpose:** Webhook replay attack protection.
+- **Schema:**
+```typescript
+{
+  "transactionId": string,        // Document ID (Provider Transaction ID)
+  "provider": "flutterwave" | "paystack",
+  "eventType": string,            // e.g. "charge.completed"
+  "timestamp": string             // ISO DateTime
+}
+```
+
+---
+
+## Environment Variables Configuration
+
+Create a `.env` file in the root directory:
+
+```env
+# Server Configuration
+PORT=3055
+NODE_ENV=development
+
+# Security & CORS
+GATEWAY_API_KEYS=your_api_key_1,your_api_key_2 # Comma-separated for key rotation
+JWT_SECRET=your_jwt_secret_here
+CORS_ALLOWED_ORIGINS=https://yourwallet.vercel.app,http://localhost:3000
+
+# Flutterwave Configuration
+FLW_BASE_URL=https://api.flutterwave.com/v3
+FLW_PUBLIC_KEY=FLWPUBK-xxxxxxxxxxxxxxxxxxxxxxxx-X
+FLW_SECRET_KEY=FLWSECK-xxxxxxxxxxxxxxxxxxxxxxxx-X
+FLW_WEBHOOK_SECRET=your_flw_webhook_secret_here
+
+# Paystack Configuration
+PAYSTACK_BASE_URL=https://api.paystack.co
+PAYSTACK_PUBLIC_KEY=pk_test_xxxxxxxxxxxxxxxxxxxxxxxx
+PAYSTACK_SECRET_KEY=sk_test_xxxxxxxxxxxxxxxxxxxxxxxx
+PAYSTACK_WEBHOOK_SECRET=your_paystack_webhook_secret_here
+
+# Firebase Admin configuration
+FIREBASE_PROJECT_ID=e-tech-global-hub
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@e-tech-global-hub.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC...\n-----END PRIVATE KEY-----\n"
+```
 
 ---
 
@@ -47,7 +119,6 @@ npm test
 
 #### Get Service Health
 - **Endpoint:** `GET /health`
-- **Description:** Returns the current operational status of the gateway.
 - **Response:**
 ```json
 {
@@ -57,15 +128,10 @@ npm test
 
 ---
 
-### Flutterwave Provider
+### Flutterwave Provider Endpoints
 
 #### Account Resolution
 - **Endpoint:** `POST /api/flutterwave/resolve-account`
-- **Description:** Securely resolves and verifies bank account details using the whitelisted Flutterwave provider bridge.
-- **Rate Limit:** 30 attempts per 15 minutes per IP.
-- **Headers:**
-  - `Content-Type: application/json`
-  - `X-Request-ID: <optional-unique-uuid>` (Auto-generated if omitted)
 - **Request Body:**
 ```json
 {
@@ -82,23 +148,11 @@ npm test
   "bank_code": "044"
 }
 ```
-- **Error Response (HTTP 400):**
-```json
-{
-  "success": false,
-  "message": "Unable to verify account details. Please check the bank and account number."
-}
-```
 
 ---
 
 #### Initiate Outward Transfer
 - **Endpoint:** `POST /api/flutterwave/transfer`
-- **Description:** Securely executes an outward single bank transfer using Flutterwave with built-in in-memory idempotency defense, automatic transient error retries, and request ID log binding.
-- **Rate Limit:** 10 requests per 15 minutes per IP.
-- **Headers:**
-  - `Content-Type: application/json`
-  - `X-Request-ID: <optional-unique-uuid>` (Auto-generated if omitted)
 - **Request Body:**
 ```json
 {
@@ -121,28 +175,11 @@ npm test
   "message": "Transfer initiated successfully."
 }
 ```
-- **Error Response (HTTP 400 - Validation/Provider Error):**
-```json
-{
-  "success": false,
-  "reference": "salary-999-2026-07",
-  "message": "Transfer could not be processed. Please check account details or try again later."
-}
-```
-- **Error Response (HTTP 400 - Duplicate Reference):**
-```json
-{
-  "success": false,
-  "reference": "salary-999-2026-07",
-  "message": "Duplicate transfer reference. This transaction has already been initiated."
-}
-```
 
 ---
 
 #### Create Permanent Virtual Account
 - **Endpoint:** `POST /api/flutterwave/create-virtual-account`
-- **Description:** Provisions a permanent virtual account for a user securely over the whitelisted static IP node.
 - **Request Body:**
 ```json
 {
@@ -171,7 +208,6 @@ npm test
 
 #### Payment Verification
 - **Endpoint:** `POST /api/flutterwave/verify`
-- **Description:** Explicitly queries and verifies a transaction ID directly against Flutterwave's ledger.
 - **Request Body:**
 ```json
 {
@@ -199,7 +235,6 @@ npm test
 
 #### Transaction Webhook Handler
 - **Endpoint:** `POST /api/flutterwave/webhook`
-- **Description:** Secure webhook endpoint that processes signed Flutterwave transaction events (`charge.completed`) with built-in replay attack protection.
 - **Headers:**
   - `verif-hash`: `<hash>`
 - **Response (HTTP 200):**

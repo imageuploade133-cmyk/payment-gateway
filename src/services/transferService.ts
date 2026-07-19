@@ -1,5 +1,6 @@
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import logger from "../config/logger";
+import { FirestoreIdempotency } from "./firestoreIdempotency";
 
 export interface IdempotencyProvider {
   isDuplicate(reference: string): Promise<boolean>;
@@ -8,7 +9,7 @@ export interface IdempotencyProvider {
 
 export class InMemoryIdempotency implements IdempotencyProvider {
   private static instance: InMemoryIdempotency;
-  private cache = new Set<string>();
+  public cache = new Set<string>();
 
   private constructor() {}
 
@@ -50,7 +51,7 @@ export interface TransferResult {
 export class TransferService {
   private idempotencyProvider: IdempotencyProvider;
 
-  constructor(idempotencyProvider: IdempotencyProvider = InMemoryIdempotency.getInstance()) {
+  constructor(idempotencyProvider: IdempotencyProvider = FirestoreIdempotency.getInstance()) {
     this.idempotencyProvider = idempotencyProvider;
   }
 
@@ -78,7 +79,7 @@ export class TransferService {
       };
     }
 
-    // Save reference immediately to prevent race conditions
+    // Save reference immediately as pending to defend against high-frequency race conditions
     await this.idempotencyProvider.saveReference(reference);
 
     try {
@@ -91,7 +92,7 @@ export class TransferService {
         narration,
         currency,
         reference,
-        callback_url: undefined, // Handled if webhooks are fully integrated
+        callback_url: undefined,
       };
 
       const response = await client.request("post", "/transfers", payload);
@@ -103,6 +104,11 @@ export class TransferService {
         logger.info(
           `[TransferService] Transfer successfully accepted by Flutterwave | reference=${reference} | flwId=${flwId} | status=${flwStatus} | reqId=${requestId}`
         );
+
+        // Update status and provider reference in Firestore idempotency log
+        if (typeof (this.idempotencyProvider as any).saveReference === "function") {
+          await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", flwStatus === "successful" ? "success" : "pending", flwId);
+        }
 
         return {
           success: true,
@@ -129,8 +135,11 @@ export class TransferService {
         `[TransferService] Transfer failed on provider rail | reference=${reference} | error=${errorMsg} | reqId=${requestId}`
       );
 
-      // Map standard transient/terminal provider failures safely
-      // Never expose database structures or private provider error details downstream
+      // Update status as failed inside Firestore
+      if (typeof (this.idempotencyProvider as any).saveReference === "function") {
+        await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", "failed");
+      }
+
       return {
         success: false,
         reference,

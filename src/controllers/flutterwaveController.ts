@@ -2,9 +2,10 @@ import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import logger from "../config/logger";
 import { AccountResolutionService } from "../services/accountResolutionService";
-import { TransferService, InMemoryIdempotency } from "../services/transferService";
+import { TransferService } from "../services/transferService";
 import { PaymentVerificationService } from "../services/paymentVerificationService";
 import { getFlutterwaveClient } from "../providers/flutterwave";
+import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 
 // Zod Schemas
 const resolveAccountSchema = z.object({
@@ -245,7 +246,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // 3. Duplicate Webhook Protection (Idempotency)
+    // 3. Duplicate Webhook Protection (Firestore-backed)
     const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref;
     if (!transactionId) {
       logger.warn(`[Flutterwave Controller] Webhook payload missing transaction identifier | reqId=${reqId}`);
@@ -256,8 +257,8 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
       return;
     }
 
-    const idempotency = InMemoryIdempotency.getInstance();
-    const isDuplicate = await idempotency.isDuplicate(transactionId);
+    const idempotency = FirestoreIdempotency.getInstance();
+    const isDuplicate = await idempotency.isWebhookDuplicate(transactionId);
     if (isDuplicate) {
       logger.warn(`[Flutterwave Controller] Webhook already processed (Duplicate protection) | transactionId=${transactionId} | reqId=${reqId}`);
       res.status(200).json({
@@ -267,14 +268,13 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // Mark as processed immediately
-    await idempotency.saveReference(transactionId);
+    // Mark as processed in Firestore and memory immediately
+    await idempotency.saveWebhookProcessed(transactionId, eventType);
 
     logger.info(
       `[Flutterwave Controller] Webhook processed successfully | transactionId=${transactionId} | ref=${payload.data?.tx_ref} | reqId=${reqId}`
     );
 
-    // Secure response format: Return 200 OK without executing user wallet updates (done in Next.js)
     res.status(200).json({
       success: true,
       message: "Webhook payload verified and captured.",
