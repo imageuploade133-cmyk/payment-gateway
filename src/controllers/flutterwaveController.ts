@@ -37,6 +37,16 @@ const verifyPaymentSchema = z.object({
   transaction_id: z.string().min(1, "transaction_id is required"),
 });
 
+const initializePaymentSchema = z.object({
+  amount: z.number().positive(),
+  currency: z.string(),
+  email: z.string().email(),
+  name: z.string(),
+  userId: z.string(),
+  redirectUrl: z.string(),
+  phone: z.string().optional(),
+});
+
 const transferService = new TransferService();
 
 export const resolveAccount = async (req: Request, res: Response, next: NextFunction) => {
@@ -173,6 +183,105 @@ export const createVirtualAccount = async (req: Request, res: Response, next: Ne
   }
 };
 
+export const initializePayment = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received initializePayment request | reqId=${reqId}`);
+
+  try {
+    const validationResult = initializePaymentSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
+      logger.warn(`[Flutterwave Controller] Validation failed | errors=${errorMsg} | reqId=${reqId}`);
+      res.status(400).json({
+        success: false,
+        message: `Validation Error: ${errorMsg}`,
+      });
+      return;
+    }
+
+    const { amount, currency, email, name, userId, redirectUrl, phone } = validationResult.data;
+    const tx_ref = `flw-tx-${userId}-${Date.now()}`;
+
+    const client = getFlutterwaveClient();
+    const response = await client.request("post", "/payments", {
+      tx_ref,
+      amount,
+      currency,
+      redirect_url: redirectUrl,
+      customer: {
+        email,
+        name,
+        phone_number: phone,
+      },
+      customizations: {
+        title: "E-Tech Global Wallet Fund",
+        description: "Wallet Provisioning Settlement Link",
+        logo: "https://i.ibb.co/WWjZrtC7/E-Tech.png",
+      },
+      meta: {
+        userId,
+      },
+    });
+
+    if (response && response.status === "success" && response.data) {
+      res.status(200).json({
+        success: true,
+        paymentLink: response.data.link,
+        reference: tx_ref,
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        reference: tx_ref,
+        message: response.message || "Failed to initialize payment.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] initializePayment exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while initializing payment.",
+    });
+  }
+};
+
+export const verifyTransfer = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received verifyTransfer request | reqId=${reqId}`);
+
+  try {
+    const { reference } = req.body;
+    if (!reference) {
+      res.status(400).json({
+        success: false,
+        message: "reference is required.",
+      });
+      return;
+    }
+
+    const client = getFlutterwaveClient();
+    const response = await client.request("get", `/transfers?reference=${reference}`);
+
+    if (response && response.status === "success" && Array.isArray(response.data)) {
+      res.status(200).json({
+        success: true,
+        data: response.data,
+      });
+    } else {
+      res.status(404).json({
+        success: false,
+        message: "No transfer found with this reference.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] verifyTransfer exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while verifying transfer.",
+    });
+  }
+};
+
 export const verifyPayment = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received verifyPayment request | reqId=${reqId}`);
@@ -292,13 +401,158 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 };
 
 export const initiateBulkTransfer = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received initiateBulkTransfer request | reqId=${reqId}`);
+
   try {
-    logger.info("[Flutterwave Controller] initiateBulkTransfer stub called");
-    res.status(501).json({
-      success: false,
-      message: "Bulk transfer is not implemented yet in this phase.",
+    const { title, bulk_data } = req.body;
+    if (!bulk_data || !Array.isArray(bulk_data)) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid payload: bulk_data must be an array.",
+      });
+      return;
+    }
+
+    const client = getFlutterwaveClient();
+    const response = await client.request("post", "/bulk-transfers", {
+      title: title || "Bulk Settlement",
+      bulk_data,
     });
-  } catch (error) {
-    next(error);
+
+    if (response && response.status === "success" && response.data) {
+      res.status(200).json({
+        success: true,
+        data: response.data,
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: response.message || "Bulk transfer dispatch failed.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] initiateBulkTransfer exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while processing bulk transfer.",
+    });
+  }
+};
+
+export const proxy = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received proxy request | reqId=${reqId}`);
+
+  try {
+    const { method, endpoint, body } = req.body;
+    if (!endpoint) {
+      res.status(400).json({
+        success: false,
+        message: "endpoint is required.",
+      });
+      return;
+    }
+
+    let targetUrl = endpoint;
+    if (!targetUrl.startsWith("/")) {
+      targetUrl = "/" + targetUrl;
+    }
+
+    const client = getFlutterwaveClient();
+    const response = await client.request(
+      (method || "get").toLowerCase() as any,
+      targetUrl,
+      body || undefined
+    );
+
+    res.status(200).json(response);
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] proxy exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: error.message || "An internal error occurred during proxy request.",
+    });
+  }
+};
+
+export const getBanks = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received getBanks request | reqId=${reqId}`);
+
+  try {
+    const client = getFlutterwaveClient();
+    const response = await client.request("get", "/banks/NG");
+
+    res.status(200).json(response);
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getBanks exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while fetching banks.",
+    });
+  }
+};
+
+export const charge = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received charge request | reqId=${reqId}`);
+
+  try {
+    const { type } = req.query;
+    const client = getFlutterwaveClient();
+    const response = await client.request("post", `/charges?type=${type}`, req.body);
+
+    res.status(200).json(response);
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] charge exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while processing charge.",
+    });
+  }
+};
+
+export const payBill = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received payBill request | reqId=${reqId}`);
+
+  try {
+    const { country, customer, amount, recurrence, type, reference } = req.body;
+    if (!customer || !amount || !type || !reference) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid payload: customer, amount, type, and reference are required.",
+      });
+      return;
+    }
+
+    const client = getFlutterwaveClient();
+    const response = await client.request("post", "/bills", {
+      country: country || "NG",
+      customer,
+      amount,
+      recurrence: recurrence || "ONCE",
+      type,
+      reference,
+    });
+
+    if (response && response.status === "success" && response.data) {
+      res.status(200).json({
+        success: true,
+        data: response.data,
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: response.message || "Bill payment failed on provider rail.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] payBill exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while processing bill payment.",
+    });
   }
 };
