@@ -1,0 +1,84 @@
+name: Secure Payment Gateway CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test_and_build:
+    name: Build & Test Stage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install local package dependencies
+        run: npm ci
+
+      - name: Run Jest test suite
+        run: npm test
+
+      - name: Compile and build production files
+        run: npm run build
+
+  deploy_to_gcp:
+    name: Production GCP Deployment Stage
+    needs: test_and_build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: SSH and Execute Remote Commands on VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GCP_VM_HOST }}
+          username: ${{ secrets.GCP_VM_USER }}
+          key: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            set -e # Stop immediately if any command fails
+
+            echo "=================================================="
+            echo "🚀 Starting Secure Pull & Rebuild on GCP static VM"
+            echo "=================================================="
+
+            cd /home/${{ secrets.GCP_VM_USER }}/payment-gateway
+
+            # Stash any local modifications to prevent merge crashes
+            git stash || true
+
+            # Pull main
+            git pull origin main
+
+            # Install and compile
+            npm ci
+            npm run build
+
+            # Graceful clustering restart under PM2
+            pm2 reload ecosystem.config.js --env production
+
+            echo "=================================================="
+            echo "🧪 Starting post-deploy health check..."
+            echo "=================================================="
+
+            # Allow 3 seconds to spin up completely
+            sleep 3
+
+            # Verify health check endpoint returns 200 ok
+            HEALTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3055/health)
+            if [ "$HEALTH_STATUS" -eq 200 ]; then
+              echo "✅ Health check passed: status is operational (HTTP 200)"
+            else
+              echo "❌ Health check failed! Returned status: $HEALTH_STATUS. Rolling back..."
+              pm2 rollback payment-gateway || true
+              exit 1
+            fi
