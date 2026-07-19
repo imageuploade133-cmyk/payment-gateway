@@ -1,11 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 
-// Extend Express Request interface to include requestId
+// Extend Express Request interface
 declare global {
   namespace Express {
     interface Request {
       requestId: string;
+      rawBody?: Buffer;
     }
   }
 }

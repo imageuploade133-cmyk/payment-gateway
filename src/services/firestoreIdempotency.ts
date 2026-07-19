@@ -33,7 +33,6 @@ export class FirestoreIdempotency implements IdempotencyProvider {
         return true;
       }
 
-      // Check memory fallback as well just in case of transition states
       return this.memoryFallback.isDuplicate(reference);
 
     } catch (error: any) {
@@ -46,7 +45,6 @@ export class FirestoreIdempotency implements IdempotencyProvider {
    * Securely persists the reference inside Firestore collection with audit parameters.
    */
   public async saveReference(reference: string, provider = "flutterwave", status = "pending", providerReference?: string): Promise<void> {
-    // Keep memory fallback in sync to guarantee continuity
     await this.memoryFallback.saveReference(reference);
 
     if (!adminDb) {
@@ -57,7 +55,7 @@ export class FirestoreIdempotency implements IdempotencyProvider {
     try {
       const docRef = adminDb.collection("gateway_idempotency_references").doc(reference);
 
-      // Perform inside an atomic Firestore write or simple document set
+      // Perform atomic Firestore write
       await docRef.set({
         provider,
         reference,
@@ -100,7 +98,7 @@ export class FirestoreIdempotency implements IdempotencyProvider {
   }
 
   /**
-   * Persists a processed Webhook Event ID to prevent double processing.
+   * Persists a processed Webhook Event ID atomically.
    */
   public async saveWebhookProcessed(transactionId: string, eventType = "charge.completed", provider = "flutterwave"): Promise<void> {
     await this.memoryFallback.saveReference(`wh-${transactionId}`);

@@ -10,6 +10,8 @@ export interface IdempotencyProvider {
 export class InMemoryIdempotency implements IdempotencyProvider {
   private static instance: InMemoryIdempotency;
   public cache = new Set<string>();
+  private insertionOrder: string[] = [];
+  private maxKeys = 10000; // Strictly bound cache to 10k items to prevent boundless memory growth
 
   private constructor() {}
 
@@ -25,7 +27,15 @@ export class InMemoryIdempotency implements IdempotencyProvider {
   }
 
   public async saveReference(reference: string): Promise<void> {
+    if (this.cache.has(reference)) return;
+    if (this.cache.size >= this.maxKeys) {
+      const oldest = this.insertionOrder.shift();
+      if (oldest) {
+        this.cache.delete(oldest);
+      }
+    }
     this.cache.add(reference);
+    this.insertionOrder.push(reference);
   }
 }
 

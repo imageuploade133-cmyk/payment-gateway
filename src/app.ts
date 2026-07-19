@@ -21,7 +21,6 @@ app.use(helmet());
 // Hardened CORS origin whitelisting
 app.use(cors({
   origin: (origin, callback) => {
-    // If no origin is supplied (e.g. backend curl or local requests) or if allowed origin is wildcard
     if (!origin || env.CORS_ALLOWED_ORIGINS.includes("*")) {
       return callback(null, true);
     }
@@ -41,9 +40,24 @@ app.use(standardRateLimiter);
 // Compression
 app.use(compression());
 
-// Strict Request Size Limits (prevents payload-bloat/denial-of-service memory exhaustions)
-app.use(express.json({ limit: "10kb" }));
-app.use(express.urlencoded({ extended: true, limit: "10kb" }));
+// Strict Request Size Limits + Raw Body Capture for exact byte-for-byte webhook cryptographic validations
+app.use(
+  express.json({
+    limit: "10kb",
+    verify: (req: any, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: "10kb",
+    verify: (req: any, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 
 // HTTP Request logging with Request ID
 const morganStream = {

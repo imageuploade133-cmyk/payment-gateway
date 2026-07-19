@@ -217,7 +217,9 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
   try {
     const signature = req.headers["verif-hash"] as string || "";
-    const rawBodyString = JSON.stringify(req.body);
+
+    // Utilize 100% exact rawBody buffer string for HMAC validation if populated
+    const rawBodyString = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
 
     const client = getFlutterwaveClient();
 
