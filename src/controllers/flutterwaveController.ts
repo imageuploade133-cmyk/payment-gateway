@@ -52,9 +52,16 @@ const transferService = new TransferService();
 export const resolveAccount = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received resolveAccount request | reqId=${reqId}`);
+  logger.info("Resolve request body:", req.body);
 
   try {
-    const validationResult = resolveAccountSchema.safeParse(req.body);
+    const body = {
+      account_number: req.body.account_number ?? req.body.accountNumber,
+      bank_code: req.body.bank_code ?? req.body.bankCode ?? req.body.account_bank ?? req.body.accountBank,
+    };
+    logger.info(`[Flutterwave Controller] Normalized resolveAccount body:`, body);
+
+    const validationResult = resolveAccountSchema.safeParse(body);
     if (!validationResult.success) {
       const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
       logger.warn(`[Flutterwave Controller] Validation failed | errors=${errorMsg} | reqId=${reqId}`);
