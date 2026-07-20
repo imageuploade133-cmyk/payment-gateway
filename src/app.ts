@@ -12,6 +12,9 @@ import { env } from "./config/env";
 
 const app = express();
 
+// Trust reverse proxy (e.g. Nginx)
+app.set("trust proxy", true);
+
 // Request ID middleware (must be first)
 app.use(requestIdMiddleware);
 
