@@ -59,7 +59,7 @@ export const resolveAccount = async (req: Request, res: Response, next: NextFunc
       account_number: req.body.account_number ?? req.body.accountNumber,
       bank_code: req.body.bank_code ?? req.body.bankCode ?? req.body.account_bank ?? req.body.accountBank,
     };
-    logger.info(`[Flutterwave Controller] Normalized resolveAccount body:`, body);
+    logger.info("Normalized body:", body);
 
     const validationResult = resolveAccountSchema.safeParse(body);
     if (!validationResult.success) {
@@ -73,6 +73,11 @@ export const resolveAccount = async (req: Request, res: Response, next: NextFunc
     }
 
     const { account_number, bank_code } = validationResult.data;
+
+    logger.info("Sending to Flutterwave:", {
+      account_number,
+      account_bank: bank_code
+    });
 
     const result = await AccountResolutionService.resolveBankAccount({
       account_number,
