@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env";
 import logger from "../config/logger";
+import { firebase } from "../config/firebase";
 
 export interface AuthenticatedRequest extends Request {
   user?: any;
@@ -11,11 +12,11 @@ export interface AuthenticatedRequest extends Request {
  * Enterprise-grade gateway authentication middleware.
  * Supports API Key validation (with zero-downtime key rotation) and extensible JWT validation.
  */
-export function gatewayAuthMiddleware(
+export async function gatewayAuthMiddleware(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const reqId = req.requestId;
 
   // 1. Extract credentials from headers
@@ -38,18 +39,35 @@ export function gatewayAuthMiddleware(
 
   // 2. JWT Authentication path (Can be enabled/toggled)
   if (providedToken) {
-    try {
-      const decoded = jwt.verify(providedToken, env.JWT_SECRET);
-      req.user = decoded;
-      logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).sub || "unknown"} | reqId=${reqId}`);
-      return next();
-    } catch (error: any) {
-      logger.warn(`[Auth] JWT verification failed | error=${error.message} | reqId=${reqId}`);
-      res.status(401).json({
-        success: false,
-        message: "Unauthorized: Invalid or expired authentication token.",
-      });
-      return;
+    let firebaseVerified = false;
+
+    if (firebase.app) {
+      try {
+        const { getAuth } = require("firebase-admin/auth");
+        const decoded = await getAuth(firebase.app).verifyIdToken(providedToken);
+        req.user = decoded;
+        firebaseVerified = true;
+        logger.info(`[Auth] Firebase ID Token successfully verified | user=${decoded.uid} | reqId=${reqId}`);
+        return next();
+      } catch (fbError: any) {
+        logger.debug(`[Auth] Firebase token verification attempt failed or not a Firebase token | error=${fbError.message} | reqId=${reqId}`);
+      }
+    }
+
+    if (!firebaseVerified) {
+      try {
+        const decoded = jwt.verify(providedToken, env.JWT_SECRET);
+        req.user = decoded;
+        logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).sub || "unknown"} | reqId=${reqId}`);
+        return next();
+      } catch (error: any) {
+        logger.warn(`[Auth] JWT verification failed | error=${error.message} | reqId=${reqId}`);
+        res.status(401).json({
+          success: false,
+          message: "Unauthorized: Invalid or expired authentication token.",
+        });
+        return;
+      }
     }
   }
 
