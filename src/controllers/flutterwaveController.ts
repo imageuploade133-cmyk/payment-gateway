@@ -6,6 +6,8 @@ import { TransferService } from "../services/transferService";
 import { PaymentVerificationService } from "../services/paymentVerificationService";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FirestoreIdempotency } from "../services/firestoreIdempotency";
+import { adminDb } from "../config/firebase";
+import { AuthenticatedRequest } from "../middleware/auth";
 
 // Zod Schemas
 const resolveAccountSchema = z.object({
@@ -224,12 +226,92 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
   }
 };
 
-export const createVirtualAccount = async (req: Request, res: Response, next: NextFunction) => {
+export const getKycStatus = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received getKycStatus request | reqId=${reqId}`);
+
+  try {
+    const userId = (req.query.userId as string) || (req.body.userId as string) || req.user?.uid;
+    if (!userId || typeof userId !== "string" || userId.trim() === "") {
+      res.status(400).json({
+        success: false,
+        message: "userId query parameter or request body is required.",
+      });
+      return;
+    }
+
+    if (!adminDb) {
+      res.status(503).json({
+        success: false,
+        message: "Database service is temporarily unavailable.",
+      });
+      return;
+    }
+
+    logger.info(`[Flutterwave Controller] Reading KYC status and permanent account for user: ${userId}`);
+
+    const userDoc = await adminDb.collection("users").doc(userId).get();
+    const userData = userDoc.exists ? userDoc.data() : {};
+
+    const accountDoc = await adminDb.collection("wallet_accounts").doc(userId).get();
+    const accountData = accountDoc.exists ? accountDoc.data() : null;
+
+    res.status(200).json({
+      success: true,
+      userId,
+      kycStatus: userData?.kycStatus || "PENDING",
+      bvn: userData?.bvn || null,
+      nin: userData?.nin || null,
+      account: accountData ? {
+        bankName: accountData.bankName,
+        accountNumber: accountData.accountNumber,
+        accountName: accountData.accountName,
+        currency: accountData.currency || "NGN",
+      } : null,
+    });
+
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getKycStatus exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while retrieving KYC status.",
+    });
+  }
+};
+
+export const createVirtualAccount = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received createVirtualAccount request | reqId=${reqId}`);
   logger.info("Create Virtual Account incoming request body:", req.body);
 
   try {
+    const userId = req.body.userId ?? req.body.uid ?? req.user?.uid;
+
+    // 1. Guard: Check if the permanent virtual account already exists in Firebase
+    if (userId && adminDb) {
+      const accountDoc = await adminDb.collection("wallet_accounts").doc(userId).get();
+      if (accountDoc.exists) {
+        const accountData = accountDoc.data();
+        const userDoc = await adminDb.collection("users").doc(userId).get();
+        const userData = userDoc.exists ? userDoc.data() : {};
+
+        logger.info(`[Payment Gateway] Permanent virtual account already exists for user: ${userId}. Skipping duplicate creation.`);
+        res.status(200).json({
+          success: true,
+          alreadyExists: true,
+          bank_name: accountData?.bankName || "Wema Bank",
+          account_number: accountData?.accountNumber,
+          account_name: accountData?.accountName,
+          currency: accountData?.currency || "NGN",
+          reference: accountData?.txRef || accountData?.flwRef,
+          kycStatus: userData?.kycStatus || "VERIFIED",
+          bvn: userData?.bvn || null,
+          nin: userData?.nin || null,
+        });
+        return;
+      }
+    }
+
     const body = {
       email: req.body.email,
       is_permanent: req.body.is_permanent ?? req.body.isPermanent,
@@ -264,6 +346,38 @@ export const createVirtualAccount = async (req: Request, res: Response, next: Ne
     logger.info("Flutterwave virtual account response:", result);
 
     if (result.success) {
+      // 2. Persist dynamic KYC status and account details to Firestore
+      if (userId && adminDb) {
+        const accountRecord = {
+          userId,
+          accountNumber: result.account_number,
+          bankName: result.bank_name || "Wema Bank",
+          accountName: result.account_name,
+          currency: result.currency || "NGN",
+          flwRef: result.reference,
+          txRef: payload.tx_ref,
+          isPermanent: true,
+          status: "active",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await adminDb.collection("wallet_accounts").doc(userId).set(accountRecord, { merge: true });
+
+        const bvn = payload.bvn || "";
+        const isBvn = bvn && /^\d{11}$/.test(bvn);
+        await adminDb.collection("users").doc(userId).set({
+          kycStatus: "VERIFIED",
+          bvn: isBvn ? bvn : null,
+          nin: !isBvn ? bvn : null,
+        }, { merge: true });
+
+        // Add verified kyc info into returned response
+        (result as any).kycStatus = "VERIFIED";
+        (result as any).bvn = isBvn ? bvn : null;
+        (result as any).nin = !isBvn ? bvn : null;
+        logger.info(`[Payment Gateway] Successfully recorded and returned verified KYC & Account details for user: ${userId}`);
+      }
+
       res.status(200).json(result);
     } else {
       res.status(400).json(result);
