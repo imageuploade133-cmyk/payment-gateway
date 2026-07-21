@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getHealth, getReady, getLive } from "../controllers/systemController";
 import flutterwaveRoutes from "./flutterwaveRoutes";
 import paystackRoutes from "./paystackRoutes";
+import accountRoutes from "./accountRoutes";
 
 const router = Router();
 
@@ -13,5 +14,6 @@ router.get("/live", getLive);
 // Provider API routes
 router.use("/api/flutterwave", flutterwaveRoutes);
 router.use("/api/paystack", paystackRoutes);
+router.use("/api/accounts", accountRoutes);
 
 export default router;
