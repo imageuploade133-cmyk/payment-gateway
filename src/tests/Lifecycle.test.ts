@@ -68,11 +68,34 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         success: true,
-        bank_name: "Wema Bank",
+        status: "success",
+        alreadyExists: false,
+        isExisting: false,
+        is_existing: false,
+        accountNumber: "9981452901",
         account_number: "9981452901",
+        accountName: "Sarah Connor - E-Tech",
         account_name: "Sarah Connor - E-Tech",
+        bankName: "Wema Bank",
+        bank_name: "Wema Bank",
+        bankCode: "035",
+        bank_code: "035",
         currency: "NGN",
         reference: "va-user-123-999",
+        kycStatus: "VERIFIED",
+        bvn: null,
+        nin: null,
+        data: {
+          account_number: "9981452901",
+          account_name: "Sarah Connor - E-Tech",
+          bank_name: "Wema Bank",
+          bank_code: "035",
+          reference: "va-user-123-999",
+          is_existing: false,
+          kycStatus: "VERIFIED",
+          bvn: null,
+          nin: null,
+        }
       });
       expect(mockFlwClient.request).toHaveBeenCalledWith("post", "/virtual-account-numbers", {
         email: validVirtualAccountPayload.email,

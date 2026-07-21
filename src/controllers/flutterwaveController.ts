@@ -289,24 +289,64 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
 
     // 1. Guard: Check if the permanent virtual account already exists in Firebase
     if (userId && adminDb) {
-      const accountDoc = await adminDb.collection("wallet_accounts").doc(userId).get();
-      if (accountDoc.exists) {
-        const accountData = accountDoc.data();
-        const userDoc = await adminDb.collection("users").doc(userId).get();
-        const userData = userDoc.exists ? userDoc.data() : {};
+      try {
+        const accountDoc = await adminDb.collection("wallet_accounts").doc(userId).get();
+        if (accountDoc.exists) {
+          const accountData = accountDoc.data();
+          const userDoc = await adminDb.collection("users").doc(userId).get();
+          const userData = userDoc.exists ? userDoc.data() : {};
 
-        logger.info(`[Payment Gateway] Permanent virtual account already exists for user: ${userId}. Skipping duplicate creation.`);
-        res.status(200).json({
-          success: true,
-          alreadyExists: true,
-          bank_name: accountData?.bankName || "Wema Bank",
-          account_number: accountData?.accountNumber,
-          account_name: accountData?.accountName,
-          currency: accountData?.currency || "NGN",
-          reference: accountData?.txRef || accountData?.flwRef,
-          kycStatus: userData?.kycStatus || "VERIFIED",
-          bvn: userData?.bvn || null,
-          nin: userData?.nin || null,
+          logger.info(`[Payment Gateway] Permanent virtual account already exists for user: ${userId}. Skipping duplicate creation.`);
+
+          const finalResponse = {
+            success: true,
+            status: "success",
+            alreadyExists: true,
+            isExisting: true,
+            is_existing: true,
+            accountNumber: accountData?.accountNumber,
+            account_number: accountData?.accountNumber,
+            accountName: accountData?.accountName,
+            account_name: accountData?.accountName,
+            bankName: accountData?.bankName || "Wema Bank",
+            bank_name: accountData?.bankName || "Wema Bank",
+            bankCode: accountData?.bankCode || "035",
+            bank_code: accountData?.bankCode || "035",
+            reference: accountData?.txRef || accountData?.flwRef,
+            kycStatus: userData?.kycStatus || "VERIFIED",
+            bvn: userData?.bvn || null,
+            nin: userData?.nin || null,
+            data: {
+              account_number: accountData?.accountNumber,
+              account_name: accountData?.accountName,
+              bank_name: accountData?.bankName || "Wema Bank",
+              bank_code: accountData?.bankCode || "035",
+              reference: accountData?.txRef || accountData?.flwRef,
+              is_existing: true,
+              kycStatus: userData?.kycStatus || "VERIFIED",
+              bvn: userData?.bvn || null,
+              nin: userData?.nin || null,
+            }
+          };
+
+          logger.info(`[USSD Virtual Account Audit]`, {
+            firestoreDocumentPath: `wallet_accounts/${userId}`,
+            userUid: userId,
+            accountNumber: accountData?.accountNumber,
+            accountName: accountData?.accountName,
+            bankName: accountData?.bankName || "Wema Bank",
+            isExisting: true,
+            finalJsonReturned: finalResponse,
+          });
+
+          res.status(200).json(finalResponse);
+          return;
+        }
+      } catch (readErr: any) {
+        logger.error(`[Payment Gateway] Error reading existing virtual account document from Firestore: ${readErr.message}`);
+        res.status(400).json({
+          success: false,
+          message: `Unable to read existing virtual account: ${readErr.message}`,
         });
         return;
       }
@@ -347,6 +387,10 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
 
     if (result.success) {
       // 2. Persist dynamic KYC status and account details to Firestore
+      let kycStatus = "VERIFIED";
+      let bvnVal = null;
+      let ninVal = null;
+
       if (userId && adminDb) {
         const accountRecord = {
           userId,
@@ -365,20 +409,61 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
 
         const bvn = payload.bvn || "";
         const isBvn = bvn && /^\d{11}$/.test(bvn);
+        bvnVal = isBvn ? bvn : null;
+        ninVal = !isBvn ? bvn : null;
+
         await adminDb.collection("users").doc(userId).set({
           kycStatus: "VERIFIED",
-          bvn: isBvn ? bvn : null,
-          nin: !isBvn ? bvn : null,
+          bvn: bvnVal,
+          nin: ninVal,
         }, { merge: true });
 
-        // Add verified kyc info into returned response
-        (result as any).kycStatus = "VERIFIED";
-        (result as any).bvn = isBvn ? bvn : null;
-        (result as any).nin = !isBvn ? bvn : null;
-        logger.info(`[Payment Gateway] Successfully recorded and returned verified KYC & Account details for user: ${userId}`);
+        logger.info(`[Payment Gateway] Successfully recorded verified KYC & Account details for user: ${userId}`);
       }
 
-      res.status(200).json(result);
+      const finalResponse = {
+        success: true,
+        status: "success",
+        alreadyExists: false,
+        isExisting: false,
+        is_existing: false,
+        accountNumber: result.account_number,
+        account_number: result.account_number,
+        accountName: result.account_name,
+        account_name: result.account_name,
+        bankName: result.bank_name || "Wema Bank",
+        bank_name: result.bank_name || "Wema Bank",
+        bankCode: "035",
+        bank_code: "035",
+        currency: result.currency || "NGN",
+        reference: result.reference,
+        kycStatus: kycStatus,
+        bvn: bvnVal,
+        nin: ninVal,
+        data: {
+          account_number: result.account_number,
+          account_name: result.account_name,
+          bank_name: result.bank_name || "Wema Bank",
+          bank_code: "035",
+          reference: result.reference,
+          is_existing: false,
+          kycStatus: kycStatus,
+          bvn: bvnVal,
+          nin: ninVal,
+        }
+      };
+
+      logger.info(`[USSD Virtual Account Audit]`, {
+        firestoreDocumentPath: userId ? `wallet_accounts/${userId}` : "N/A",
+        userUid: userId || "N/A",
+        accountNumber: result.account_number,
+        accountName: result.account_name,
+        bankName: result.bank_name || "Wema Bank",
+        isExisting: false,
+        finalJsonReturned: finalResponse,
+      });
+
+      res.status(200).json(finalResponse);
     } else {
       res.status(400).json(result);
     }
