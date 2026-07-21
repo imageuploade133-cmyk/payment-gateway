@@ -108,12 +108,77 @@ export const resolveAccount = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+export const getTransferFee = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received getTransferFee request | reqId=${reqId}`);
+  logger.info("Transfer fee incoming query params:", req.query);
+
+  try {
+    const amountStr = req.query.amount as string;
+    const currencyStr = (req.query.currency as string) || "NGN";
+
+    if (!amountStr || isNaN(Number(amountStr)) || Number(amountStr) <= 0) {
+      res.status(400).json({
+        success: false,
+        message: "Validation Error: A valid positive numeric amount query parameter is required.",
+      });
+      return;
+    }
+
+    const amount = Number(amountStr);
+    logger.info("Transfer fee normalized parameters:", { amount, currency: currencyStr });
+
+    const client = getFlutterwaveClient();
+
+    logger.info(`Sending to Flutterwave (Transfer Fee Request): amount=${amount}&currency=${currencyStr}`);
+    const response = await client.request("get", `/transfers/fee?amount=${amount}&currency=${currencyStr}`);
+    logger.info("Flutterwave transfer fee response:", response);
+
+    if (response && response.status === "success" && Array.isArray(response.data)) {
+      const feeItem = response.data[0];
+      const fee = Number(feeItem.fee) || 0;
+      const totalDebit = amount + fee;
+
+      res.status(200).json({
+        success: true,
+        fee,
+        totalDebit,
+        currency: currencyStr,
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: response.message || "Failed to retrieve transfer fee from provider.",
+      });
+    }
+
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getTransferFee exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while retrieving transfer fee.",
+    });
+  }
+};
+
 export const initiateTransfer = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId}`);
+  logger.info("Transfer incoming request body:", req.body);
 
   try {
-    const validationResult = transferSchema.safeParse(req.body);
+    const body = {
+      amount: typeof req.body.amount === "string" ? Number(req.body.amount) : req.body.amount,
+      account_number: req.body.account_number ?? req.body.accountNumber,
+      bank_code: req.body.bank_code ?? req.body.bankCode ?? req.body.account_bank ?? req.body.accountBank,
+      account_name: req.body.account_name ?? req.body.accountName,
+      currency: req.body.currency,
+      narration: req.body.narration,
+      reference: req.body.reference,
+    };
+    logger.info("Transfer normalized body:", body);
+
+    const validationResult = transferSchema.safeParse(body);
     if (!validationResult.success) {
       const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
       logger.warn(`[Flutterwave Controller] Transfer validation failed | errors=${errorMsg} | reqId=${reqId}`);
@@ -125,11 +190,14 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
     }
 
     const payload = validationResult.data;
+    logger.info("Sending to Flutterwave (Transfer Payload):", payload);
 
     const result = await transferService.executeTransfer({
       ...payload,
       requestId: reqId,
     });
+
+    logger.info("Flutterwave transfer response:", result);
 
     if (result.success) {
       res.status(200).json({
@@ -159,9 +227,21 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
 export const createVirtualAccount = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received createVirtualAccount request | reqId=${reqId}`);
+  logger.info("Create Virtual Account incoming request body:", req.body);
 
   try {
-    const validationResult = createVirtualAccountSchema.safeParse(req.body);
+    const body = {
+      email: req.body.email,
+      is_permanent: req.body.is_permanent ?? req.body.isPermanent,
+      bvn: req.body.bvn,
+      tx_ref: req.body.tx_ref ?? req.body.txRef,
+      phonenumber: req.body.phonenumber ?? req.body.phoneNumber ?? req.body.phone,
+      firstname: req.body.firstname ?? req.body.firstName,
+      lastname: req.body.lastname ?? req.body.lastName,
+    };
+    logger.info("Create Virtual Account normalized body:", body);
+
+    const validationResult = createVirtualAccountSchema.safeParse(body);
     if (!validationResult.success) {
       const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
       logger.warn(`[Flutterwave Controller] Create Virtual Account validation failed | errors=${errorMsg} | reqId=${reqId}`);
@@ -173,12 +253,15 @@ export const createVirtualAccount = async (req: Request, res: Response, next: Ne
     }
 
     const payload = validationResult.data;
+    logger.info("Sending to Flutterwave (Virtual Account Payload):", payload);
 
     const result = await PaymentVerificationService.createVirtualAccount({
       ...payload,
       bvn: payload.bvn || "",
       requestId: reqId,
     });
+
+    logger.info("Flutterwave virtual account response:", result);
 
     if (result.success) {
       res.status(200).json(result);

@@ -8,6 +8,7 @@ const router = Router();
 // Protected S2S endpoints (require S2S API Key verification)
 router.post("/proxy", gatewayAuthMiddleware, flwController.proxy);
 router.get("/banks", gatewayAuthMiddleware, flwController.getBanks);
+router.get("/transfer-fee", gatewayAuthMiddleware, flwController.getTransferFee);
 router.post("/initialize", gatewayAuthMiddleware, flwController.initializePayment);
 router.post("/resolve-account", gatewayAuthMiddleware, accountResolutionRateLimiter, flwController.resolveAccount);
 router.post("/transfer", gatewayAuthMiddleware, transferRateLimiter, flwController.initiateTransfer);
