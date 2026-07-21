@@ -103,10 +103,12 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         success: true,
+        processing: true,
         reference: validPayload.reference,
         provider_reference: "778899",
         status: "pending",
-        message: "Transfer queued",
+        flutterwaveStatus: "new",
+        message: "Transfer submitted successfully and is being processed.",
       });
 
       expect(mockFlwClient.request).toHaveBeenCalledWith("post", "/transfers", {
@@ -155,6 +157,54 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
       expect(res.body.message).toContain("Transfer could not be processed");
+    });
+  });
+
+  describe("GET /api/flutterwave/transfer/status/:reference - Status Polling", () => {
+    it("should fetch transfer status directly from Flutterwave fallback when not in DB", async () => {
+      mockFlwClient.request.mockResolvedValue({
+        status: "success",
+        data: [
+          {
+            id: 778899,
+            status: "SUCCESSFUL",
+            reference: "polling-ref-123",
+          }
+        ]
+      });
+
+      const res = await request(app)
+        .get("/api/flutterwave/transfer/status/polling-ref-123")
+        .set("X-API-Key", testApiKey);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        success: true,
+        status: "SUCCESS",
+      });
+    });
+
+    it("should return PENDING for processing status from Flutterwave fallback", async () => {
+      mockFlwClient.request.mockResolvedValue({
+        status: "success",
+        data: [
+          {
+            id: 778899,
+            status: "NEW",
+            reference: "polling-ref-456",
+          }
+        ]
+      });
+
+      const res = await request(app)
+        .get("/api/flutterwave/transfer/status/polling-ref-456")
+        .set("X-API-Key", testApiKey);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        success: true,
+        status: "NEW",
+      });
     });
   });
 });

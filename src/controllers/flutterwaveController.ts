@@ -197,6 +197,7 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
     const result = await transferService.executeTransfer({
       ...payload,
       requestId: reqId,
+      userId: req.body.userId || "N/A",
     });
 
     logger.info("Flutterwave transfer response:", result);
@@ -204,10 +205,14 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
     if (result.success) {
       res.status(200).json({
         success: true,
+        processing: result.processing ?? (result.status === "pending"),
+        message: result.processing
+          ? "Transfer submitted successfully and is being processed."
+          : (result.message || "Transfer initiated successfully."),
         reference: result.reference,
         provider_reference: result.provider_reference,
         status: result.status,
-        message: result.message || "Transfer initiated successfully.",
+        flutterwaveStatus: result.flutterwaveStatus || "new",
       });
     } else {
       res.status(400).json({
@@ -642,8 +647,8 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
     // 2. Validate Event Type
     const eventType = payload.event || payload["event.type"];
-    if (eventType !== "charge.completed") {
-      logger.info(`[Flutterwave Controller] Ignoring non-charge event: ${eventType} | reqId=${reqId}`);
+    if (eventType !== "charge.completed" && eventType !== "transfer.completed") {
+      logger.info(`[Flutterwave Controller] Ignoring non-charge/transfer event: ${eventType} | reqId=${reqId}`);
       res.status(200).json({
         success: true,
         message: "Webhook event ignored gracefully.",
@@ -652,7 +657,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     }
 
     // 3. Duplicate Webhook Protection (Firestore-backed)
-    const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref;
+    const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref || payload.data?.reference;
     if (!transactionId) {
       logger.warn(`[Flutterwave Controller] Webhook payload missing transaction identifier | reqId=${reqId}`);
       res.status(400).json({
@@ -676,8 +681,42 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     // Mark as processed in Firestore and memory immediately
     await idempotency.saveWebhookProcessed(transactionId, eventType);
 
+    // If it's a transfer completion, update Firestore transfer status
+    if (eventType === "transfer.completed") {
+      const reference = payload.data?.reference || payload.data?.tx_ref;
+      const flwStatus = payload.data?.status?.toLowerCase();
+      const flwId = payload.data?.id?.toString();
+
+      logger.info(
+        `[Flutterwave Controller Webhook] Processing transfer.completed | reference=${reference} | flwId=${flwId} | status=${flwStatus} | reqId=${reqId}`
+      );
+
+      const dbStatus = (flwStatus === "successful" || flwStatus === "success")
+        ? "success"
+        : (flwStatus === "failed" ? "failed" : "pending");
+
+      if (reference) {
+        if (typeof (idempotency as any).saveReference === "function") {
+          await (idempotency as any).saveReference(reference, "flutterwave", dbStatus, flwId);
+        }
+
+        if (adminDb) {
+          try {
+            await adminDb.collection("transfers").doc(reference).set({
+              flutterwaveTransferId: flwId || null,
+              flutterwaveStatus: flwStatus,
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+            logger.info(`[Flutterwave Controller Webhook] Updated transfer status in Firestore for reference: ${reference}`);
+          } catch (fsErr: any) {
+            logger.error(`[Flutterwave Controller Webhook] Firestore transfer update failed for reference: ${reference} | error=${fsErr.message}`);
+          }
+        }
+      }
+    }
+
     logger.info(
-      `[Flutterwave Controller] Webhook processed successfully | transactionId=${transactionId} | ref=${payload.data?.tx_ref} | reqId=${reqId}`
+      `[Flutterwave Controller] Webhook processed successfully | transactionId=${transactionId} | ref=${payload.data?.tx_ref || payload.data?.reference} | reqId=${reqId}`
     );
 
     res.status(200).json({
@@ -909,6 +948,114 @@ export const payBill = async (req: Request, res: Response, next: NextFunction) =
     res.status(500).json({
       success: false,
       message: "An internal server error occurred while processing bill payment.",
+    });
+  }
+};
+
+export const getTransferStatus = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { reference } = req.params;
+  logger.info(`[Flutterwave Controller] Received getTransferStatus request | reference=${reference} | reqId=${reqId}`);
+
+  if (!reference) {
+    res.status(400).json({
+      success: false,
+      message: "Transfer reference parameter is required.",
+    });
+    return;
+  }
+
+  try {
+    let flwStatus: string | undefined;
+    let providerRef: string | undefined;
+
+    // 1. Check transfers collection
+    if (adminDb) {
+      try {
+        const doc = await adminDb.collection("transfers").doc(reference).get();
+        if (doc.exists) {
+          const data = doc.data();
+          flwStatus = data?.flutterwaveStatus;
+          providerRef = data?.flutterwaveTransferId;
+          logger.info(`[Flutterwave Controller] Found transfer status in transfers collection | status=${flwStatus} | reference=${reference} | reqId=${reqId}`);
+        }
+      } catch (fsErr: any) {
+        logger.error(`[Flutterwave Controller] Firestore read transfers failed: ${fsErr.message}`);
+      }
+    }
+
+    // 2. Check gateway_idempotency_references if not found or status missing
+    if (!flwStatus && adminDb) {
+      try {
+        const doc = await adminDb.collection("gateway_idempotency_references").doc(reference).get();
+        if (doc.exists) {
+          const data = doc.data();
+          const dbStatus = data?.status; // 'success', 'pending', 'failed'
+          providerRef = data?.provider_reference;
+          flwStatus = dbStatus === "success" ? "successful" : (dbStatus === "failed" ? "failed" : "pending");
+          logger.info(`[Flutterwave Controller] Found status in gateway_idempotency_references | status=${flwStatus} | reference=${reference} | reqId=${reqId}`);
+        }
+      } catch (fsErr: any) {
+        logger.error(`[Flutterwave Controller] Firestore read idempotency failed: ${fsErr.message}`);
+      }
+    }
+
+    // 3. Fallback: query Flutterwave directly by reference
+    if (!flwStatus) {
+      try {
+        logger.info(`[Flutterwave Controller] Transfer status not found in DB. Querying Flutterwave directly | reference=${reference} | reqId=${reqId}`);
+        const client = getFlutterwaveClient();
+        const response = await client.request("get", `/transfers?reference=${reference}`);
+
+        logger.info(`[Flutterwave Controller] Flutterwave query by reference response: ${JSON.stringify(response)}`);
+
+        if (response && response.status === "success" && Array.isArray(response.data) && response.data.length > 0) {
+          const trans = response.data[0];
+          flwStatus = trans.status?.toLowerCase();
+          providerRef = trans.id?.toString();
+
+          // Sync back to Firestore transfers collection for faster future lookups
+          if (adminDb) {
+            await adminDb.collection("transfers").doc(reference).set({
+              transferReference: reference,
+              flutterwaveTransferId: providerRef || null,
+              flutterwaveStatus: flwStatus || "pending",
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+          }
+        }
+      } catch (flwErr: any) {
+        logger.error(`[Flutterwave Controller] Direct Flutterwave query failed: ${flwErr.message}`);
+      }
+    }
+
+    // Map flutterwave status to standardized: NEW, PENDING, SUCCESS, FAILED
+    let mappedStatus = "PENDING";
+    if (flwStatus) {
+      const lower = flwStatus.toLowerCase();
+      if (lower === "new") {
+        mappedStatus = "NEW";
+      } else if (lower === "successful" || lower === "success" || lower === "completed" || lower === "closed") {
+        mappedStatus = "SUCCESS";
+      } else if (lower === "failed" || lower === "error" || lower === "reversed") {
+        mappedStatus = "FAILED";
+      } else if (lower === "pending" || lower === "processing" || lower === "queued") {
+        mappedStatus = "PENDING";
+      }
+    }
+
+    logger.info(`[Flutterwave Controller] GET /transfer/status/:reference final result | reference=${reference} | mappedStatus=${mappedStatus} | reqId=${reqId}`);
+
+    res.status(200).json({
+      success: true,
+      status: mappedStatus,
+    });
+
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getTransferStatus exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while retrieving transfer status.",
     });
   }
 };
