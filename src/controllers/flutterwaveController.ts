@@ -703,6 +703,31 @@ export const getBanks = async (req: Request, res: Response, next: NextFunction) 
   }
 };
 
+const USSD_BANK_PREFIXES: Record<string, string> = {
+  "058": "*737*", // GTBank
+  "011": "*894*", // First Bank
+  "057": "*966*", // Zenith Bank
+  "033": "*919*", // UBA
+  "044": "*901*", // Access Bank
+  "035": "*329*", // Wema Bank
+  "070": "*7111*", // Fidelity Bank
+  "030": "*909*", // Heritage Bank
+  "032": "*826*", // Union Bank
+  "050": "*822*", // FCMB
+  "082": "*711*", // Keystone Bank
+  "214": "*565*0*", // FCMB/other
+  "076": "*770*", // Polaris Bank
+  "232": "*945*", // Sterling Bank
+  "035a": "*322*", // ALAT (Wema)
+  "101": "*901*", // Providus Bank
+  "215": "*737*", // Unity Bank
+  "301": "*565*", // Jaiz Bank
+  "084": "*833*", // Enterprise Bank
+  "100": "*779*", // Suntrust Bank
+  "999992": "*955*", // OPay
+  "50515": "*5573*", // PalmPay
+};
+
 export const charge = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received charge request | reqId=${reqId}`);
@@ -711,6 +736,43 @@ export const charge = async (req: Request, res: Response, next: NextFunction) =>
     const { type } = req.query;
     const client = getFlutterwaveClient();
     const response = await client.request("post", `/charges?type=${type}`, req.body);
+
+    logger.info(`[Flutterwave Controller] Raw charge response:`, response);
+
+    // If it's a USSD charge request, verify and normalize the generated USSD code/prefix
+    if (type === "ussd" && response && response.status === "success" && (response.meta?.authorization || response.data?.authorization)) {
+      const auth = response.meta?.authorization || response.data?.authorization;
+      const rawUssd = auth.note || auth.validate_instructions || auth.instruction || "";
+
+      const bankCode = req.body.account_bank || req.body.accountBank;
+      let bankName = "Selected Bank";
+      if (bankCode && adminDb) {
+        const bankDoc = await adminDb.collection("banks").doc(bankCode).get();
+        if (bankDoc.exists) {
+          bankName = bankDoc.data()?.name || "Selected Bank";
+        }
+      }
+
+      const prefix = USSD_BANK_PREFIXES[bankCode] || "*955*";
+
+      let finalUssd = rawUssd;
+      if (rawUssd.includes("bank_ussd_code")) {
+        finalUssd = rawUssd.replace(/\*?bank_ussd_code\*?/g, prefix);
+      }
+
+      logger.info(`[USSD Charge Audit]`, {
+        bankCode,
+        bankName,
+        ussdPrefix: prefix,
+        rawAuthorizationNote: rawUssd,
+        finalUssdString: finalUssd,
+      });
+
+      // Update the authorization note in the response object
+      if (auth.note) auth.note = finalUssd;
+      if (auth.validate_instructions) auth.validate_instructions = finalUssd;
+      if (auth.instruction) auth.instruction = finalUssd;
+    }
 
     res.status(200).json(response);
   } catch (error: any) {
