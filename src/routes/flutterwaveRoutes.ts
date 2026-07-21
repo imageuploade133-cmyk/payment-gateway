@@ -15,6 +15,8 @@ router.post("/transfer", gatewayAuthMiddleware, transferRateLimiter, flwControll
 router.post("/bulk-transfer", gatewayAuthMiddleware, flwController.initiateBulkTransfer);
 router.post("/charges", gatewayAuthMiddleware, flwController.charge);
 router.post("/bills", gatewayAuthMiddleware, flwController.payBill);
+router.get("/kyc-status", gatewayAuthMiddleware, flwController.getKycStatus);
+router.post("/kyc-status", gatewayAuthMiddleware, flwController.getKycStatus);
 router.post("/create-virtual-account", gatewayAuthMiddleware, flwController.createVirtualAccount);
 router.post("/verify-transfer", gatewayAuthMiddleware, flwController.verifyTransfer);
 router.post("/verify", gatewayAuthMiddleware, flwController.verifyPayment);
