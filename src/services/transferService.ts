@@ -1,6 +1,7 @@
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import logger from "../config/logger";
 import { FirestoreIdempotency } from "./firestoreIdempotency";
+import { adminDb } from "../config/firebase";
 
 export interface IdempotencyProvider {
   isDuplicate(reference: string): Promise<boolean>;
@@ -48,14 +49,17 @@ export interface InitiateTransferParams {
   narration: string;
   reference: string;
   requestId: string;
+  userId?: string;
 }
 
 export interface TransferResult {
   success: boolean;
+  processing?: boolean;
   reference: string;
   provider_reference?: string;
   status: "success" | "pending" | "failed";
   message?: string;
+  flutterwaveStatus?: string;
 }
 
 export class TransferService {
@@ -69,7 +73,7 @@ export class TransferService {
    * Executes a transfer to a bank account using Flutterwave.
    */
   public async executeTransfer(params: InitiateTransferParams): Promise<TransferResult> {
-    const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId } = params;
+    const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId, userId } = params;
 
     logger.info(
       `[TransferService] Starting transfer process | reference=${reference} | amount=${amount} | account=${account_number} | reqId=${requestId}`
@@ -105,26 +109,64 @@ export class TransferService {
         callback_url: undefined,
       };
 
+      logger.info(
+        `[TransferService] Payload sent to Flutterwave | reference=${reference} | payload=${JSON.stringify(payload)} | reqId=${requestId}`
+      );
+
       const response = await client.request("post", "/transfers", payload);
+
+      logger.info(
+        `[TransferService] Flutterwave raw transfer response received | reference=${reference} | response=${JSON.stringify(response)} | reqId=${requestId}`
+      );
 
       if (response && response.status === "success" && response.data) {
         const flwId = response.data.id?.toString();
-        const flwStatus = response.data.status?.toLowerCase();
+        const flwStatus = (response.data.status?.toLowerCase() || "new");
 
         logger.info(
           `[TransferService] Transfer successfully accepted by Flutterwave | reference=${reference} | flwId=${flwId} | status=${flwStatus} | reqId=${requestId}`
         );
 
         // Update status and provider reference in Firestore idempotency log
+        const dbStatus = (flwStatus === "successful" || flwStatus === "success")
+          ? "success"
+          : (flwStatus === "failed" ? "failed" : "pending");
+
         if (typeof (this.idempotencyProvider as any).saveReference === "function") {
-          await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", flwStatus === "successful" ? "success" : "pending", flwId);
+          await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", dbStatus, flwId);
         }
+
+        // Save immediately to Firestore transfers collection
+        if (adminDb) {
+          try {
+            await adminDb.collection("transfers").doc(reference).set({
+              transferReference: reference,
+              flutterwaveTransferId: flwId || null,
+              flutterwaveStatus: flwStatus,
+              userId: userId || "N/A",
+              amount,
+              recipient: {
+                account_number,
+                bank_code,
+                account_name,
+              },
+              createdAt: new Date().toISOString(),
+            });
+            logger.info(`[TransferService] Firestore save successful for transfer collection reference: ${reference}`);
+          } catch (fsError: any) {
+            logger.error(`[TransferService] Firestore save failed for transfers collection reference: ${reference} | error=${fsError.message}`);
+          }
+        }
+
+        const isProcessing = flwStatus === "new" || flwStatus === "pending";
 
         return {
           success: true,
+          processing: isProcessing,
           reference,
           provider_reference: flwId,
-          status: flwStatus === "successful" ? "success" : flwStatus === "failed" ? "failed" : "pending",
+          status: dbStatus,
+          flutterwaveStatus: flwStatus,
           message: response.message || "Transfer initiated successfully.",
         };
       }

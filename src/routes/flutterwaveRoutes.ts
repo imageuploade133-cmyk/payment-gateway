@@ -19,6 +19,7 @@ router.get("/kyc-status", gatewayAuthMiddleware, flwController.getKycStatus);
 router.post("/kyc-status", gatewayAuthMiddleware, flwController.getKycStatus);
 router.post("/create-virtual-account", gatewayAuthMiddleware, flwController.createVirtualAccount);
 router.post("/verify-transfer", gatewayAuthMiddleware, flwController.verifyTransfer);
+router.get("/transfer/status/:reference", gatewayAuthMiddleware, flwController.getTransferStatus);
 router.post("/verify", gatewayAuthMiddleware, flwController.verifyPayment);
 
 // Public Webhook endpoint (secured via provider cryptographic signature hash validation)

@@ -197,6 +197,7 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
     const result = await transferService.executeTransfer({
       ...payload,
       requestId: reqId,
+      userId: req.body.userId || "N/A",
     });
 
     logger.info("Flutterwave transfer response:", result);
@@ -204,10 +205,14 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
     if (result.success) {
       res.status(200).json({
         success: true,
+        processing: result.processing ?? (result.status === "pending"),
+        message: result.processing
+          ? "Transfer submitted successfully and is being processed."
+          : (result.message || "Transfer initiated successfully."),
         reference: result.reference,
         provider_reference: result.provider_reference,
         status: result.status,
-        message: result.message || "Transfer initiated successfully.",
+        flutterwaveStatus: result.flutterwaveStatus || "new",
       });
     } else {
       res.status(400).json({
@@ -289,24 +294,64 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
 
     // 1. Guard: Check if the permanent virtual account already exists in Firebase
     if (userId && adminDb) {
-      const accountDoc = await adminDb.collection("wallet_accounts").doc(userId).get();
-      if (accountDoc.exists) {
-        const accountData = accountDoc.data();
-        const userDoc = await adminDb.collection("users").doc(userId).get();
-        const userData = userDoc.exists ? userDoc.data() : {};
+      try {
+        const accountDoc = await adminDb.collection("wallet_accounts").doc(userId).get();
+        if (accountDoc.exists) {
+          const accountData = accountDoc.data();
+          const userDoc = await adminDb.collection("users").doc(userId).get();
+          const userData = userDoc.exists ? userDoc.data() : {};
 
-        logger.info(`[Payment Gateway] Permanent virtual account already exists for user: ${userId}. Skipping duplicate creation.`);
-        res.status(200).json({
-          success: true,
-          alreadyExists: true,
-          bank_name: accountData?.bankName || "Wema Bank",
-          account_number: accountData?.accountNumber,
-          account_name: accountData?.accountName,
-          currency: accountData?.currency || "NGN",
-          reference: accountData?.txRef || accountData?.flwRef,
-          kycStatus: userData?.kycStatus || "VERIFIED",
-          bvn: userData?.bvn || null,
-          nin: userData?.nin || null,
+          logger.info(`[Payment Gateway] Permanent virtual account already exists for user: ${userId}. Skipping duplicate creation.`);
+
+          const finalResponse = {
+            success: true,
+            status: "success",
+            alreadyExists: true,
+            isExisting: true,
+            is_existing: true,
+            accountNumber: accountData?.accountNumber,
+            account_number: accountData?.accountNumber,
+            accountName: accountData?.accountName,
+            account_name: accountData?.accountName,
+            bankName: accountData?.bankName || "Wema Bank",
+            bank_name: accountData?.bankName || "Wema Bank",
+            bankCode: accountData?.bankCode || "035",
+            bank_code: accountData?.bankCode || "035",
+            reference: accountData?.txRef || accountData?.flwRef,
+            kycStatus: userData?.kycStatus || "VERIFIED",
+            bvn: userData?.bvn || null,
+            nin: userData?.nin || null,
+            data: {
+              account_number: accountData?.accountNumber,
+              account_name: accountData?.accountName,
+              bank_name: accountData?.bankName || "Wema Bank",
+              bank_code: accountData?.bankCode || "035",
+              reference: accountData?.txRef || accountData?.flwRef,
+              is_existing: true,
+              kycStatus: userData?.kycStatus || "VERIFIED",
+              bvn: userData?.bvn || null,
+              nin: userData?.nin || null,
+            }
+          };
+
+          logger.info(`[USSD Virtual Account Audit]`, {
+            firestoreDocumentPath: `wallet_accounts/${userId}`,
+            userUid: userId,
+            accountNumber: accountData?.accountNumber,
+            accountName: accountData?.accountName,
+            bankName: accountData?.bankName || "Wema Bank",
+            isExisting: true,
+            finalJsonReturned: finalResponse,
+          });
+
+          res.status(200).json(finalResponse);
+          return;
+        }
+      } catch (readErr: any) {
+        logger.error(`[Payment Gateway] Error reading existing virtual account document from Firestore: ${readErr.message}`);
+        res.status(400).json({
+          success: false,
+          message: `Unable to read existing virtual account: ${readErr.message}`,
         });
         return;
       }
@@ -347,6 +392,10 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
 
     if (result.success) {
       // 2. Persist dynamic KYC status and account details to Firestore
+      let kycStatus = "VERIFIED";
+      let bvnVal = null;
+      let ninVal = null;
+
       if (userId && adminDb) {
         const accountRecord = {
           userId,
@@ -365,20 +414,61 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
 
         const bvn = payload.bvn || "";
         const isBvn = bvn && /^\d{11}$/.test(bvn);
+        bvnVal = isBvn ? bvn : null;
+        ninVal = !isBvn ? bvn : null;
+
         await adminDb.collection("users").doc(userId).set({
           kycStatus: "VERIFIED",
-          bvn: isBvn ? bvn : null,
-          nin: !isBvn ? bvn : null,
+          bvn: bvnVal,
+          nin: ninVal,
         }, { merge: true });
 
-        // Add verified kyc info into returned response
-        (result as any).kycStatus = "VERIFIED";
-        (result as any).bvn = isBvn ? bvn : null;
-        (result as any).nin = !isBvn ? bvn : null;
-        logger.info(`[Payment Gateway] Successfully recorded and returned verified KYC & Account details for user: ${userId}`);
+        logger.info(`[Payment Gateway] Successfully recorded verified KYC & Account details for user: ${userId}`);
       }
 
-      res.status(200).json(result);
+      const finalResponse = {
+        success: true,
+        status: "success",
+        alreadyExists: false,
+        isExisting: false,
+        is_existing: false,
+        accountNumber: result.account_number,
+        account_number: result.account_number,
+        accountName: result.account_name,
+        account_name: result.account_name,
+        bankName: result.bank_name || "Wema Bank",
+        bank_name: result.bank_name || "Wema Bank",
+        bankCode: "035",
+        bank_code: "035",
+        currency: result.currency || "NGN",
+        reference: result.reference,
+        kycStatus: kycStatus,
+        bvn: bvnVal,
+        nin: ninVal,
+        data: {
+          account_number: result.account_number,
+          account_name: result.account_name,
+          bank_name: result.bank_name || "Wema Bank",
+          bank_code: "035",
+          reference: result.reference,
+          is_existing: false,
+          kycStatus: kycStatus,
+          bvn: bvnVal,
+          nin: ninVal,
+        }
+      };
+
+      logger.info(`[USSD Virtual Account Audit]`, {
+        firestoreDocumentPath: userId ? `wallet_accounts/${userId}` : "N/A",
+        userUid: userId || "N/A",
+        accountNumber: result.account_number,
+        accountName: result.account_name,
+        bankName: result.bank_name || "Wema Bank",
+        isExisting: false,
+        finalJsonReturned: finalResponse,
+      });
+
+      res.status(200).json(finalResponse);
     } else {
       res.status(400).json(result);
     }
@@ -557,8 +647,8 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
     // 2. Validate Event Type
     const eventType = payload.event || payload["event.type"];
-    if (eventType !== "charge.completed") {
-      logger.info(`[Flutterwave Controller] Ignoring non-charge event: ${eventType} | reqId=${reqId}`);
+    if (eventType !== "charge.completed" && eventType !== "transfer.completed") {
+      logger.info(`[Flutterwave Controller] Ignoring non-charge/transfer event: ${eventType} | reqId=${reqId}`);
       res.status(200).json({
         success: true,
         message: "Webhook event ignored gracefully.",
@@ -567,7 +657,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     }
 
     // 3. Duplicate Webhook Protection (Firestore-backed)
-    const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref;
+    const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref || payload.data?.reference;
     if (!transactionId) {
       logger.warn(`[Flutterwave Controller] Webhook payload missing transaction identifier | reqId=${reqId}`);
       res.status(400).json({
@@ -591,8 +681,42 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     // Mark as processed in Firestore and memory immediately
     await idempotency.saveWebhookProcessed(transactionId, eventType);
 
+    // If it's a transfer completion, update Firestore transfer status
+    if (eventType === "transfer.completed") {
+      const reference = payload.data?.reference || payload.data?.tx_ref;
+      const flwStatus = payload.data?.status?.toLowerCase();
+      const flwId = payload.data?.id?.toString();
+
+      logger.info(
+        `[Flutterwave Controller Webhook] Processing transfer.completed | reference=${reference} | flwId=${flwId} | status=${flwStatus} | reqId=${reqId}`
+      );
+
+      const dbStatus = (flwStatus === "successful" || flwStatus === "success")
+        ? "success"
+        : (flwStatus === "failed" ? "failed" : "pending");
+
+      if (reference) {
+        if (typeof (idempotency as any).saveReference === "function") {
+          await (idempotency as any).saveReference(reference, "flutterwave", dbStatus, flwId);
+        }
+
+        if (adminDb) {
+          try {
+            await adminDb.collection("transfers").doc(reference).set({
+              flutterwaveTransferId: flwId || null,
+              flutterwaveStatus: flwStatus,
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+            logger.info(`[Flutterwave Controller Webhook] Updated transfer status in Firestore for reference: ${reference}`);
+          } catch (fsErr: any) {
+            logger.error(`[Flutterwave Controller Webhook] Firestore transfer update failed for reference: ${reference} | error=${fsErr.message}`);
+          }
+        }
+      }
+    }
+
     logger.info(
-      `[Flutterwave Controller] Webhook processed successfully | transactionId=${transactionId} | ref=${payload.data?.tx_ref} | reqId=${reqId}`
+      `[Flutterwave Controller] Webhook processed successfully | transactionId=${transactionId} | ref=${payload.data?.tx_ref || payload.data?.reference} | reqId=${reqId}`
     );
 
     res.status(200).json({
@@ -703,6 +827,31 @@ export const getBanks = async (req: Request, res: Response, next: NextFunction) 
   }
 };
 
+const USSD_BANK_PREFIXES: Record<string, string> = {
+  "058": "*737*", // GTBank
+  "011": "*894*", // First Bank
+  "057": "*966*", // Zenith Bank
+  "033": "*919*", // UBA
+  "044": "*901*", // Access Bank
+  "035": "*329*", // Wema Bank
+  "070": "*7111*", // Fidelity Bank
+  "030": "*909*", // Heritage Bank
+  "032": "*826*", // Union Bank
+  "050": "*822*", // FCMB
+  "082": "*711*", // Keystone Bank
+  "214": "*565*0*", // FCMB/other
+  "076": "*770*", // Polaris Bank
+  "232": "*945*", // Sterling Bank
+  "035a": "*322*", // ALAT (Wema)
+  "101": "*901*", // Providus Bank
+  "215": "*737*", // Unity Bank
+  "301": "*565*", // Jaiz Bank
+  "084": "*833*", // Enterprise Bank
+  "100": "*779*", // Suntrust Bank
+  "999992": "*955*", // OPay
+  "50515": "*5573*", // PalmPay
+};
+
 export const charge = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received charge request | reqId=${reqId}`);
@@ -711,6 +860,43 @@ export const charge = async (req: Request, res: Response, next: NextFunction) =>
     const { type } = req.query;
     const client = getFlutterwaveClient();
     const response = await client.request("post", `/charges?type=${type}`, req.body);
+
+    logger.info(`[Flutterwave Controller] Raw charge response:`, response);
+
+    // If it's a USSD charge request, verify and normalize the generated USSD code/prefix
+    if (type === "ussd" && response && response.status === "success" && (response.meta?.authorization || response.data?.authorization)) {
+      const auth = response.meta?.authorization || response.data?.authorization;
+      const rawUssd = auth.note || auth.validate_instructions || auth.instruction || "";
+
+      const bankCode = req.body.account_bank || req.body.accountBank;
+      let bankName = "Selected Bank";
+      if (bankCode && adminDb) {
+        const bankDoc = await adminDb.collection("banks").doc(bankCode).get();
+        if (bankDoc.exists) {
+          bankName = bankDoc.data()?.name || "Selected Bank";
+        }
+      }
+
+      const prefix = USSD_BANK_PREFIXES[bankCode] || "*955*";
+
+      let finalUssd = rawUssd;
+      if (rawUssd.includes("bank_ussd_code")) {
+        finalUssd = rawUssd.replace(/\*?bank_ussd_code\*?/g, prefix);
+      }
+
+      logger.info(`[USSD Charge Audit]`, {
+        bankCode,
+        bankName,
+        ussdPrefix: prefix,
+        rawAuthorizationNote: rawUssd,
+        finalUssdString: finalUssd,
+      });
+
+      // Update the authorization note in the response object
+      if (auth.note) auth.note = finalUssd;
+      if (auth.validate_instructions) auth.validate_instructions = finalUssd;
+      if (auth.instruction) auth.instruction = finalUssd;
+    }
 
     res.status(200).json(response);
   } catch (error: any) {
@@ -762,6 +948,114 @@ export const payBill = async (req: Request, res: Response, next: NextFunction) =
     res.status(500).json({
       success: false,
       message: "An internal server error occurred while processing bill payment.",
+    });
+  }
+};
+
+export const getTransferStatus = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { reference } = req.params;
+  logger.info(`[Flutterwave Controller] Received getTransferStatus request | reference=${reference} | reqId=${reqId}`);
+
+  if (!reference) {
+    res.status(400).json({
+      success: false,
+      message: "Transfer reference parameter is required.",
+    });
+    return;
+  }
+
+  try {
+    let flwStatus: string | undefined;
+    let providerRef: string | undefined;
+
+    // 1. Check transfers collection
+    if (adminDb) {
+      try {
+        const doc = await adminDb.collection("transfers").doc(reference).get();
+        if (doc.exists) {
+          const data = doc.data();
+          flwStatus = data?.flutterwaveStatus;
+          providerRef = data?.flutterwaveTransferId;
+          logger.info(`[Flutterwave Controller] Found transfer status in transfers collection | status=${flwStatus} | reference=${reference} | reqId=${reqId}`);
+        }
+      } catch (fsErr: any) {
+        logger.error(`[Flutterwave Controller] Firestore read transfers failed: ${fsErr.message}`);
+      }
+    }
+
+    // 2. Check gateway_idempotency_references if not found or status missing
+    if (!flwStatus && adminDb) {
+      try {
+        const doc = await adminDb.collection("gateway_idempotency_references").doc(reference).get();
+        if (doc.exists) {
+          const data = doc.data();
+          const dbStatus = data?.status; // 'success', 'pending', 'failed'
+          providerRef = data?.provider_reference;
+          flwStatus = dbStatus === "success" ? "successful" : (dbStatus === "failed" ? "failed" : "pending");
+          logger.info(`[Flutterwave Controller] Found status in gateway_idempotency_references | status=${flwStatus} | reference=${reference} | reqId=${reqId}`);
+        }
+      } catch (fsErr: any) {
+        logger.error(`[Flutterwave Controller] Firestore read idempotency failed: ${fsErr.message}`);
+      }
+    }
+
+    // 3. Fallback: query Flutterwave directly by reference
+    if (!flwStatus) {
+      try {
+        logger.info(`[Flutterwave Controller] Transfer status not found in DB. Querying Flutterwave directly | reference=${reference} | reqId=${reqId}`);
+        const client = getFlutterwaveClient();
+        const response = await client.request("get", `/transfers?reference=${reference}`);
+
+        logger.info(`[Flutterwave Controller] Flutterwave query by reference response: ${JSON.stringify(response)}`);
+
+        if (response && response.status === "success" && Array.isArray(response.data) && response.data.length > 0) {
+          const trans = response.data[0];
+          flwStatus = trans.status?.toLowerCase();
+          providerRef = trans.id?.toString();
+
+          // Sync back to Firestore transfers collection for faster future lookups
+          if (adminDb) {
+            await adminDb.collection("transfers").doc(reference).set({
+              transferReference: reference,
+              flutterwaveTransferId: providerRef || null,
+              flutterwaveStatus: flwStatus || "pending",
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+          }
+        }
+      } catch (flwErr: any) {
+        logger.error(`[Flutterwave Controller] Direct Flutterwave query failed: ${flwErr.message}`);
+      }
+    }
+
+    // Map flutterwave status to standardized: NEW, PENDING, SUCCESS, FAILED
+    let mappedStatus = "PENDING";
+    if (flwStatus) {
+      const lower = flwStatus.toLowerCase();
+      if (lower === "new") {
+        mappedStatus = "NEW";
+      } else if (lower === "successful" || lower === "success" || lower === "completed" || lower === "closed") {
+        mappedStatus = "SUCCESS";
+      } else if (lower === "failed" || lower === "error" || lower === "reversed") {
+        mappedStatus = "FAILED";
+      } else if (lower === "pending" || lower === "processing" || lower === "queued") {
+        mappedStatus = "PENDING";
+      }
+    }
+
+    logger.info(`[Flutterwave Controller] GET /transfer/status/:reference final result | reference=${reference} | mappedStatus=${mappedStatus} | reqId=${reqId}`);
+
+    res.status(200).json({
+      success: true,
+      status: mappedStatus,
+    });
+
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getTransferStatus exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while retrieving transfer status.",
     });
   }
 };
