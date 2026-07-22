@@ -8,6 +8,7 @@ import { PaymentVerificationService } from "../services/paymentVerificationServi
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 import { adminDb } from "../config/firebase";
+import { FieldValue } from "firebase-admin/firestore";
 import { AuthenticatedRequest } from "../middleware/auth";
 
 export const BANK_CODE_MAPPING: Record<string, string> = {
@@ -271,8 +272,21 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
 
     const validationResult = transferSchema.safeParse(body);
     if (!validationResult.success) {
-      const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => e.message).join(", ");
-      logger.warn(`[Flutterwave Controller] Transfer validation failed | errors=${errorMsg} | reqId=${reqId}`);
+      const errorMsg = validationResult.error.issues.map((e: any) => e.message).join(", ");
+      logger.error("Transfer validation failed", {
+        issues: validationResult.error.issues,
+        body: req.body,
+        normalizedBody: body,
+        reqId
+      });
+      
+      validationResult.error.issues.forEach((issue: any) => {
+        logger.error(`Validation failed:
+Field: ${issue.path.join(".")}
+Expected: ${issue.expected || "valid string"}
+Received: ${issue.received || "undefined"}`);
+      });
+
       res.status(400).json({
         success: false,
         message: `Validation Error: ${errorMsg}`,
@@ -294,6 +308,7 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
       reference: payload.reference,
       requestId: reqId,
       userId: req.body.userId || "N/A",
+      fee: typeof req.body.fee === "number" ? req.body.fee : (req.body.fee ? Number(req.body.fee) : undefined),
     });
 
     logger.info("Flutterwave transfer response:", result);
@@ -730,13 +745,14 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     // 1. Signature validation
     const isValidSignature = client.verifyWebhookSignature(signature, rawBodyString);
     if (!isValidSignature) {
-      logger.warn(`[Flutterwave Controller] Unauthorized Webhook Signature received | reqId=${reqId}`);
+      logger.warn(`[Flutterwave Controller] Signature verification failed: Unauthorized Webhook Signature received | reqId=${reqId}`);
       res.status(401).json({
         success: false,
         message: "Unauthorized signature hash mismatch.",
       });
       return;
     }
+    logger.info(`[Flutterwave Controller] Signature verification succeeded | reqId=${reqId}`);
 
     const payload = req.body;
     logger.info(`[Flutterwave Controller] Webhook signature verified successfully | event=${payload.event || payload["event.type"]} | reqId=${reqId}`);
@@ -744,7 +760,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     // 2. Validate Event Type
     const eventType = payload.event || payload["event.type"];
     if (eventType !== "charge.completed" && eventType !== "transfer.completed") {
-      logger.info(`[Flutterwave Controller] Ignoring non-charge/transfer event: ${eventType} | reqId=${reqId}`);
+      logger.info(`[Flutterwave Controller] Webhook ignored: non-charge/transfer event: ${eventType} | reqId=${reqId}`);
       res.status(200).json({
         success: true,
         message: "Webhook event ignored gracefully.",
@@ -766,7 +782,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     const idempotency = FirestoreIdempotency.getInstance();
     const isDuplicate = await idempotency.isWebhookDuplicate(transactionId);
     if (isDuplicate) {
-      logger.warn(`[Flutterwave Controller] Webhook already processed (Duplicate protection) | transactionId=${transactionId} | reqId=${reqId}`);
+      logger.warn(`[Flutterwave Controller] Duplicate detection flagged: Webhook already processed | transactionId=${transactionId} | reqId=${reqId}`);
       res.status(200).json({
         success: true,
         message: "Webhook already processed successfully.",
@@ -774,38 +790,116 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // Mark as processed in Firestore and memory immediately
+    // Mark as processed in Firestore and memory immediately to prevent race conditions
     await idempotency.saveWebhookProcessed(transactionId, eventType);
 
     // If it's a transfer completion, update Firestore transfer status
     if (eventType === "transfer.completed") {
       const reference = payload.data?.reference || payload.data?.tx_ref;
-      const flwStatus = payload.data?.status?.toLowerCase();
+      const flwStatus = payload.data?.status?.toUpperCase(); // "SUCCESSFUL", "FAILED", "REVERSED", "PENDING"
       const flwId = payload.data?.id?.toString();
 
       logger.info(
         `[Flutterwave Controller Webhook] Processing transfer.completed | reference=${reference} | flwId=${flwId} | status=${flwStatus} | reqId=${reqId}`
       );
 
-      const dbStatus = (flwStatus === "successful" || flwStatus === "success")
-        ? "success"
-        : (flwStatus === "failed" ? "failed" : "pending");
+      let mappedStatus: "PENDING" | "SUCCESS" | "FAILED" | "REVERSED" = "PENDING";
+      if (flwStatus === "SUCCESSFUL" || flwStatus === "SUCCESS") {
+        mappedStatus = "SUCCESS";
+      } else if (flwStatus === "FAILED") {
+        mappedStatus = "FAILED";
+      } else if (flwStatus === "REVERSED") {
+        mappedStatus = "REVERSED";
+      } else {
+        mappedStatus = "PENDING";
+      }
 
       if (reference) {
+        // Save in gateway processed reference tracking
+        const dbStatus = (mappedStatus === "SUCCESS") ? "success" : (mappedStatus === "PENDING" ? "pending" : "failed");
         if (typeof (idempotency as any).saveReference === "function") {
           await (idempotency as any).saveReference(reference, "flutterwave", dbStatus, flwId);
         }
 
         if (adminDb) {
           try {
-            await adminDb.collection("transfers").doc(reference).set({
-              flutterwaveTransferId: flwId || null,
-              flutterwaveStatus: flwStatus,
-              updatedAt: new Date().toISOString(),
-            }, { merge: true });
-            logger.info(`[Flutterwave Controller Webhook] Updated transfer status in Firestore for reference: ${reference}`);
+            const transferRef = adminDb.collection("transfers").doc(reference);
+
+            await adminDb.runTransaction(async (transaction) => {
+              const transferDoc = await transaction.get(transferRef);
+              if (!transferDoc.exists) {
+                logger.warn(`[Webhook] Transfer doc not found in Firestore for reference: ${reference}`);
+                return;
+              }
+
+              const transferData = transferDoc.data() || {};
+              const currentStatus = transferData.status || "PENDING";
+
+              // If already terminal (SUCCESS, FAILED, REVERSED), ignore status update & refund (guarantee idempotency)
+              if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED") {
+                logger.info(`[Webhook] Transfer ${reference} is already in a terminal state: ${currentStatus}. Webhook ignored.`);
+                return;
+              }
+
+              const userId = transferData.userId;
+              const amount = Number(transferData.amount) || 0;
+              const fee = Number(transferData.fee) || 0;
+              const totalRefund = amount + fee;
+
+              const updatePayload: Record<string, any> = {
+                status: mappedStatus,
+                providerTransferId: flwId || null,
+                providerStatus: flwStatus || null,
+                providerReference: payload.data?.reference || null,
+                failureReason: payload.data?.complete_message || payload.data?.reason || null,
+                webhookReceivedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              };
+
+              // Atomically refund wallet if failed or reversed and not already refunded
+              if ((mappedStatus === "FAILED" || mappedStatus === "REVERSED") && !transferData.refunded && userId && userId !== "N/A") {
+                const userRef = adminDb!.collection("users").doc(userId);
+                const userDoc = await transaction.get(userRef);
+
+                if (userDoc.exists) {
+                  // Increment user wallet balance
+                  transaction.update(userRef, {
+                    balance: FieldValue.increment(totalRefund)
+                  });
+
+                  // Write refund ledger transaction record
+                  const ledgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
+                  transaction.set(ledgerRef, {
+                    userId,
+                    amount: totalRefund,
+                    currency: "NGN",
+                    reference: `REFUND-${reference}`,
+                    type: "DEPOSIT",
+                    description: `Refund for failed transfer: ${transferData.description || `Transfer to ${transferData.recipientName}`}`,
+                    recipientName: transferData.recipientName || "Self",
+                    status: "SUCCESS",
+                    date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+                    time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+                    fee: 0,
+                    createdAt: new Date().toISOString(),
+                  });
+
+                  updatePayload.refunded = true;
+                  updatePayload.refundedAt = new Date().toISOString();
+                  logger.info(`[Webhook Refund Executed] Refund executed successfully | User: ${userId} | Reference: ${reference} | Refund Amount: ${totalRefund}`);
+                } else {
+                  logger.error(`[Webhook Refund Error] User document not found for ID: ${userId} | Reference: ${reference}`);
+                }
+              }
+
+              // Update transfer record status
+              transaction.update(transferRef, updatePayload);
+              logger.info(`[Webhook Transfer Updated] Transfer status transition to ${mappedStatus} saved in transaction for reference: ${reference}`);
+            });
+
+            logger.info(`[Flutterwave Controller Webhook] Successfully processed transfer status update for reference: ${reference}`);
           } catch (fsErr: any) {
-            logger.error(`[Flutterwave Controller Webhook] Firestore transfer update failed for reference: ${reference} | error=${fsErr.message}`);
+            logger.error(`[Flutterwave Controller Webhook] Firestore transfer update / transaction failed for reference: ${reference} | error=${fsErr.message}`);
           }
         }
       }

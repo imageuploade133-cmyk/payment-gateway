@@ -50,6 +50,7 @@ export interface InitiateTransferParams {
   reference: string;
   requestId: string;
   userId?: string;
+  fee?: number;
 }
 
 export interface TransferResult {
@@ -142,14 +143,21 @@ export class TransferService {
             await adminDb.collection("transfers").doc(reference).set({
               transferReference: reference,
               flutterwaveTransferId: flwId || null,
-              flutterwaveStatus: flwStatus,
+              providerTransferId: flwId || null,
+              reference: reference,
               userId: userId || "N/A",
-              amount,
+              amount: amount,
+              fee: params.fee || 10.00,
+              bankCode: bank_code,
+              accountNumber: account_number,
+              recipientName: account_name,
               recipient: {
                 account_number,
                 bank_code,
                 account_name,
               },
+              status: "PENDING",
+              flutterwaveStatus: flwStatus,
               createdAt: new Date().toISOString(),
             });
             logger.info(`[TransferService] Firestore save successful for transfer collection reference: ${reference}`);
