@@ -1,3 +1,4 @@
+import { env } from "../config/env";
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import logger from "../config/logger";
@@ -9,6 +10,90 @@ import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 import { adminDb } from "../config/firebase";
 import { AuthenticatedRequest } from "../middleware/auth";
 
+export const BANK_CODE_MAPPING: Record<string, string> = {
+  // Major Banks
+  '1': '044',    // Access Bank
+  '2': '023',    // Citi Bank
+  '4': '050',    // EcoBank
+  '5': '011',    // First Bank
+  '6': '214',    // FCMB
+  '7': '070',    // Fidelity Bank
+  '8': '058',    // GTBank
+  '9': '076',    // Polaris Bank
+  '10': '221',   // Stanbic IBTC
+  '11': '068',   // Standard Chartered
+  '12': '232',   // Sterling Bank
+  '13': '033',   // UBA
+  '14': '032',   // Union Bank
+  '15': '035',   // Wema Bank
+  '16': '057',   // Zenith Bank
+  '17': '215',   // Unity Bank
+  '18': '101',   // Providus Bank
+  '183': '082',  // Keystone Bank
+  '184': '301',  // Jaiz Bank
+  '231': '100',  // Suntrust Bank
+  '259': '400001', // FSDH Merchant Bank
+  '260': '502',  // Rand Merchant Bank
+  
+  // Payment Service Providers
+  '1435': '100004', // Opay
+  '990': '100033',  // Palmpay
+  '254': '090267',  // Kuda Bank
+  '1864': '090405', // Moniepoint
+  '639': '090328',  // Eyowo
+  '1434': '100034', // Zenith Eazy Wallet
+  '1431': '100052', // Beta-Access Yello
+  '1430': '110003', // Interswitch
+  '1429': '110005', // 3Line
+  '1428': '110006', // Paystack
+  '1427': '110008', // Kadick
+  '1426': '110010', // Interswitch Financial Inclusion
+  '1425': '110011', // Arca Payments
+  '1424': '110012', // Cellulant
+  '1423': '110013', // QR Payments
+  '1422': '110015', // Vas2Nets
+  '1421': '110017', // Crowdforce
+  '1420': '110018', // Microsystems
+  '1419': '110019', // Nibssussd
+  '1418': '110021', // Bud Infrastructure
+  '1417': '110022', // Koraypay
+  '1416': '110023', // Capricorn Digital
+  '1415': '110024', // Resident Fintech
+  '1414': '110025', // Netapps
+  '1413': '110026', // Spay Business
+  '1412': '110027', // Yello Digital
+  '1411': '110028', // Nomba
+  '1410': '110029', // Woven Finance
+  '1409': '120002', // HopePSB
+  '1408': '120003', // Momo PSB
+  '1407': '120004', // Smartcash PSB
+  '1406': '120005', // Money Master PSB
+  
+  // Microfinance Banks
+  '997': '120001', // 9 Payment Service Bank
+  '996': '090286', // Safe Haven
+  '995': '100035', // M36
+  '994': '090420', // Letshego
+  '992': '090383', // Manny
+  '989': '090366', // Firmus
+  '988': '000030', // Parallex Bank
+  '987': '060004', // Greenwich Merchant Bank
+  '986': '090423', // MAUTECH
+  '965': '303',    // ChamsMobile
+  '964': '000025', // Titan Trust Bank
+  '949': '100007', // Stanbic IBTC @ease
+  '948': '100006', // eTranzact
+  '947': '100005', // Cellulant
+  '946': '100003', // Parkway-ReadyCash
+  '945': '100001', // FET
+  
+  // Virtual Banks
+  '1353': '090435', // Links Microfinance
+  '1317': '090470', // Dot Microfinance
+  '1154': '090482', // Clearpay
+};
+
+
 // Zod Schemas
 const resolveAccountSchema = z.object({
   account_number: z.string().regex(/^\d+$/, "Account number must contain only digits").min(5, "Account number is too short").max(15, "Account number is too long"),
@@ -18,8 +103,8 @@ const resolveAccountSchema = z.object({
 const transferSchema = z.object({
   amount: z.number().positive("Amount must be greater than zero"),
   account_number: z.string().regex(/^\d+$/, "Account number must contain only digits").min(5, "Account number is too short").max(15, "Account number is too long"),
-  bank_code: z.string().regex(/^\d+$/, "Bank code must contain only digits").min(3, "Bank code is too short").max(10, "Bank code is too long"),
-  account_name: z.string().min(2, "Account name is required"),
+  account_bank: z.string().regex(/^\d+$/, "Bank code must contain only digits").min(3, "Bank code is too short").max(10, "Bank code is too long"),
+  beneficiary_name: z.string().min(2, "Beneficiary name is required"),
   currency: z.string().length(3, "Currency must be a 3-letter code (e.g. NGN)"),
   narration: z.string().min(1, "Narration is required"),
   reference: z.string().min(3, "Reference is required"),
@@ -57,9 +142,14 @@ export const resolveAccount = async (req: Request, res: Response, next: NextFunc
   logger.info("Resolve request body:", req.body);
 
   try {
+    const rawBankCode = req.body.bank_code ?? req.body.bankCode ?? req.body.account_bank ?? req.body.accountBank ?? req.body.bankId;
+    let mappedBankCode = rawBankCode;
+    if (rawBankCode && BANK_CODE_MAPPING[String(rawBankCode).trim()]) {
+      mappedBankCode = BANK_CODE_MAPPING[String(rawBankCode).trim()];
+    }
     const body = {
       account_number: req.body.account_number ?? req.body.accountNumber,
-      bank_code: req.body.bank_code ?? req.body.bankCode ?? req.body.account_bank ?? req.body.accountBank,
+      bank_code: mappedBankCode,
     };
     logger.info("Normalized body:", body);
 
@@ -165,17 +255,16 @@ export const getTransferFee = async (req: Request, res: Response, next: NextFunc
 
 export const initiateTransfer = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
-  logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId}`);
-  logger.info("Transfer incoming request body:", req.body);
+  logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId} | body:`, req.body);
 
   try {
     const body = {
       amount: typeof req.body.amount === "string" ? Number(req.body.amount) : req.body.amount,
       account_number: req.body.account_number ?? req.body.accountNumber,
-      bank_code: req.body.bank_code ?? req.body.bankCode ?? req.body.account_bank ?? req.body.accountBank,
-      account_name: req.body.account_name ?? req.body.accountName,
-      currency: req.body.currency,
-      narration: req.body.narration,
+      account_bank: req.body.account_bank ?? req.body.accountBank ?? req.body.bank_code ?? req.body.bankCode,
+      beneficiary_name: req.body.beneficiary_name ?? req.body.beneficiaryName ?? req.body.account_name ?? req.body.accountName ?? req.body.recipientName,
+      currency: req.body.currency || "NGN",
+      narration: req.body.narration || `Transfer of ${req.body.amount}`,
       reference: req.body.reference,
     };
     logger.info("Transfer normalized body:", body);
@@ -192,10 +281,17 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
     }
 
     const payload = validationResult.data;
-    logger.info("Sending to Flutterwave (Transfer Payload):", payload);
+    const keyPrefix = env.FLW_SECRET_KEY ? env.FLW_SECRET_KEY.slice(0, 12) : "MISSING";
+    logger.info(`[Flutterwave Controller] Sending to Flutterwave (Transfer Payload). Key prefix: ${keyPrefix} | Payload:`, payload);
 
     const result = await transferService.executeTransfer({
-      ...payload,
+      amount: payload.amount,
+      account_number: payload.account_number,
+      bank_code: payload.account_bank,
+      account_name: payload.beneficiary_name,
+      currency: payload.currency,
+      narration: payload.narration,
+      reference: payload.reference,
       requestId: reqId,
       userId: req.body.userId || "N/A",
     });
@@ -223,10 +319,10 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
     }
 
   } catch (error: any) {
-    logger.error(`[Flutterwave Controller] initiateTransfer exception | error=${error.message} | reqId=${reqId}`);
+    logger.error(`[Flutterwave Controller] initiateTransfer exception | error=${error.message || error} | reqId=${reqId}`);
     res.status(500).json({
       success: false,
-      message: "An internal server error occurred while processing transfer.",
+      message: error.message || "An internal server error occurred while processing transfer.",
     });
   }
 };
@@ -868,7 +964,11 @@ export const charge = async (req: Request, res: Response, next: NextFunction) =>
       const auth = response.meta?.authorization || response.data?.authorization;
       const rawUssd = auth.note || auth.validate_instructions || auth.instruction || "";
 
-      const bankCode = req.body.account_bank || req.body.accountBank;
+      const rawBankCode = req.body.account_bank || req.body.accountBank || req.body.bankId || req.body.bank_code || req.body.bankCode;
+      let bankCode = rawBankCode;
+      if (rawBankCode && BANK_CODE_MAPPING[String(rawBankCode).trim()]) {
+        bankCode = BANK_CODE_MAPPING[String(rawBankCode).trim()];
+      }
       let bankName = "Selected Bank";
       if (bankCode && adminDb) {
         const bankDoc = await adminDb.collection("banks").doc(bankCode).get();
