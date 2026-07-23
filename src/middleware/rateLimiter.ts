@@ -5,6 +5,10 @@ export const standardRateLimiter = rateLimit({
   max: 1000, // Limit each IP to 1000 requests per `window`
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    const url = req.originalUrl || req.url || "";
+    return url.includes("/webhook");
+  },
   message: {
     success: false,
     error: "Too many requests from this IP. Please try again after 15 minutes.",

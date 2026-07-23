@@ -13,7 +13,7 @@ import { env } from "./config/env";
 const app = express();
 
 // Trust reverse proxy (e.g. Nginx)
-app.set("trust proxy", true);
+app.set("trust proxy", 1);
 
 // Request ID middleware (must be first)
 app.use(requestIdMiddleware);
@@ -56,7 +56,7 @@ app.use(compression());
 // Strict Request Size Limits + Raw Body Capture
 app.use(
   express.json({
-    limit: "10kb",
+    limit: "1mb",
     verify: (req: any, res, buf) => {
       req.rawBody = buf;
     },
@@ -66,7 +66,7 @@ app.use(
 app.use(
   express.urlencoded({
     extended: true,
-    limit: "10kb",
+    limit: "1mb",
     verify: (req: any, res, buf) => {
       req.rawBody = buf;
     },

@@ -8,6 +8,7 @@ import { PaymentVerificationService } from "../services/paymentVerificationServi
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 import { adminDb } from "../config/firebase";
+import { ReconciliationService } from "../services/reconciliationService";
 import { FieldValue } from "firebase-admin/firestore";
 import { AuthenticatedRequest } from "../middleware/auth";
 
@@ -733,26 +734,32 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
 export const handleWebhook = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   
-  // Requirement 9 Logs
+  // Requirement 9 Detailed Logs
+  const timestamp = new Date().toISOString();
+  const method = req.method;
+  const url = req.originalUrl || req.url;
+  const ip = req.ip || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "UNKNOWN";
+  const signature = req.headers["verif-hash"] as string || "";
+  const rawBodyString = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
+
   logger.info("[Webhook] Request received");
+  logger.info(`[Webhook] Timestamp: ${timestamp}`);
+  logger.info(`[Webhook] Method: ${method}`);
+  logger.info(`[Webhook] URL: ${url}`);
+  logger.info(`[Webhook] IP Address: ${ip}`);
   logger.info("[Webhook] Headers:", req.headers);
+  logger.info("[Webhook] Signature Header:", signature);
+  logger.info(`[Webhook] Raw Body Length: ${rawBodyString.length}`);
+  logger.info("[Webhook] Raw Body:", rawBodyString);
 
   try {
-    const signature = req.headers["verif-hash"] as string || "";
-
-    // Utilize 100% exact rawBody buffer string for HMAC validation if populated
-    const rawBodyString = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
-
-    logger.info("[Webhook] Raw Body:", rawBodyString);
-    logger.info("[Webhook] Signature Header:", signature);
-
     const client = getFlutterwaveClient();
 
     // 1. Signature validation
-    const isValidSignature = client.verifyWebhookSignature(signature, rawBodyString);
-    logger.info("[Webhook] Signature Verification:", isValidSignature);
+    const verified = client.verifyWebhookSignature(signature, rawBodyString);
+    logger.info("[Webhook] Signature Verification:", verified);
 
-    if (!isValidSignature) {
+    if (!verified) {
       logger.warn(`[Flutterwave Controller] Signature verification failed: Unauthorized Webhook Signature received | reqId=${reqId}`);
       logger.info("[Webhook] Exiting: signature hash mismatch");
       res.status(401).json({
@@ -1279,6 +1286,46 @@ export const getTransferStatus = async (req: Request, res: Response, next: NextF
     res.status(500).json({
       success: false,
       message: "An internal server error occurred while retrieving transfer status.",
+    });
+  }
+};
+
+
+export const reconcileTransfer = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { reference } = req.params;
+  logger.info(`[Flutterwave Controller] Received manual reconcileTransfer request | reference=${reference} | reqId=${reqId}`);
+
+  if (!reference) {
+    res.status(400).json({
+      success: false,
+      message: "Transfer reference parameter is required.",
+    });
+    return;
+  }
+
+  try {
+    const result = await ReconciliationService.getInstance().reconcileSingleTransfer(reference);
+    if (result.success) {
+      res.status(200).json({
+        success: true,
+        message: result.message,
+        status: result.status,
+        refunded: result.refunded || false,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        message: result.message,
+        timestamp: new Date().toISOString()
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] reconcileTransfer exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while performing manual reconciliation.",
     });
   }
 };
