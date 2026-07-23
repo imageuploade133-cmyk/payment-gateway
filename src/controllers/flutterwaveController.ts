@@ -732,7 +732,10 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
 
 export const handleWebhook = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
-  logger.info(`[Flutterwave Controller] Received Webhook request | reqId=${reqId}`);
+  
+  // Requirement 9 Logs
+  logger.info("[Webhook] Request received");
+  logger.info("[Webhook] Headers:", req.headers);
 
   try {
     const signature = req.headers["verif-hash"] as string || "";
@@ -740,27 +743,39 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     // Utilize 100% exact rawBody buffer string for HMAC validation if populated
     const rawBodyString = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
 
+    logger.info("[Webhook] Raw Body:", rawBodyString);
+    logger.info("[Webhook] Signature Header:", signature);
+
     const client = getFlutterwaveClient();
 
     // 1. Signature validation
     const isValidSignature = client.verifyWebhookSignature(signature, rawBodyString);
+    logger.info("[Webhook] Signature Verification:", isValidSignature);
+
     if (!isValidSignature) {
       logger.warn(`[Flutterwave Controller] Signature verification failed: Unauthorized Webhook Signature received | reqId=${reqId}`);
+      logger.info("[Webhook] Exiting: signature hash mismatch");
       res.status(401).json({
         success: false,
         message: "Unauthorized signature hash mismatch.",
       });
       return;
     }
-    logger.info(`[Flutterwave Controller] Signature verification succeeded | reqId=${reqId}`);
 
     const payload = req.body;
-    logger.info(`[Flutterwave Controller] Webhook signature verified successfully | event=${payload.event || payload["event.type"]} | reqId=${reqId}`);
+    logger.info("[Webhook] Parsed Payload:", payload);
+
+    const eventType = payload.event || payload["event.type"];
+    logger.info(`Event: ${eventType}`);
+    logger.info(`data.id: ${payload.data?.id}`);
+    logger.info(`data.reference: ${payload.data?.reference || payload.data?.tx_ref}`);
+    logger.info(`data.status: ${payload.data?.status}`);
+    logger.info(`data.meta: ${JSON.stringify(payload.data?.meta || null)}`);
 
     // 2. Validate Event Type
-    const eventType = payload.event || payload["event.type"];
     if (eventType !== "charge.completed" && eventType !== "transfer.completed") {
       logger.info(`[Flutterwave Controller] Webhook ignored: non-charge/transfer event: ${eventType} | reqId=${reqId}`);
+      logger.info(`[Webhook] Exiting: ignored event type ${eventType}`);
       res.status(200).json({
         success: true,
         message: "Webhook event ignored gracefully.",
@@ -772,6 +787,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref || payload.data?.reference;
     if (!transactionId) {
       logger.warn(`[Flutterwave Controller] Webhook payload missing transaction identifier | reqId=${reqId}`);
+      logger.info("[Webhook] Exiting: missing transaction identifier");
       res.status(400).json({
         success: false,
         message: "Invalid webhook payload structure.",
@@ -783,6 +799,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     const isDuplicate = await idempotency.isWebhookDuplicate(transactionId);
     if (isDuplicate) {
       logger.warn(`[Flutterwave Controller] Duplicate detection flagged: Webhook already processed | transactionId=${transactionId} | reqId=${reqId}`);
+      logger.info("[Webhook] Exiting: duplicate webhook ignored");
       res.status(200).json({
         success: true,
         message: "Webhook already processed successfully.",
@@ -826,18 +843,22 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
             const transferRef = adminDb.collection("transfers").doc(reference);
 
             await adminDb.runTransaction(async (transaction) => {
+              logger.info("[Webhook] Looking up transaction by reference");
               const transferDoc = await transaction.get(transferRef);
               if (!transferDoc.exists) {
                 logger.warn(`[Webhook] Transfer doc not found in Firestore for reference: ${reference}`);
+                logger.info("[Webhook] Transaction not found");
                 return;
               }
 
+              logger.info("[Webhook] Transaction found");
               const transferData = transferDoc.data() || {};
               const currentStatus = transferData.status || "PENDING";
 
               // If already terminal (SUCCESS, FAILED, REVERSED), ignore status update & refund (guarantee idempotency)
               if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED") {
                 logger.info(`[Webhook] Transfer ${reference} is already in a terminal state: ${currentStatus}. Webhook ignored.`);
+                logger.info("[Webhook] Exiting: terminal status already reached");
                 return;
               }
 
@@ -857,38 +878,46 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
               };
 
               // Atomically refund wallet if failed or reversed and not already refunded
-              if ((mappedStatus === "FAILED" || mappedStatus === "REVERSED") && !transferData.refunded && userId && userId !== "N/A") {
-                const userRef = adminDb!.collection("users").doc(userId);
-                const userDoc = await transaction.get(userRef);
+              if (mappedStatus === "FAILED" || mappedStatus === "REVERSED") {
+                logger.info("[Webhook] Transfer FAILED");
+                
+                if (transferData.refunded) {
+                  logger.info("[Webhook] Already refunded");
+                } else if (userId && userId !== "N/A") {
+                  const userRef = adminDb!.collection("users").doc(userId);
+                  const userDoc = await transaction.get(userRef);
 
-                if (userDoc.exists) {
-                  // Increment user wallet balance
-                  transaction.update(userRef, {
-                    balance: FieldValue.increment(totalRefund)
-                  });
+                  if (userDoc.exists) {
+                    logger.info("[Webhook] Refunding wallet");
+                    // Increment user wallet balance
+                    transaction.update(userRef, {
+                      balance: FieldValue.increment(totalRefund)
+                    });
 
-                  // Write refund ledger transaction record
-                  const ledgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
-                  transaction.set(ledgerRef, {
-                    userId,
-                    amount: totalRefund,
-                    currency: "NGN",
-                    reference: `REFUND-${reference}`,
-                    type: "DEPOSIT",
-                    description: `Refund for failed transfer: ${transferData.description || `Transfer to ${transferData.recipientName}`}`,
-                    recipientName: transferData.recipientName || "Self",
-                    status: "SUCCESS",
-                    date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
-                    time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-                    fee: 0,
-                    createdAt: new Date().toISOString(),
-                  });
+                    // Write refund ledger transaction record
+                    const ledgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
+                    transaction.set(ledgerRef, {
+                      userId,
+                      amount: totalRefund,
+                      currency: "NGN",
+                      reference: `REFUND-${reference}`,
+                      type: "DEPOSIT",
+                      description: `Refund for failed transfer: ${transferData.description || `Transfer to ${transferData.recipientName}`}`,
+                      recipientName: transferData.recipientName || "Self",
+                      status: "SUCCESS",
+                      date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+                      time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+                      fee: 0,
+                      createdAt: new Date().toISOString(),
+                    });
 
-                  updatePayload.refunded = true;
-                  updatePayload.refundedAt = new Date().toISOString();
-                  logger.info(`[Webhook Refund Executed] Refund executed successfully | User: ${userId} | Reference: ${reference} | Refund Amount: ${totalRefund}`);
-                } else {
-                  logger.error(`[Webhook Refund Error] User document not found for ID: ${userId} | Reference: ${reference}`);
+                    updatePayload.refunded = true;
+                    updatePayload.refundedAt = new Date().toISOString();
+                    logger.info("[Webhook] Refund successful");
+                    logger.info(`[Webhook Refund Executed] Refund executed successfully | User: ${userId} | Reference: ${reference} | Refund Amount: ${totalRefund}`);
+                  } else {
+                    logger.error(`[Webhook Refund Error] User document not found for ID: ${userId} | Reference: ${reference}`);
+                  }
                 }
               }
 
