@@ -9,6 +9,7 @@ import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 import { adminDb } from "../config/firebase";
 import { ReconciliationService } from "../services/reconciliationService";
+import { BankCacheService } from "../services/bankCacheService";
 import { FieldValue } from "firebase-admin/firestore";
 import { AuthenticatedRequest } from "../middleware/auth";
 
@@ -1040,15 +1041,34 @@ export const getBanks = async (req: Request, res: Response, next: NextFunction) 
   logger.info(`[Flutterwave Controller] Received getBanks request | reqId=${reqId}`);
 
   try {
-    const client = getFlutterwaveClient();
-    const response = await client.request("get", "/banks/NG");
-
-    res.status(200).json(response);
+    const cacheResult = await BankCacheService.getInstance().getBanks();
+    res.status(200).json(cacheResult);
   } catch (error: any) {
     logger.error(`[Flutterwave Controller] getBanks exception | error=${error.message} | reqId=${reqId}`);
     res.status(500).json({
       success: false,
       message: "An internal server error occurred while fetching banks.",
+    });
+  }
+};
+
+export const refreshBanksList = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received refreshBanksList request | reqId=${reqId}`);
+
+  try {
+    const freshBanks = await BankCacheService.getInstance().refreshBanks();
+    res.status(200).json({
+      success: true,
+      message: "Successfully forced immediate refresh of bank list from Flutterwave.",
+      count: freshBanks.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] refreshBanksList exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: error.message || "An internal server error occurred while forcing bank list refresh.",
     });
   }
 };
