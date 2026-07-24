@@ -109,15 +109,24 @@ export class FlutterwaveClient implements PaymentProvider {
    */
   public verifyWebhookSignature(signatureHeader: string | null, payloadString: string): boolean {
     const secret = this.config.webhookSecret;
+
+    logger.info("[Webhook] Signature verification initiated.");
+    logger.info(`[Webhook] Signature header exists: ${!!signatureHeader}`);
+    logger.info(`[Webhook] Signature length: ${signatureHeader?.length ?? 0}`);
+    logger.info(`[Webhook] Secret loaded: ${!!secret}`);
+    logger.info(`[Webhook] Secret length: ${secret?.length ?? 0}`);
+    logger.info("[Webhook] Verification method being used: Direct Secret Hash Comparison");
+
     if (!signatureHeader || !secret) {
+      logger.warn("[Webhook] Verification failed: Missing signature header or loaded webhook secret.");
       return false;
     }
 
     try {
-      const hash = crypto.createHmac("sha256", secret).update(payloadString).digest("hex");
-      const simpleHash = crypto.createHash("sha256").update(secret).digest("hex");
-
-      return signatureHeader === hash || signatureHeader === secret || signatureHeader === simpleHash;
+      // Direct string comparison as specified by Flutterwave Webhook Secret Hash documentation
+      const isVerified = signatureHeader === secret;
+      logger.info(`[Webhook] Signature verification success: ${isVerified}`);
+      return isVerified;
     } catch (error: any) {
       logger.error(`[FlutterwaveClient] Signature validation exception: ${error.message}`);
       return false;
