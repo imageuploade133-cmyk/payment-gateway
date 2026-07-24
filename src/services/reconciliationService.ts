@@ -125,47 +125,60 @@ export class ReconciliationService {
       let refundTransactionCommitted = false;
 
       // 3. Perform atomic Firestore Transaction for state transition & refund
-      await adminDb!.runTransaction(async (transaction) => {
-        const freshDoc = await transaction.get(transferRef);
-        const freshData = freshDoc.data() || {};
-        const freshStatus = freshData.status || "PENDING";
+      try {
+        await adminDb!.runTransaction(async (transaction) => {
+          const freshDoc = await transaction.get(transferRef);
+          const freshData = freshDoc.data() || {};
+          const freshStatus = freshData.status || "PENDING";
 
-        // Double check refund and status inside the transaction to absolutely prevent race conditions
-        if (freshData.refundProcessed || freshData.refunded) {
-          logger.info(`[Reconciliation Service] Refund already processed. Skipping.`);
-          return;
-        }
+          // Double check refund and status inside the transaction to absolutely prevent race conditions
+          if (freshData.refundProcessed || freshData.refunded) {
+            logger.info(`[Reconciliation Service] Refund already processed. Skipping.`);
+            return;
+          }
 
-        if (freshStatus === "SUCCESS" || freshStatus === "FAILED" || freshStatus === "REVERSED") {
-          logger.info(`[Reconciliation Service] Transaction concurrent skip: Already terminal state: ${freshStatus}`);
-          return;
-        }
+          if (freshStatus === "SUCCESS" || freshStatus === "FAILED" || freshStatus === "REVERSED") {
+            logger.info(`[Reconciliation Service] Transaction concurrent skip: Already terminal state: ${freshStatus}`);
+            return;
+          }
 
-        const userId = freshData.userId;
-        const amount = Number(freshData.amount) || 0;
-        const fee = Number(freshData.fee) || 0;
-        const totalRefund = amount + fee;
+          const userId = freshData.userId;
+          const amount = Number(freshData.amount) || 0;
+          const fee = Number(freshData.fee) || 0;
+          const totalRefund = amount + fee;
 
-        const updatePayload: Record<string, any> = {
-          status: mappedStatus,
-          flutterwaveStatus: flwStatus,
-          providerStatus: flwStatus,
-          providerTransferId: flwId || null,
-          failureReason: failureReason || null,
-          reconciledAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
+          const updatePayload: Record<string, any> = {
+            status: mappedStatus,
+            flutterwaveStatus: flwStatus,
+            providerStatus: flwStatus,
+            providerTransferId: flwId || null,
+            failureReason: failureReason || null,
+            reconciledAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
 
-        if (mappedStatus === "FAILED" && userId && userId !== "N/A") {
-          logger.info(`[Reconciliation Service] Transfer FAILED for reference: ${reference}. Triggering wallet refund.`);
-          const userRef = adminDb!.collection("users").doc(userId);
-          const userDoc = await transaction.get(userRef);
+          if (mappedStatus === "FAILED" && userId && userId !== "N/A") {
+            logger.info(`[Refund] User: ${userId}`);
+            const userRef = adminDb!.collection("users").doc(userId);
+            const userDoc = await transaction.get(userRef);
 
-          if (userDoc.exists) {
-            // Increment balance
+            if (!userDoc.exists) {
+              throw new Error(`[Refund Error] User document not found for ID: ${userId}`);
+            }
+
+            const userData = userDoc.data() || {};
+            const currentBalance = Number(userData.balance) || 0;
+            logger.info(`[Refund] Current wallet balance: ₦${currentBalance}`);
+            logger.info(`[Refund] Refund amount: ₦${totalRefund}`);
+
+            const updatedBalance = currentBalance + totalRefund;
+
+            // Increment wallet balance
             transaction.update(userRef, {
-              balance: FieldValue.increment(totalRefund)
+              balance: updatedBalance
             });
+            logger.info(`[Refund] Updated wallet balance: ₦${updatedBalance}`);
+            logger.info(`[Refund] Wallet document updated successfully`);
 
             // Write refund ledger transaction record
             const ledgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
@@ -183,6 +196,7 @@ export class ReconciliationService {
               fee: 0,
               createdAt: new Date().toISOString(),
             });
+            logger.info(`[Refund] Transaction history created`);
 
             updatePayload.refundProcessed = true;
             updatePayload.refundProcessedAt = new Date().toISOString();
@@ -191,16 +205,17 @@ export class ReconciliationService {
             updatePayload.refundedAt = new Date().toISOString();
             refunded = true;
             refundTransactionCommitted = true;
-          } else {
-            logger.error(`[Reconciliation Refund Error] User document not found for user: ${userId}`);
           }
+
+          transaction.update(transferRef, updatePayload);
+        });
+
+        if (refundTransactionCommitted) {
+          logger.info(`[Refund] Refund transaction committed successfully`);
         }
-
-        transaction.update(transferRef, updatePayload);
-      });
-
-      if (refundTransactionCommitted) {
-        logger.info(`[Reconciliation Service] Refund transaction committed successfully for reference: ${reference}`);
+      } catch (txErr: any) {
+        logger.error(`[Refund Error] Refund transaction aborted | error=${txErr.message} | stack=${txErr.stack}`);
+        throw txErr;
       }
 
       return {
