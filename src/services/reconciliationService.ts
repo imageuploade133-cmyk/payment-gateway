@@ -25,6 +25,37 @@ export class ReconciliationService {
       return { success: false, message: "Firestore database is not initialized." };
     }
 
+    // 1. Safe distributed lock setup via Firestore to prevent duplicate concurrent reconciliation under PM2
+    const lockRef = adminDb.collection("reconciliation_locks").doc(reference);
+    try {
+      await adminDb.runTransaction(async (transaction) => {
+        const lockDoc = await transaction.get(lockRef);
+        if (lockDoc.exists) {
+          const lockData = lockDoc.data() || {};
+          const expiresAt = new Date(lockData.expiresAt);
+          if (expiresAt > new Date()) {
+            throw new Error("Duplicate reconciliation prevented.");
+          }
+        }
+
+        // Set lock with 5-minute auto expiration for safety
+        transaction.set(lockRef, {
+          reference,
+          acquiredAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          workerId: process.env.pm_id || "default",
+        });
+      });
+      logger.info(`[Reconciliation Service] Worker acquired reconciliation lock for reference: ${reference}`);
+    } catch (err: any) {
+      if (err.message === "Duplicate reconciliation prevented.") {
+        logger.info(`[Reconciliation Service] Duplicate reconciliation prevented for reference: ${reference}`);
+        return { success: false, message: "Duplicate reconciliation prevented." };
+      }
+      logger.error(`[Reconciliation Service] Lock acquisition failed for ${reference}: ${err.message}`);
+      return { success: false, message: `Failed to acquire lock: ${err.message}` };
+    }
+
     try {
       const transferRef = adminDb!.collection("transfers").doc(reference);
       const transferDoc = await transferRef.get();
@@ -37,13 +68,18 @@ export class ReconciliationService {
       const transferData = transferDoc.data() || {};
       const currentStatus = transferData.status || "PENDING";
 
-      // If already terminal, skip to ensure idempotency
+      // If already terminal/refunded, skip immediately to ensure idempotency
+      if (transferData.refundProcessed || transferData.refunded) {
+        logger.info(`[Reconciliation Service] Refund already processed. Skipping.`);
+        return { success: true, status: currentStatus, refunded: true, message: "Refund already processed. Skipping." };
+      }
+
       if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED") {
         logger.info(`[Reconciliation Service] Transfer ${reference} is already in a terminal state: ${currentStatus}. Skipping.`);
         return { success: true, status: currentStatus, message: `Already in terminal state: ${currentStatus}` };
       }
 
-      // 1. Query Flutterwave status directly by reference
+      // 2. Query Flutterwave status directly by reference
       const client = getFlutterwaveClient();
       let flwStatus: string | undefined;
       let flwId: string | undefined;
@@ -86,14 +122,20 @@ export class ReconciliationService {
       }
 
       let refunded = false;
+      let refundTransactionCommitted = false;
 
-      // 2. Perform atomic Firestore Transaction for state transition & refund
+      // 3. Perform atomic Firestore Transaction for state transition & refund
       await adminDb!.runTransaction(async (transaction) => {
         const freshDoc = await transaction.get(transferRef);
         const freshData = freshDoc.data() || {};
         const freshStatus = freshData.status || "PENDING";
 
-        // Double check terminal state to absolutely prevent duplicate refunds
+        // Double check refund and status inside the transaction to absolutely prevent race conditions
+        if (freshData.refundProcessed || freshData.refunded) {
+          logger.info(`[Reconciliation Service] Refund already processed. Skipping.`);
+          return;
+        }
+
         if (freshStatus === "SUCCESS" || freshStatus === "FAILED" || freshStatus === "REVERSED") {
           logger.info(`[Reconciliation Service] Transaction concurrent skip: Already terminal state: ${freshStatus}`);
           return;
@@ -114,7 +156,7 @@ export class ReconciliationService {
           updatedAt: new Date().toISOString()
         };
 
-        if (mappedStatus === "FAILED" && !freshData.refunded && userId && userId !== "N/A") {
+        if (mappedStatus === "FAILED" && userId && userId !== "N/A") {
           logger.info(`[Reconciliation Service] Transfer FAILED for reference: ${reference}. Triggering wallet refund.`);
           const userRef = adminDb!.collection("users").doc(userId);
           const userDoc = await transaction.get(userRef);
@@ -142,10 +184,13 @@ export class ReconciliationService {
               createdAt: new Date().toISOString(),
             });
 
+            updatePayload.refundProcessed = true;
+            updatePayload.refundProcessedAt = new Date().toISOString();
+            updatePayload.refundReference = `REFUND-${reference}`;
             updatePayload.refunded = true;
             updatePayload.refundedAt = new Date().toISOString();
             refunded = true;
-            logger.info(`[Reconciliation Refund Executed] Wallet successfully refunded ₦${totalRefund} for user ${userId}`);
+            refundTransactionCommitted = true;
           } else {
             logger.error(`[Reconciliation Refund Error] User document not found for user: ${userId}`);
           }
@@ -153,6 +198,10 @@ export class ReconciliationService {
 
         transaction.update(transferRef, updatePayload);
       });
+
+      if (refundTransactionCommitted) {
+        logger.info(`[Reconciliation Service] Refund transaction committed successfully for reference: ${reference}`);
+      }
 
       return {
         success: true,
@@ -164,6 +213,13 @@ export class ReconciliationService {
     } catch (error: any) {
       logger.error(`[Reconciliation Service] Reconciliation crashed for ${reference}: ${error.message}`);
       return { success: false, message: `Reconciliation exception: ${error.message}` };
+    } finally {
+      // 4. Always release the lock for this reference
+      try {
+        await lockRef.delete();
+      } catch (deleteErr: any) {
+        logger.error(`[Reconciliation Service] Failed to release lock for reference: ${reference} | ${deleteErr.message}`);
+      }
     }
   }
 
@@ -171,6 +227,13 @@ export class ReconciliationService {
    * Starts the background cron-like service that runs every 60 seconds.
    */
   public startAutomatedReconciliation(): void {
+    const pmId = process.env.pm_id || process.env.NODE_APP_INSTANCE;
+    // Only run automated reconciliation background scans on instance "0" under PM2 (or outside PM2)
+    if (pmId !== undefined && pmId !== "0") {
+      logger.info(`[Reconciliation Service] PM2 Instance ${pmId} skipping automated background reconciliation scan loop (only instance 0 runs it).`);
+      return;
+    }
+
     logger.info("[Reconciliation Service] Initializing 60-second automated transfer reconciliation loop...");
 
     setInterval(async () => {
