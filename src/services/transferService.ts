@@ -94,8 +94,7 @@ export class TransferService {
       };
     }
 
-    // Save reference immediately as pending to defend against high-frequency race conditions
-    await this.idempotencyProvider.saveReference(reference);
+
 
     try {
       const client = getFlutterwaveClient();
