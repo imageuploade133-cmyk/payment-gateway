@@ -96,9 +96,9 @@ describe("Gateway Security & Authentication Tests (Phase 6)", () => {
   });
 
   describe("Request Payload Security", () => {
-    it("should reject requests exceeding strict size limits (10kb) to defend against memory exhaustion", async () => {
-      // Create a giant string payload of ~50kb size
-      const hugeString = "X".repeat(50 * 1024);
+    it("should reject requests exceeding strict size limits (1mb) to defend against memory exhaustion", async () => {
+      // Create a giant string payload of ~1.2mb size to exceed the 1mb limit
+      const hugeString = "X".repeat(1.2 * 1024 * 1024);
 
       const res = await request(app)
         .post("/api/flutterwave/resolve-account")

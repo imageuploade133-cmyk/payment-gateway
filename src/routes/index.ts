@@ -3,6 +3,7 @@ import { getHealth, getReady, getLive } from "../controllers/systemController";
 import flutterwaveRoutes from "./flutterwaveRoutes";
 import paystackRoutes from "./paystackRoutes";
 import accountRoutes from "./accountRoutes";
+import clubkonnectRoutes from "./clubkonnect.routes";
 
 const router = Router();
 
@@ -15,5 +16,6 @@ router.get("/live", getLive);
 router.use("/api/flutterwave", flutterwaveRoutes);
 router.use("/api/paystack", paystackRoutes);
 router.use("/api/accounts", accountRoutes);
+router.use("/api", clubkonnectRoutes);
 
 export default router;
