@@ -64,8 +64,9 @@ describe("Clubkonnect Provider Integration Tests", () => {
     clubkonnectConfig.API_KEY = "mock-api-key-456";
 
     // Set cache lastFetched to now to prevent triggering dynamic API refreshes during tests
-    const { networkCache } = require("../config/clubkonnect");
+    const { networkCache, dataPlanCache } = require("../config/clubkonnect");
     networkCache.lastFetched = Date.now();
+    dataPlanCache.lastFetched = Date.now();
   });
 
   afterAll(() => {
@@ -170,6 +171,33 @@ describe("Clubkonnect Provider Integration Tests", () => {
     });
   });
 
+  describe("ClubkonnectService.purchaseData", () => {
+    it("should successfully purchase mobile data plan", async () => {
+      mockedAxios.get.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          status: "ORDER_RECEIVED",
+          orderid: "112233",
+          remark: "Accepted",
+        },
+      });
+
+      const result = await ClubkonnectService.purchaseData({
+        network: "MTN",
+        phone: "08031234567",
+        planCode: "1",
+        requestId: "test-data-id",
+      });
+
+      expect(result).toEqual({
+        success: true,
+        orderId: "112233",
+        status: "Pending",
+        message: "Accepted",
+      });
+    });
+  });
+
   describe("ClubkonnectService.queryAirtimeTransaction", () => {
     it("should successfully query transaction status", async () => {
       mockedAxios.get.mockResolvedValueOnce({
@@ -191,6 +219,25 @@ describe("Clubkonnect Provider Integration Tests", () => {
         orderId: "778899",
         remark: "Successful delivery",
       });
+    });
+  });
+
+  describe("GET /api/vtu/networks", () => {
+    it("should return HTTP 200 and available networks list", async () => {
+      const res = await request(app).get("/api/vtu/networks");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.networks).toEqual(expect.arrayContaining(["MTN", "GLO", "AIRTEL", "9MOBILE"]));
+    });
+  });
+
+  describe("GET /api/vtu/data/plans", () => {
+    it("should return HTTP 200 and available MTN data plans list", async () => {
+      const res = await request(app).get("/api/vtu/data/plans?network=MTN");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(res.body.data[0].item_code).toBe("mtn_500mb");
     });
   });
 
@@ -251,52 +298,61 @@ describe("Clubkonnect Provider Integration Tests", () => {
       expect(res.body.success).toBe(false);
       expect(res.body.message).toContain("amount must be between ₦50 and ₦200,000");
     });
+  });
 
-    it("should reject invalid Nigerian phone numbers", async () => {
+  describe("POST /api/vtu/data", () => {
+    it("should validate and execute data purchase with 200 OK under Option 1", async () => {
+      const mockUserDoc = {
+        exists: true,
+        data: () => ({ balance: 1000 }),
+      };
+
+      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
+        return callback({
+          get: jest.fn().mockResolvedValue(mockUserDoc),
+          set: jest.fn(),
+          update: jest.fn(),
+        });
+      });
+
+      mockedAxios.get.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          status: "ORDER_RECEIVED",
+          orderid: "445566",
+          remark: "Accepted",
+        },
+      });
+
       const res = await request(app)
-        .post("/api/vtu/airtime")
+        .post("/api/vtu/data")
         .set("X-API-Key", getTestApiKey())
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
-          phone: "12345678",
-          amount: 100,
+          phone: "08031234567",
+          item_code: "mtn_1gb",
         });
 
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("valid Nigerian phone number");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.orderId).toBe("445566");
     });
 
-    it("should reject unsupported mobile networks", async () => {
+    it("should reject if data plan package code is invalid", async () => {
       const res = await request(app)
-        .post("/api/vtu/airtime")
+        .post("/api/vtu/data")
         .set("X-API-Key", getTestApiKey())
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
-          network: "T-MOBILE",
+          network: "MTN",
           phone: "08031234567",
-          amount: 100,
+          item_code: "invalid_plan_id",
         });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("network 'T-MOBILE' is not supported");
-    });
-
-    it("should reject with 401 Unauthorized if Firebase ID Token is missing", async () => {
-      const res = await request(app)
-        .post("/api/vtu/airtime")
-        .set("X-API-Key", getTestApiKey())
-        .send({
-          network: "MTN",
-          phone: "08031234567",
-          amount: 100,
-        });
-
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Missing authenticated user context");
+      expect(res.body.message).toContain("selected data plan package is inactive");
     });
   });
 

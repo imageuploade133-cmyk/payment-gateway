@@ -1,6 +1,6 @@
 import axios, { AxiosResponse } from "axios";
 import logger from "../config/logger";
-import { clubkonnectConfig, networkCache, DEFAULT_NETWORK_MAPPINGS } from "../config/clubkonnect";
+import { clubkonnectConfig, networkCache, DEFAULT_NETWORK_MAPPINGS, dataPlanCache, DEFAULT_DATA_PLANS } from "../config/clubkonnect";
 
 export interface ClubkonnectBalanceResponse {
   success: boolean;
@@ -16,7 +16,22 @@ export interface PurchaseAirtimeParams {
   callbackUrl?: string;
 }
 
+export interface PurchaseDataParams {
+  network: string;  // e.g. "MTN", "GLO"
+  phone: string;    // e.g. "08012345678"
+  planCode: string; // e.g. "1", "glo-1"
+  requestId: string; // Unique RequestID
+  callbackUrl?: string;
+}
+
 export interface AirtimeResponse {
+  success: boolean;
+  orderId?: string;
+  status: "Pending" | "Failed";
+  message?: string;
+}
+
+export interface DataResponse {
   success: boolean;
   orderId?: string;
   status: "Pending" | "Failed";
@@ -91,6 +106,79 @@ export class ClubkonnectService {
       throw new Error(`Unsupported network: ${networkName}`);
     }
     return code;
+  }
+
+  /**
+   * Refreshes dynamic mobile data plan codes from Clubkonnect API.
+   * Calls: GET https://www.nellobytesystems.com/APIDatasharePlansV1.asp
+   */
+  static async refreshDataPlanCache(requestId?: string): Promise<void> {
+    const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
+    if (!USER_ID || !API_KEY) return;
+
+    const url = `${BASE_URL}/APIDatasharePlansV1.asp?UserID=${USER_ID}&APIKey=${API_KEY}`;
+    logger.info(`[Clubkonnect Service] Refreshing dynamic mobile data plans cache | reqId=${requestId}`);
+
+    try {
+      const response: AxiosResponse = await axios.get(url, { timeout: 10000 });
+      logger.info(`[Clubkonnect Service] Dynamic data plans response | status=${response.status} | reqId=${requestId}`);
+
+      const data = response.data;
+      // If we receive valid object data from provider, we can dynamically cache plans
+      if (data && typeof data === "object") {
+        const plansGrouped: Record<string, any[]> = {
+          "MTN": [],
+          "GLO": [],
+          "AIRTEL": [],
+          "9MOBILE": []
+        };
+
+        // Example parsing from Clubkonnect data share plan structure
+        for (const [key, val] of Object.entries(data)) {
+          if (Array.isArray(val)) {
+            const normalizedNetwork = key.trim().toUpperCase();
+            plansGrouped[normalizedNetwork] = val.map((plan: any) => ({
+              item_code: plan.plan_id || plan.id || `${normalizedNetwork.toLowerCase()}_${plan.size || "plan"}`,
+              name: plan.name || `${normalizedNetwork} ${plan.size || "Data Plan"}`,
+              amount: Number(plan.amount || plan.price) || 0,
+              plan_code: plan.plan_code || plan.id || "",
+            }));
+          }
+        }
+
+        // Only overwrite cache if we successfully retrieved some records
+        const planCount = Object.values(plansGrouped).reduce((acc, curr) => acc + curr.length, 0);
+        if (planCount > 0) {
+          dataPlanCache.plans = plansGrouped;
+          dataPlanCache.lastFetched = Date.now();
+          logger.info(`[Clubkonnect Service] Successfully cached ${planCount} data plans from API.`);
+          return;
+        }
+      }
+      throw new Error("Invalid or empty response format received for data plans.");
+    } catch (error: any) {
+      logger.error(`[Clubkonnect Service] Failed to fetch dynamic data plans: ${error.message} | reqId=${requestId}`);
+      // Fallback is already initialized in dataPlanCache.plans, do not overwrite if fetch fails
+    }
+  }
+
+  /**
+   * Resolves and fetches the available data plans.
+   */
+  static async getDataPlans(networkName?: string, requestId?: string): Promise<any[]> {
+    const now = Date.now();
+    const cacheDuration = 12 * 60 * 60 * 1000; // 12 hours cache
+
+    if (now - dataPlanCache.lastFetched > cacheDuration) {
+      await this.refreshDataPlanCache(requestId);
+    }
+
+    if (networkName) {
+      const normalizedNetwork = networkName.trim().toUpperCase();
+      return dataPlanCache.plans[normalizedNetwork] || [];
+    }
+
+    return Object.values(dataPlanCache.plans).flat();
   }
 
   /**
@@ -213,7 +301,6 @@ export class ClubkonnectService {
         throw new Error("Invalid response format received from Clubkonnect API during airtime purchase.");
       }
 
-      // Check for ORDER_RECEIVED status
       const status = String(data.status || "").trim().toUpperCase();
       if (status === "ORDER_RECEIVED") {
         return {
@@ -224,7 +311,74 @@ export class ClubkonnectService {
         };
       }
 
-      // Handle failure responses gracefully
+      return {
+        success: false,
+        status: "Failed",
+        message: data.remark || data.remark_desc || `Clubkonnect rejected request with status: ${data.status}`,
+      };
+    }
+  }
+
+  /**
+   * Executes a mobile data plan purchase on Clubkonnect API.
+   * Calls: GET https://www.nellobytesystems.com/APIDataV1.asp
+   */
+  static async purchaseData(params: PurchaseDataParams, requestId?: string): Promise<DataResponse> {
+    const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
+
+    if (!USER_ID || !API_KEY) {
+      throw new Error("Clubkonnect credentials (CLUBKONNECT_USER_ID or CLUBKONNECT_API_KEY) are not configured.");
+    }
+
+    const networkCode = await this.getNetworkCode(params.network, requestId);
+    const cbParam = params.callbackUrl ? `&CallBackURL=${encodeURIComponent(params.callbackUrl)}` : "";
+    const url = `${BASE_URL}/APIDataV1.asp?UserID=${USER_ID}&APIKey=${API_KEY}&MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId}${cbParam}`;
+
+    const timeout = 10000; // 10 seconds
+    const maxRetries = 2; // 2 retries (3 attempts total)
+
+    let attempt = 0;
+    while (true) {
+      let response: AxiosResponse;
+
+      try {
+        const maskedKey = API_KEY.length > 5 ? `${API_KEY.slice(0, 3)}***${API_KEY.slice(-2)}` : "***";
+        logger.info(
+          `[Clubkonnect Service] Sending mobile data purchase request | URL=${BASE_URL}/APIDataV1.asp?UserID=${USER_ID}&APIKey=${maskedKey}&MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | attempt=${attempt + 1}/${maxRetries + 1} | reqId=${requestId}`
+        );
+
+        response = await axios.get(url, { timeout });
+      } catch (requestError: any) {
+        attempt++;
+        logger.error(
+          `[Clubkonnect Service] Network/HTTP error executing mobile data purchase (attempt ${attempt}/${maxRetries + 1}) | error=${requestError.message} | reqId=${requestId}`
+        );
+
+        if (attempt > maxRetries) {
+          throw new Error(`Failed to complete mobile data purchase from Clubkonnect after ${attempt} attempts. Original error: ${requestError.message}`);
+        }
+        continue;
+      }
+
+      logger.info(
+        `[Clubkonnect Service] Mobile data purchase response received | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`
+      );
+
+      const data = response.data;
+      if (!data || typeof data !== "object") {
+        throw new Error("Invalid response format received from Clubkonnect API during data purchase.");
+      }
+
+      const status = String(data.status || "").trim().toUpperCase();
+      if (status === "ORDER_RECEIVED") {
+        return {
+          success: true,
+          orderId: data.orderid ? String(data.orderid) : undefined,
+          status: "Pending",
+          message: data.remark || "Data order accepted successfully.",
+        };
+      }
+
       return {
         success: false,
         status: "Failed",

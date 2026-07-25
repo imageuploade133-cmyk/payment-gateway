@@ -50,16 +50,62 @@ export const getWalletBalance = async (
 };
 
 /**
+ * Exposes the available mobile networks dynamically.
+ */
+export const getNetworks = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const reqId = req.requestId;
+  logger.info(`[Clubkonnect Controller] Received getNetworks request | reqId=${reqId}`);
+
+  try {
+    // Ensure network mapping cache is primed
+    await ClubkonnectService.refreshNetworkCache(reqId);
+    const { networkCache } = require("../config/clubkonnect");
+    res.status(200).json({
+      success: true,
+      networks: Object.keys(networkCache.mappings).filter((n) => n !== "ETISALAT"), // Filter redundant alias
+    });
+  } catch (error: any) {
+    logger.error(`[Clubkonnect Controller] getNetworks exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({ success: false, message: "Failed to load mobile networks." });
+  }
+};
+
+/**
+ * Exposes the mobile data plan packages dynamically.
+ * Optionally supports filtering by query parameter `network` (e.g. `?network=MTN`).
+ */
+export const getDataPlans = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const reqId = req.requestId;
+  const network = req.query.network as string | undefined;
+  logger.info(`[Clubkonnect Controller] Received getDataPlans request | network=${network} | reqId=${reqId}`);
+
+  try {
+    const plans = await ClubkonnectService.getDataPlans(network, reqId);
+    res.status(200).json({
+      success: true,
+      data: plans,
+    });
+  } catch (error: any) {
+    logger.error(`[Clubkonnect Controller] getDataPlans exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({ success: false, message: "Failed to load data plans." });
+  }
+};
+
+/**
  * Handles VTU Airtime purchases.
  * 1. Validates inputs.
  * 2. Authenticates and retrieves the User ID from the Firebase token (Option 1).
- * 3. Pre-logs transaction metadata in vtu_transactions.
+ * 3. Atomic wallet verification and debit via Firestore Transactions (Gateway is Single Source of Truth).
  * 4. Dispatches the purchase operation to Clubkonnect.
- * 5. Returns success on ORDER_RECEIVED, or error on failure.
- *
- * NOTE: To prevent double-debiting, the Payment Gateway does NOT debit the user's wallet
- * during instant checkout. Debiting is owned solely by the Next.js parent application (source of truth).
- * If the purchase fails, Next.js performs the rollback refund.
+ * 5. Returns success on ORDER_RECEIVED, or executes an atomic rollback refund on failure.
  */
 export const purchaseAirtime = async (
   req: AuthenticatedRequest,
@@ -70,7 +116,6 @@ export const purchaseAirtime = async (
   logger.info(`[Clubkonnect Controller] Received purchaseAirtime request | body=${JSON.stringify(req.body)} | reqId=${reqId}`);
 
   const { network, phone, amount } = req.body;
-  // Option 1: Strictly identify and authenticate the user via the verified Firebase ID Token
   const userId = req.user?.uid;
 
   try {
@@ -106,7 +151,6 @@ export const purchaseAirtime = async (
 
     // Clean phone number (remove spaces, etc.)
     const cleanPhone = phone.trim().replace(/\s+/g, "");
-    // Nigerian Phone number regex: matches optionally 0, 234, or +234 followed by 7, 8, 9, 0, 1 and then 8 digits
     const nigPhoneRegex = /^(?:0|234|\+234)?[789][01]\d{8}$/;
     if (!nigPhoneRegex.test(cleanPhone)) {
       logger.warn(`[Clubkonnect Controller] Invalid Nigerian phone number: ${phone} | reqId=${reqId}`);
@@ -133,22 +177,78 @@ export const purchaseAirtime = async (
     const purchaseRequestId = randomUUID();
     const transactionRef = `VTU-AIR-${purchaseRequestId}`;
 
+    const userDocRef = db.collection("users").doc(userId);
+    const ledgerRef = db.collection("transactions").doc(`tx-${transactionRef}`);
     const vtuTxRef = db.collection("vtu_transactions").doc(transactionRef);
 
-    // Create vtu transaction record as Pending
-    await vtuTxRef.set({
-      requestId: purchaseRequestId,
-      transactionRef,
-      userId,
-      amount: numAmount,
-      phone: cleanPhone,
-      network: normalizedNetwork,
-      provider: "Clubkonnect",
-      status: "Pending",
-      createdAt: new Date().toISOString(),
-    });
+    let debitCommitted = false;
 
-    // 2. Call Clubkonnect Airtime API
+    // 2. Atomic Wallet Verification & Debit Transaction (Single Source of Truth)
+    try {
+      await db.runTransaction(async (transaction) => {
+        const userDoc = await transaction.get(userDocRef);
+        if (!userDoc.exists) {
+          throw new Error("USER_NOT_FOUND");
+        }
+
+        const userData = userDoc.data() || {};
+        const currentBalance = Number(userData.balance) || 0;
+
+        if (currentBalance < numAmount) {
+          throw new Error("INSUFFICIENT_FUNDS");
+        }
+
+        // Deduct balance atomically
+        transaction.update(userDocRef, {
+          balance: FieldValue.increment(-numAmount)
+        });
+
+        // Record general ledger transaction record
+        transaction.set(ledgerRef, {
+          userId,
+          amount: numAmount,
+          currency: "NGN",
+          reference: transactionRef,
+          type: "AIRTIME",
+          description: `Airtime purchase of ₦${numAmount} for ${cleanPhone} (${normalizedNetwork})`,
+          recipientName: cleanPhone,
+          status: "PENDING",
+          date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+          time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+          fee: 0,
+          createdAt: new Date().toISOString(),
+        });
+
+        // Pre-create the vtu transaction as Pending
+        transaction.set(vtuTxRef, {
+          requestId: purchaseRequestId,
+          transactionRef,
+          userId,
+          amount: numAmount,
+          phone: cleanPhone,
+          network: normalizedNetwork,
+          provider: "Clubkonnect",
+          status: "Pending",
+          type: "Airtime",
+          createdAt: new Date().toISOString(),
+        });
+      });
+
+      debitCommitted = true;
+      logger.info(`[Clubkonnect Controller] Atomic debit successful | userId=${userId} | amount=₦${numAmount} | ref=${transactionRef} | reqId=${reqId}`);
+    } catch (txError: any) {
+      if (txError.message === "USER_NOT_FOUND") {
+        res.status(404).json({ success: false, message: "User profile not found." });
+        return;
+      }
+      if (txError.message === "INSUFFICIENT_FUNDS") {
+        res.status(400).json({ success: false, message: "Insufficient wallet balance to purchase airtime." });
+        return;
+      }
+      throw txError;
+    }
+
+    // 3. Call Clubkonnect Airtime API
     let airtimeResult;
     try {
       airtimeResult = await ClubkonnectService.purchaseAirtime({
@@ -162,7 +262,7 @@ export const purchaseAirtime = async (
       airtimeResult = { success: false, message: apiError.message };
     }
 
-    // 3. Handle results & update transaction metadata
+    // 4. Handle results & fallback Auto-refund if failed
     if (airtimeResult.success) {
       await vtuTxRef.update({
         providerOrderId: airtimeResult.orderId || null,
@@ -177,14 +277,50 @@ export const purchaseAirtime = async (
         message: "Airtime purchase order received successfully. Processing...",
       });
     } else {
-      logger.warn(`[Clubkonnect Controller] Purchase failed on provider | reason=${airtimeResult.message} | reqId=${reqId}`);
+      logger.warn(`[Clubkonnect Controller] Purchase failed on provider, initiating Auto-Refund | reason=${airtimeResult.message} | reqId=${reqId}`);
 
-      // Update vtu transaction status to Failed
-      await vtuTxRef.update({
-        status: "Failed",
-        failureReason: airtimeResult.message || "Provider rejection",
-        updatedAt: new Date().toISOString()
-      });
+      if (debitCommitted) {
+        try {
+          await db.runTransaction(async (transaction) => {
+            transaction.update(userDocRef, {
+              balance: FieldValue.increment(numAmount)
+            });
+
+            transaction.update(ledgerRef, {
+              status: "FAILED",
+              updatedAt: new Date().toISOString()
+            });
+
+            const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${transactionRef}`);
+            transaction.set(refundLedgerRef, {
+              userId,
+              amount: numAmount,
+              currency: "NGN",
+              reference: `REFUND-${transactionRef}`,
+              type: "DEPOSIT",
+              description: `Auto-refund for failed Airtime: ${airtimeResult.message}`,
+              recipientName: cleanPhone,
+              status: "SUCCESS",
+              date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+              time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+              fee: 0,
+              createdAt: new Date().toISOString(),
+            });
+
+            transaction.update(vtuTxRef, {
+              status: "Failed",
+              failureReason: airtimeResult.message || "Provider rejection",
+              refundProcessed: true,
+              refundProcessedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+          });
+
+          logger.info(`[Clubkonnect Controller] Auto-Refund successfully executed | ref=${transactionRef} | reqId=${reqId}`);
+        } catch (refundError: any) {
+          logger.error(`[Clubkonnect Controller] Critical: Auto-Refund transaction failed! | error=${refundError.message} | ref=${transactionRef} | reqId=${reqId}`);
+        }
+      }
 
       res.status(400).json({
         success: false,
@@ -202,6 +338,256 @@ export const purchaseAirtime = async (
 };
 
 /**
+ * Handles VTU Mobile Data purchases.
+ * 1. Validates inputs and resolves data plan details.
+ * 2. Authenticates and retrieves the User ID from the Firebase token (Option 1).
+ * 3. Atomic wallet verification and debit via Firestore Transactions (Gateway is Single Source of Truth).
+ * 4. Dispatches the purchase operation to Clubkonnect.
+ * 5. Returns success on ORDER_RECEIVED, or executes an atomic rollback refund on failure.
+ */
+export const purchaseData = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const reqId = req.requestId;
+  logger.info(`[Clubkonnect Controller] Received purchaseData request | body=${JSON.stringify(req.body)} | reqId=${reqId}`);
+
+  const { network, phone, item_code } = req.body;
+  const userId = req.user?.uid;
+
+  try {
+    // 1. Inputs validation
+    if (!userId) {
+      logger.warn(`[Clubkonnect Controller] Missing userId | reqId=${reqId}`);
+      res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing authenticated user context. This endpoint requires the client to send a valid Firebase ID Token in the 'Authorization: Bearer <Token>' header, along with the Gateway S2S API Key in the 'X-API-Key' header.",
+      });
+      return;
+    }
+
+    if (!network || typeof network !== "string") {
+      logger.warn(`[Clubkonnect Controller] Missing or invalid network | reqId=${reqId}`);
+      res.status(400).json({ success: false, message: "Validation Error: Mobile network provider is required." });
+      return;
+    }
+
+    const normalizedNetwork = network.trim().toUpperCase();
+    const supportedNetworks = ["MTN", "GLO", "AIRTEL", "9MOBILE", "ETISALAT"];
+    if (!supportedNetworks.includes(normalizedNetwork)) {
+      logger.warn(`[Clubkonnect Controller] Unsupported network: ${network} | reqId=${reqId}`);
+      res.status(400).json({ success: false, message: `Validation Error: Mobile network '${network}' is not supported.` });
+      return;
+    }
+
+    if (!phone || typeof phone !== "string") {
+      logger.warn(`[Clubkonnect Controller] Missing phone number | reqId=${reqId}`);
+      res.status(400).json({ success: false, message: "Validation Error: Recipient phone number is required." });
+      return;
+    }
+
+    const cleanPhone = phone.trim().replace(/\s+/g, "");
+    const nigPhoneRegex = /^(?:0|234|\+234)?[789][01]\d{8}$/;
+    if (!nigPhoneRegex.test(cleanPhone)) {
+      logger.warn(`[Clubkonnect Controller] Invalid Nigerian phone number: ${phone} | reqId=${reqId}`);
+      res.status(400).json({ success: false, message: "Validation Error: Please provide a valid Nigerian phone number." });
+      return;
+    }
+
+    if (!item_code || typeof item_code !== "string") {
+      logger.warn(`[Clubkonnect Controller] Missing item_code | reqId=${reqId}`);
+      res.status(400).json({ success: false, message: "Validation Error: Selected data package code is required." });
+      return;
+    }
+
+    // Resolve data plan details from dynamic cache / fallbacks
+    const plans = await ClubkonnectService.getDataPlans(normalizedNetwork, reqId);
+    const plan = plans.find((p) => p.item_code === item_code);
+    if (!plan) {
+      logger.warn(`[Clubkonnect Controller] Invalid or unsupported data plan code: ${item_code} | reqId=${reqId}`);
+      res.status(400).json({ success: false, message: "Validation Error: The selected data plan package is inactive or not supported." });
+      return;
+    }
+
+    const numAmount = plan.amount;
+    const planCode = plan.plan_code;
+
+    if (!adminDb) {
+      logger.error(`[Clubkonnect Controller] Firestore is not initialized | reqId=${reqId}`);
+      res.status(500).json({ success: false, message: "Database Error: Firestore database is not initialized." });
+      return;
+    }
+
+    const db = adminDb;
+
+    // Generate unique Request ID
+    const purchaseRequestId = randomUUID();
+    const transactionRef = `VTU-DAT-${purchaseRequestId}`;
+
+    const userDocRef = db.collection("users").doc(userId);
+    const ledgerRef = db.collection("transactions").doc(`tx-${transactionRef}`);
+    const vtuTxRef = db.collection("vtu_transactions").doc(transactionRef);
+
+    let debitCommitted = false;
+
+    // 2. Atomic Wallet Verification & Debit Transaction (Single Source of Truth)
+    try {
+      await db.runTransaction(async (transaction) => {
+        const userDoc = await transaction.get(userDocRef);
+        if (!userDoc.exists) {
+          throw new Error("USER_NOT_FOUND");
+        }
+
+        const userData = userDoc.data() || {};
+        const currentBalance = Number(userData.balance) || 0;
+
+        if (currentBalance < numAmount) {
+          throw new Error("INSUFFICIENT_FUNDS");
+        }
+
+        // Deduct balance atomically
+        transaction.update(userDocRef, {
+          balance: FieldValue.increment(-numAmount)
+        });
+
+        // Record general ledger transaction record
+        transaction.set(ledgerRef, {
+          userId,
+          amount: numAmount,
+          currency: "NGN",
+          reference: transactionRef,
+          type: "DATA",
+          description: `Mobile Data: ${plan.name} to ${cleanPhone}`,
+          recipientName: cleanPhone,
+          status: "PENDING",
+          date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+          time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+          fee: 0,
+          createdAt: new Date().toISOString(),
+        });
+
+        // Pre-create the vtu transaction as Pending
+        transaction.set(vtuTxRef, {
+          requestId: purchaseRequestId,
+          transactionRef,
+          userId,
+          amount: numAmount,
+          phone: cleanPhone,
+          network: normalizedNetwork,
+          provider: "Clubkonnect",
+          status: "Pending",
+          type: "Data",
+          planName: plan.name,
+          planCode,
+          createdAt: new Date().toISOString(),
+        });
+      });
+
+      debitCommitted = true;
+      logger.info(`[Clubkonnect Controller] Atomic debit successful | userId=${userId} | amount=₦${numAmount} | ref=${transactionRef} | reqId=${reqId}`);
+    } catch (txError: any) {
+      if (txError.message === "USER_NOT_FOUND") {
+        res.status(404).json({ success: false, message: "User profile not found." });
+        return;
+      }
+      if (txError.message === "INSUFFICIENT_FUNDS") {
+        res.status(400).json({ success: false, message: `Insufficient wallet balance to purchase mobile data. Required: ₦${numAmount.toLocaleString()}` });
+        return;
+      }
+      throw txError;
+    }
+
+    // 3. Call Clubkonnect Data Purchase API
+    let dataResult;
+    try {
+      dataResult = await ClubkonnectService.purchaseData({
+        network: normalizedNetwork,
+        phone: cleanPhone,
+        planCode,
+        requestId: purchaseRequestId,
+      }, reqId);
+    } catch (apiError: any) {
+      logger.error(`[Clubkonnect Controller] API Exception calling Clubkonnect | error=${apiError.message} | reqId=${reqId}`);
+      dataResult = { success: false, message: apiError.message };
+    }
+
+    // 4. Handle results & fallback Auto-refund if failed
+    if (dataResult.success) {
+      await vtuTxRef.update({
+        providerOrderId: dataResult.orderId || null,
+        updatedAt: new Date().toISOString(),
+      });
+
+      logger.info(`[Clubkonnect Controller] Data order successfully submitted | orderId=${dataResult.orderId} | reqId=${reqId}`);
+      res.status(200).json({
+        success: true,
+        orderId: dataResult.orderId,
+        requestId: purchaseRequestId,
+        message: "Data plan purchase order received successfully. Processing...",
+      });
+    } else {
+      logger.warn(`[Clubkonnect Controller] Purchase failed on provider, initiating Auto-Refund | reason=${dataResult.message} | reqId=${reqId}`);
+
+      if (debitCommitted) {
+        try {
+          await db.runTransaction(async (transaction) => {
+            transaction.update(userDocRef, {
+              balance: FieldValue.increment(numAmount)
+            });
+
+            transaction.update(ledgerRef, {
+              status: "FAILED",
+              updatedAt: new Date().toISOString()
+            });
+
+            const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${transactionRef}`);
+            transaction.set(refundLedgerRef, {
+              userId,
+              amount: numAmount,
+              currency: "NGN",
+              reference: `REFUND-${transactionRef}`,
+              type: "DEPOSIT",
+              description: `Auto-refund for failed Mobile Data: ${dataResult.message}`,
+              recipientName: cleanPhone,
+              status: "SUCCESS",
+              date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+              time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+              fee: 0,
+              createdAt: new Date().toISOString(),
+            });
+
+            transaction.update(vtuTxRef, {
+              status: "Failed",
+              failureReason: dataResult.message || "Provider rejection",
+              refundProcessed: true,
+              refundProcessedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+          });
+
+          logger.info(`[Clubkonnect Controller] Auto-Refund successfully executed | ref=${transactionRef} | reqId=${reqId}`);
+        } catch (refundError: any) {
+          logger.error(`[Clubkonnect Controller] Critical: Auto-Refund transaction failed! | error=${refundError.message} | ref=${transactionRef} | reqId=${reqId}`);
+        }
+      }
+
+      res.status(400).json({
+        success: false,
+        message: `Data purchase failed: ${dataResult.message || "Unknown provider error."}`,
+      });
+    }
+
+  } catch (error: any) {
+    logger.error(`[Clubkonnect Controller] purchaseData exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while processing mobile data purchase.",
+    });
+  }
+};
+
+/**
  * Handles Clubkonnect callback notifications.
  * Validates and processes status updates (delivered, failed, etc.)
  * Executes idempotent refunds on failure or cancellation.
@@ -212,7 +598,6 @@ export const handleCallback = async (
   next: NextFunction
 ): Promise<void> => {
   const reqId = req.requestId;
-  // Support both POST body and GET query parameters
   const payload = { ...req.query, ...req.body };
   logger.info(`[Clubkonnect Callback] Received notification callback | payload=${JSON.stringify(payload)} | reqId=${reqId}`);
 
@@ -317,7 +702,7 @@ export const handleCallback = async (
           currency: "NGN",
           reference: `REFUND-${transactionRef}`,
           type: "DEPOSIT",
-          description: `Refund for failed Airtime callback: ${payload.remark || "Provider delivery failure"}`,
+          description: `Refund for failed ${freshData.type || "VTU"} callback: ${payload.remark || "Provider delivery failure"}`,
           recipientName: phone || "Self",
           status: "SUCCESS",
           date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
