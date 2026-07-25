@@ -5,6 +5,7 @@ import { ClubkonnectService } from "../services/clubkonnect.service";
 import { clubkonnectConfig } from "../config/clubkonnect";
 import { env } from "../config/env";
 import { adminDb } from "../config/firebase";
+import jwt from "jsonwebtoken";
 
 jest.mock("axios");
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -39,7 +40,19 @@ jest.mock("../config/firebase", () => {
   };
 });
 
+// Mock firebase-admin/auth to return verified user mock
+jest.mock("firebase-admin/auth", () => {
+  return {
+    getAuth: jest.fn(() => ({
+      verifyIdToken: jest.fn().mockResolvedValue({ uid: "test-user-id" }),
+    })),
+  };
+});
+
 const getTestApiKey = () => env.GATEWAY_API_KEYS[0];
+const getTestAuthToken = () => {
+  return jwt.sign({ uid: "test-user-id" }, env.JWT_SECRET);
+};
 
 describe("Clubkonnect Provider Integration Tests", () => {
   const originalUserId = clubkonnectConfig.USER_ID;
@@ -182,7 +195,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
   });
 
   describe("POST /api/vtu/airtime", () => {
-    it("should validate and execute airtime purchase with 200 OK", async () => {
+    it("should validate and execute airtime purchase with 200 OK under Option 1", async () => {
       // Mock user document balance retrieve
       const mockUserDoc = {
         exists: true,
@@ -211,11 +224,11 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
           phone: "08031234567",
           amount: 100,
-          userId: "test-user-id",
         });
 
       expect(res.status).toBe(200);
@@ -227,11 +240,11 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
           phone: "08031234567",
           amount: 20,
-          userId: "test-user-id",
         });
 
       expect(res.status).toBe(400);
@@ -243,11 +256,11 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
           phone: "12345678",
           amount: 100,
-          userId: "test-user-id",
         });
 
       expect(res.status).toBe(400);
@@ -259,16 +272,31 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "T-MOBILE",
           phone: "08031234567",
           amount: 100,
-          userId: "test-user-id",
         });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
       expect(res.body.message).toContain("network 'T-MOBILE' is not supported");
+    });
+
+    it("should reject with 401 Unauthorized if Firebase ID Token is missing", async () => {
+      const res = await request(app)
+        .post("/api/vtu/airtime")
+        .set("X-API-Key", getTestApiKey())
+        .send({
+          network: "MTN",
+          phone: "08031234567",
+          amount: 100,
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Missing authenticated user context");
     });
   });
 

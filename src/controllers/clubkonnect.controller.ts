@@ -52,7 +52,7 @@ export const getWalletBalance = async (
 /**
  * Handles VTU Airtime purchases.
  * 1. Validates inputs.
- * 2. Authenticates and retrieves the User ID.
+ * 2. Authenticates and retrieves the User ID from the Firebase token (Option 1).
  * 3. Atomic wallet verification and debit via Firestore Transactions.
  * 4. Dispatches the purchase operation to Clubkonnect.
  * 5. Handles success by saving transaction metadata, and auto-refunds on immediate failure.
@@ -66,13 +66,17 @@ export const purchaseAirtime = async (
   logger.info(`[Clubkonnect Controller] Received purchaseAirtime request | body=${JSON.stringify(req.body)} | reqId=${reqId}`);
 
   const { network, phone, amount } = req.body;
-  const userId = req.user?.uid || req.body.userId;
+  // Option 1: Strictly identify and authenticate the user via the verified Firebase ID Token
+  const userId = req.user?.uid;
 
   try {
     // 1. Inputs validation
     if (!userId) {
       logger.warn(`[Clubkonnect Controller] Missing userId | reqId=${reqId}`);
-      res.status(401).json({ success: false, message: "Unauthorized: Missing authenticated user context." });
+      res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing authenticated user context. This endpoint requires the client to send a valid Firebase ID Token in the 'Authorization: Bearer <Token>' header, along with the Gateway S2S API Key in the 'X-API-Key' header.",
+      });
       return;
     }
 
