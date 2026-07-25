@@ -26,3 +26,23 @@ function validateClubkonnectConfig(): ClubkonnectConfig {
 }
 
 export const clubkonnectConfig = validateClubkonnectConfig();
+
+// Hardcoded default network mappings as reliable fallback
+export const DEFAULT_NETWORK_MAPPINGS: Record<string, string> = {
+  "MTN": "01",
+  "GLO": "02",
+  "9MOBILE": "03",
+  "ETISALAT": "03",
+  "AIRTEL": "04",
+};
+
+// Network Cache configuration
+export interface NetworkCache {
+  mappings: Record<string, string>;
+  lastFetched: number;
+}
+
+export const networkCache: NetworkCache = {
+  mappings: { ...DEFAULT_NETWORK_MAPPINGS },
+  lastFetched: 0,
+};

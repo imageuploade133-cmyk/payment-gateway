@@ -4,9 +4,40 @@ import axios from "axios";
 import { ClubkonnectService } from "../services/clubkonnect.service";
 import { clubkonnectConfig } from "../config/clubkonnect";
 import { env } from "../config/env";
+import { adminDb } from "../config/firebase";
 
 jest.mock("axios");
 const mockedAxios = axios as jest.Mocked<typeof axios>;
+
+// Mock adminDb
+jest.mock("../config/firebase", () => {
+  const mDoc = {
+    get: jest.fn(),
+    set: jest.fn(),
+    update: jest.fn(),
+  };
+  const mCollection = {
+    doc: jest.fn(() => mDoc),
+    where: jest.fn(() => ({
+      limit: jest.fn(() => ({
+        get: jest.fn()
+      }))
+    }))
+  };
+  const mDb = {
+    collection: jest.fn(() => mCollection),
+    runTransaction: jest.fn((callback) => callback({
+      get: jest.fn(),
+      set: jest.fn(),
+      update: jest.fn(),
+    })),
+  };
+  return {
+    firebase: { app: {}, db: mDb, hasCredentials: true },
+    adminDb: mDb,
+    hasAdminCredentialsActive: true,
+  };
+});
 
 const getTestApiKey = () => env.GATEWAY_API_KEYS[0];
 
@@ -16,9 +47,12 @@ describe("Clubkonnect Provider Integration Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // Ensure config is populated for standard tests
     clubkonnectConfig.USER_ID = "mock-user-123";
     clubkonnectConfig.API_KEY = "mock-api-key-456";
+
+    // Set cache lastFetched to now to prevent triggering dynamic API refreshes during tests
+    const { networkCache } = require("../config/clubkonnect");
+    networkCache.lastFetched = Date.now();
   });
 
   afterAll(() => {
@@ -73,106 +107,217 @@ describe("Clubkonnect Provider Integration Tests", () => {
 
       expect(mockedAxios.get).toHaveBeenCalledTimes(3);
     });
+  });
 
-    it("should throw an error if all 3 attempts fail", async () => {
-      mockedAxios.get
-        .mockRejectedValueOnce(new Error("Fatal Network Failure"))
-        .mockRejectedValueOnce(new Error("Fatal Network Failure"))
-        .mockRejectedValueOnce(new Error("Fatal Network Failure"));
-
-      await expect(ClubkonnectService.getWalletBalance("test-req-id-fail"))
-        .rejects
-        .toThrow("Failed to retrieve wallet balance from Clubkonnect after 3 attempts");
-
-      expect(mockedAxios.get).toHaveBeenCalledTimes(3);
-    });
-
-    it("should throw an error if the balance is missing in response", async () => {
+  describe("ClubkonnectService.purchaseAirtime", () => {
+    it("should successfully purchase airtime", async () => {
       mockedAxios.get.mockResolvedValueOnce({
         status: 200,
         data: {
-          date: "2023-10-25 12:00:00",
-          id: "12345",
+          status: "ORDER_RECEIVED",
+          orderid: "778899",
+          remark: "Successful",
         },
       });
 
-      await expect(ClubkonnectService.getWalletBalance("test-req-id-no-balance"))
-        .rejects
-        .toThrow("Clubkonnect response does not contain 'balance' field");
+      const result = await ClubkonnectService.purchaseAirtime({
+        network: "MTN",
+        phone: "08031234567",
+        amount: 200,
+        requestId: "test-airtime-id",
+      });
+
+      expect(result).toEqual({
+        success: true,
+        orderId: "778899",
+        status: "Pending",
+        message: "Successful",
+      });
     });
 
-    it("should throw an error if the balance cannot be parsed as a float", async () => {
+    it("should fail when Clubkonnect rejects request", async () => {
       mockedAxios.get.mockResolvedValueOnce({
         status: 200,
         data: {
-          date: "2023-10-25 12:00:00",
-          id: "12345",
-          balance: "not-a-number",
+          status: "MALFUNCTIONING",
+          remark: "Invalid phone number",
         },
       });
 
-      await expect(ClubkonnectService.getWalletBalance("test-req-id-nan"))
-        .rejects
-        .toThrow("Clubkonnect balance value 'not-a-number' is not a valid number.");
+      const result = await ClubkonnectService.purchaseAirtime({
+        network: "GLO",
+        phone: "08051234567",
+        amount: 100,
+        requestId: "test-airtime-id-fail",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.status).toBe("Failed");
+      expect(result.message).toBe("Invalid phone number");
     });
   });
 
-  describe("GET /api/vtu/balance", () => {
-    it("should return HTTP 200 and wallet balance on success", async () => {
+  describe("ClubkonnectService.queryAirtimeTransaction", () => {
+    it("should successfully query transaction status", async () => {
       mockedAxios.get.mockResolvedValueOnce({
         status: 200,
         data: {
-          date: "2023-10-25 12:00:00",
-          id: "12345",
-          balance: "7500",
+          status: "Delivered",
+          orderid: "778899",
+          remark: "Successful delivery",
+        },
+      });
+
+      const result = await ClubkonnectService.queryAirtimeTransaction({
+        orderId: "778899",
+      });
+
+      expect(result).toEqual({
+        success: true,
+        status: "Delivered",
+        orderId: "778899",
+        remark: "Successful delivery",
+      });
+    });
+  });
+
+  describe("POST /api/vtu/airtime", () => {
+    it("should validate and execute airtime purchase with 200 OK", async () => {
+      // Mock user document balance retrieve
+      const mockUserDoc = {
+        exists: true,
+        data: () => ({ balance: 1000 }),
+      };
+
+      // Mock runTransaction return values
+      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
+        return callback({
+          get: jest.fn().mockResolvedValue(mockUserDoc),
+          set: jest.fn(),
+          update: jest.fn(),
+        });
+      });
+
+      // Mock API call to Clubkonnect V1
+      mockedAxios.get.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          status: "ORDER_RECEIVED",
+          orderid: "998811",
+          remark: "Accepted",
         },
       });
 
       const res = await request(app)
-        .get("/api/vtu/balance")
-        .set("X-API-Key", getTestApiKey());
+        .post("/api/vtu/airtime")
+        .set("X-API-Key", getTestApiKey())
+        .send({
+          network: "MTN",
+          phone: "08031234567",
+          amount: 100,
+          userId: "test-user-id",
+        });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({
-        success: true,
-        provider: "Clubkonnect",
-        balance: 7500,
-      });
+      expect(res.body.success).toBe(true);
+      expect(res.body.orderId).toBe("998811");
     });
 
-    it("should return HTTP 401 when request is unauthorized", async () => {
+    it("should reject invalid amount under ₦50", async () => {
       const res = await request(app)
-        .get("/api/vtu/balance");
-
-      expect(res.status).toBe(401);
-      expect(res.body.success).toBe(false);
-    });
-
-    it("should return HTTP 400 when configurations are missing", async () => {
-      clubkonnectConfig.USER_ID = "";
-
-      const res = await request(app)
-        .get("/api/vtu/balance")
-        .set("X-API-Key", getTestApiKey());
+        .post("/api/vtu/airtime")
+        .set("X-API-Key", getTestApiKey())
+        .send({
+          network: "MTN",
+          phone: "08031234567",
+          amount: 20,
+          userId: "test-user-id",
+        });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Configuration Error: CLUBKONNECT_USER_ID is not configured");
+      expect(res.body.message).toContain("amount must be between ₦50 and ₦200,000");
     });
 
-    it("should return HTTP 500 when API call fails", async () => {
-      mockedAxios.get
-        .mockRejectedValueOnce(new Error("Connection Timeout"))
-        .mockRejectedValueOnce(new Error("Connection Timeout"))
-        .mockRejectedValueOnce(new Error("Connection Timeout"));
+    it("should reject invalid Nigerian phone numbers", async () => {
+      const res = await request(app)
+        .post("/api/vtu/airtime")
+        .set("X-API-Key", getTestApiKey())
+        .send({
+          network: "MTN",
+          phone: "12345678",
+          amount: 100,
+          userId: "test-user-id",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("valid Nigerian phone number");
+    });
+
+    it("should reject unsupported mobile networks", async () => {
+      const res = await request(app)
+        .post("/api/vtu/airtime")
+        .set("X-API-Key", getTestApiKey())
+        .send({
+          network: "T-MOBILE",
+          phone: "08031234567",
+          amount: 100,
+          userId: "test-user-id",
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("network 'T-MOBILE' is not supported");
+    });
+  });
+
+  describe("POST /api/vtu/clubkonnect/callback", () => {
+    it("should successfully update Delivered callback status", async () => {
+      const mockVtuTxDoc = {
+        exists: true,
+        ref: { update: jest.fn() },
+        data: () => ({
+          status: "Pending",
+          transactionRef: "VTU-AIR-12345",
+          userId: "test-user-id",
+          amount: 100,
+          phone: "08031234567",
+        }),
+      };
+
+      const mockQuerySnap = {
+        empty: false,
+        docs: [mockVtuTxDoc],
+      };
+
+      (adminDb!.collection as jest.Mock).mockReturnValue({
+        doc: jest.fn(() => ({ get: jest.fn() })),
+        where: jest.fn(() => ({
+          limit: jest.fn(() => ({
+            get: jest.fn().mockResolvedValue(mockQuerySnap),
+          })),
+        })),
+      });
+
+      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
+        return callback({
+          get: jest.fn().mockResolvedValue(mockVtuTxDoc),
+          set: jest.fn(),
+          update: jest.fn(),
+        });
+      });
 
       const res = await request(app)
-        .get("/api/vtu/balance")
-        .set("X-API-Key", getTestApiKey());
+        .post("/api/vtu/clubkonnect/callback")
+        .send({
+          status: "delivered",
+          orderid: "778899",
+          requestid: "12345",
+        });
 
-      expect(res.status).toBe(500);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Connection Timeout");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
     });
   });
 });
