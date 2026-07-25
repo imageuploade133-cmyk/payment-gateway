@@ -53,9 +53,13 @@ export const getWalletBalance = async (
  * Handles VTU Airtime purchases.
  * 1. Validates inputs.
  * 2. Authenticates and retrieves the User ID from the Firebase token (Option 1).
- * 3. Atomic wallet verification and debit via Firestore Transactions.
+ * 3. Pre-logs transaction metadata in vtu_transactions.
  * 4. Dispatches the purchase operation to Clubkonnect.
- * 5. Handles success by saving transaction metadata, and auto-refunds on immediate failure.
+ * 5. Returns success on ORDER_RECEIVED, or error on failure.
+ *
+ * NOTE: To prevent double-debiting, the Payment Gateway does NOT debit the user's wallet
+ * during instant checkout. Debiting is owned solely by the Next.js parent application (source of truth).
+ * If the purchase fails, Next.js performs the rollback refund.
  */
 export const purchaseAirtime = async (
   req: AuthenticatedRequest,
@@ -129,77 +133,22 @@ export const purchaseAirtime = async (
     const purchaseRequestId = randomUUID();
     const transactionRef = `VTU-AIR-${purchaseRequestId}`;
 
-    const userDocRef = db.collection("users").doc(userId);
-    const ledgerRef = db.collection("transactions").doc(`tx-${transactionRef}`);
     const vtuTxRef = db.collection("vtu_transactions").doc(transactionRef);
 
-    let debitCommitted = false;
+    // Create vtu transaction record as Pending
+    await vtuTxRef.set({
+      requestId: purchaseRequestId,
+      transactionRef,
+      userId,
+      amount: numAmount,
+      phone: cleanPhone,
+      network: normalizedNetwork,
+      provider: "Clubkonnect",
+      status: "Pending",
+      createdAt: new Date().toISOString(),
+    });
 
-    // 2. Atomic Wallet Verification & Debit Transaction
-    try {
-      await db.runTransaction(async (transaction) => {
-        const userDoc = await transaction.get(userDocRef);
-        if (!userDoc.exists) {
-          throw new Error("USER_NOT_FOUND");
-        }
-
-        const userData = userDoc.data() || {};
-        const currentBalance = Number(userData.balance) || 0;
-
-        if (currentBalance < numAmount) {
-          throw new Error("INSUFFICIENT_FUNDS");
-        }
-
-        // Deduct balance atomically
-        transaction.update(userDocRef, {
-          balance: FieldValue.increment(-numAmount)
-        });
-
-        // Record general ledger transaction record
-        transaction.set(ledgerRef, {
-          userId,
-          amount: numAmount,
-          currency: "NGN",
-          reference: transactionRef,
-          type: "AIRTIME",
-          description: `Airtime purchase of ₦${numAmount} for ${cleanPhone} (${normalizedNetwork})`,
-          recipientName: cleanPhone,
-          status: "PENDING",
-          date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
-          time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-          fee: 0,
-          createdAt: new Date().toISOString(),
-        });
-
-        // Pre-create the vtu transaction as Pending
-        transaction.set(vtuTxRef, {
-          requestId: purchaseRequestId,
-          transactionRef,
-          userId,
-          amount: numAmount,
-          phone: cleanPhone,
-          network: normalizedNetwork,
-          provider: "Clubkonnect",
-          status: "Pending",
-          createdAt: new Date().toISOString(),
-        });
-      });
-
-      debitCommitted = true;
-      logger.info(`[Clubkonnect Controller] Atomic debit successful | userId=${userId} | amount=₦${numAmount} | ref=${transactionRef} | reqId=${reqId}`);
-    } catch (txError: any) {
-      if (txError.message === "USER_NOT_FOUND") {
-        res.status(404).json({ success: false, message: "User profile not found." });
-        return;
-      }
-      if (txError.message === "INSUFFICIENT_FUNDS") {
-        res.status(400).json({ success: false, message: "Insufficient wallet balance to purchase airtime." });
-        return;
-      }
-      throw txError;
-    }
-
-    // 3. Call Clubkonnect Airtime API
+    // 2. Call Clubkonnect Airtime API
     let airtimeResult;
     try {
       airtimeResult = await ClubkonnectService.purchaseAirtime({
@@ -213,9 +162,8 @@ export const purchaseAirtime = async (
       airtimeResult = { success: false, message: apiError.message };
     }
 
-    // 4. Handle results & fallback Auto-refund if failed
+    // 3. Handle results & update transaction metadata
     if (airtimeResult.success) {
-      // Keep as Pending and update OrderID
       await vtuTxRef.update({
         providerOrderId: airtimeResult.orderId || null,
         updatedAt: new Date().toISOString(),
@@ -229,55 +177,14 @@ export const purchaseAirtime = async (
         message: "Airtime purchase order received successfully. Processing...",
       });
     } else {
-      logger.warn(`[Clubkonnect Controller] Purchase failed on provider, initiating Auto-Refund | reason=${airtimeResult.message} | reqId=${reqId}`);
+      logger.warn(`[Clubkonnect Controller] Purchase failed on provider | reason=${airtimeResult.message} | reqId=${reqId}`);
 
-      // Perform Auto-Refund Transaction
-      if (debitCommitted) {
-        try {
-          await db.runTransaction(async (transaction) => {
-            // Re-credit the wallet
-            transaction.update(userDocRef, {
-              balance: FieldValue.increment(numAmount)
-            });
-
-            // Update ledger record status to FAILED
-            transaction.update(ledgerRef, {
-              status: "FAILED",
-              updatedAt: new Date().toISOString()
-            });
-
-            // Log refund ledger record
-            const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${transactionRef}`);
-            transaction.set(refundLedgerRef, {
-              userId,
-              amount: numAmount,
-              currency: "NGN",
-              reference: `REFUND-${transactionRef}`,
-              type: "DEPOSIT",
-              description: `Auto-refund for failed Airtime: ${airtimeResult.message}`,
-              recipientName: cleanPhone,
-              status: "SUCCESS",
-              date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
-              time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-              fee: 0,
-              createdAt: new Date().toISOString(),
-            });
-
-            // Update vtu transaction status to Failed
-            transaction.update(vtuTxRef, {
-              status: "Failed",
-              failureReason: airtimeResult.message || "Provider rejection",
-              refundProcessed: true,
-              refundProcessedAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString()
-            });
-          });
-
-          logger.info(`[Clubkonnect Controller] Auto-Refund successfully executed | ref=${transactionRef} | reqId=${reqId}`);
-        } catch (refundError: any) {
-          logger.error(`[Clubkonnect Controller] Critical: Auto-Refund transaction failed! | error=${refundError.message} | ref=${transactionRef} | reqId=${reqId}`);
-        }
-      }
+      // Update vtu transaction status to Failed
+      await vtuTxRef.update({
+        status: "Failed",
+        failureReason: airtimeResult.message || "Provider rejection",
+        updatedAt: new Date().toISOString()
+      });
 
       res.status(400).json({
         success: false,
