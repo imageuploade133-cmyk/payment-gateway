@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { getAuth } from "firebase-admin/auth";
 import { firebase, initializeFirebaseAdmin } from "../config/firebase";
 import logger from "../config/logger";
