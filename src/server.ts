@@ -10,6 +10,7 @@ const server = app.listen(env.PORT, () => {
   logger.info(`🌐 Port: ${env.PORT}`);
   logger.info(`🛠️  Environment: ${env.NODE_ENV}`);
   logger.info(`🔐 FLW_WEBHOOK_SECRET Configured: ${!!env.FLW_WEBHOOK_SECRET}`);
+  logger.info(`📱 [WhatsApp] Enabled: ${!!env.WHATSAPP_API_URL} | Instance: ${env.WHATSAPP_INSTANCE_ID || "Not Configured"}`);
   logger.info(`==================================================`);
 
   // Start background 60s automated transfer reconciliation loop (Task 5)

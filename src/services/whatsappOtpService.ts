@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import adminDb from "../config/firebase";
 import logger from "../config/logger";
+import { env } from "../config/env";
 
 export interface OtpSession {
   phoneNumber: string;
@@ -57,10 +58,10 @@ export class WhatsAppOtpService {
    * Sends OTP via external WhatsApp gateway
    */
   public static async sendOtp(phoneNumber: string, type: string = "signup"): Promise<{ message: string; devOtp?: string }> {
-    const isProd = process.env.NODE_ENV === "production";
-    const whatsappApiUrl = process.env.WHATSAPP_API_URL;
-    const whatsappApiKey = process.env.WHATSAPP_API_KEY;
-    const whatsappInstanceId = process.env.WHATSAPP_INSTANCE_ID;
+    const isProd = env.NODE_ENV === "production";
+    const whatsappApiUrl = env.WHATSAPP_API_URL;
+    const whatsappApiKey = env.WHATSAPP_API_KEY;
+    const whatsappInstanceId = env.WHATSAPP_INSTANCE_ID;
 
     // Validate configuration
     if (!whatsappApiUrl || !whatsappApiKey || !whatsappInstanceId) {

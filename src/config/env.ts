@@ -17,6 +17,11 @@ export interface EnvConfig {
   GATEWAY_API_KEYS: string[]; // List of valid API Keys supporting rotation
   JWT_SECRET: string;
   CORS_ALLOWED_ORIGINS: string[];
+  WHATSAPP_API_URL: string;
+  WHATSAPP_API_KEY: string;
+  WHATSAPP_INSTANCE_ID: string;
+  WHATSAPP_ADMIN_USERNAME: string;
+  WHATSAPP_ADMIN_PASSWORD: string;
 }
 
 function validateEnv(): EnvConfig {
@@ -48,6 +53,23 @@ function validateEnv(): EnvConfig {
     ? rawAllowedOrigins.split(",").map(o => o.trim()).filter(Boolean)
     : ["*"]; // Default to wildcard or restrict as configured
 
+  const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL || "";
+  const WHATSAPP_API_KEY = process.env.WHATSAPP_API_KEY || "";
+  const WHATSAPP_INSTANCE_ID = process.env.WHATSAPP_INSTANCE_ID || "";
+  const WHATSAPP_ADMIN_USERNAME = process.env.WHATSAPP_ADMIN_USERNAME || "";
+  const WHATSAPP_ADMIN_PASSWORD = process.env.WHATSAPP_ADMIN_PASSWORD || "";
+
+  const missingWhatsappVars: string[] = [];
+  if (!process.env.WHATSAPP_API_URL) missingWhatsappVars.push("WHATSAPP_API_URL");
+  if (!process.env.WHATSAPP_API_KEY) missingWhatsappVars.push("WHATSAPP_API_KEY");
+  if (!process.env.WHATSAPP_INSTANCE_ID) missingWhatsappVars.push("WHATSAPP_INSTANCE_ID");
+  if (!process.env.WHATSAPP_ADMIN_USERNAME) missingWhatsappVars.push("WHATSAPP_ADMIN_USERNAME");
+  if (!process.env.WHATSAPP_ADMIN_PASSWORD) missingWhatsappVars.push("WHATSAPP_ADMIN_PASSWORD");
+
+  if (missingWhatsappVars.length > 0) {
+    logger.warn(`[WhatsApp] Missing environment variables: ${missingWhatsappVars.join(", ")}`);
+  }
+
   const config: EnvConfig = {
     PORT,
     NODE_ENV,
@@ -62,6 +84,11 @@ function validateEnv(): EnvConfig {
     GATEWAY_API_KEYS,
     JWT_SECRET,
     CORS_ALLOWED_ORIGINS,
+    WHATSAPP_API_URL,
+    WHATSAPP_API_KEY,
+    WHATSAPP_INSTANCE_ID,
+    WHATSAPP_ADMIN_USERNAME,
+    WHATSAPP_ADMIN_PASSWORD,
   };
 
   logger.info(`[Config] Environment validated successfully. Mode: ${NODE_ENV} | Active API Keys loaded: ${GATEWAY_API_KEYS.length}`);
