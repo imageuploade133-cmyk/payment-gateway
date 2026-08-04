@@ -3,7 +3,6 @@ import adminDb from "../config/firebase";
 import logger from "../config/logger";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FieldValue } from "firebase-admin/firestore";
-import fetch from "node-fetch";
 
 interface FlwTxRecord {
   id: string;
