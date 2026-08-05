@@ -105,9 +105,9 @@ export class WhatsAppOtpService {
 
     // Selected random message templates to secure against automated pattern detection and spam filtering
     const messageTemplates = [
-      `Your E-Tech Access OTP verification code is: *${rawOtp}*. It expires in 10 minutes. Do not share this code with anyone.`,
-      `Security Alert: Use *${rawOtp}* to verify your E-Tech account phone number. This OTP is valid for 10 minutes.`,
-      `Your secure one-time passcode is *${rawOtp}* for E-Tech registration. Please enter this code to complete verification.`
+      `Your E-Global Pay Access OTP verification code is: *${rawOtp}*. It expires in 10 minutes. Do not share this code with anyone.`,
+      `Security Alert: Use *${rawOtp}* to verify your E-Global Pay account phone number. This OTP is valid for 10 minutes.`,
+      `Your secure one-time passcode is *${rawOtp}* for E-Global Pay registration. Please enter this code to complete verification.`
     ];
     const messageText = messageTemplates[crypto.randomInt(0, messageTemplates.length)];
 
