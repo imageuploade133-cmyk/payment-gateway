@@ -124,7 +124,11 @@ const createVirtualAccountSchema = z.object({
 });
 
 const verifyPaymentSchema = z.object({
-  transaction_id: z.string().min(1, "transaction_id is required"),
+  transaction_id: z.string().optional(),
+  tx_ref: z.string().optional(),
+  txRef: z.string().optional(),
+}).refine(data => data.transaction_id || data.tx_ref || data.txRef, {
+  message: "Either transaction_id, tx_ref, or txRef must be provided",
 });
 
 const initializePaymentSchema = z.object({
@@ -710,17 +714,24 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
       return;
     }
 
-    const { transaction_id } = validationResult.data;
+    const { transaction_id, tx_ref, txRef } = validationResult.data;
 
-    const result = await PaymentVerificationService.verifyTransaction({
-      transaction_id,
-      requestId: reqId,
-    });
+    const referenceToUse = tx_ref || txRef || "";
+
+    const result = transaction_id
+      ? await PaymentVerificationService.verifyTransaction({
+          transaction_id,
+          requestId: reqId,
+        })
+      : await PaymentVerificationService.verifyTransactionByReference({
+          tx_ref: referenceToUse,
+          requestId: reqId,
+        });
 
     if (result.success) {
       // Self-healing check: automatically credit user's wallet if this transaction is a successful deposit
       // that hasn't been processed yet (serves as immediate fallback for missed webhooks).
-      const flwId = result.flw_id || transaction_id;
+      const flwId = result.flw_id || transaction_id || "";
       const amount = Number(result.amount) || 0;
       const txRef = result.reference || "";
       const email = result.customer?.email || "";

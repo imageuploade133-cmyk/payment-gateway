@@ -180,4 +180,74 @@ export class PaymentVerificationService {
       };
     }
   }
+
+  /**
+   * Directly verifies a transaction reference (tx_ref) with Flutterwave's V3 API.
+   */
+  public static async verifyTransactionByReference(params: { tx_ref: string; requestId: string }): Promise<VerificationResult> {
+    const { tx_ref, requestId } = params;
+
+    logger.info(
+      `[PaymentVerificationService] Verifying transaction by reference | tx_ref=${tx_ref} | reqId=${requestId}`
+    );
+
+    try {
+      const client = getFlutterwaveClient();
+
+      const response = await client.request("get", `/transactions/verify_by_reference?tx_ref=${tx_ref}`);
+
+      if (response && response.status === "success" && response.data) {
+        const txData = response.data;
+        const flwStatus = txData.status?.toLowerCase();
+
+        logger.info(
+          `[PaymentVerificationService] Transaction reference checked | tx_ref=${tx_ref} | status=${flwStatus} | reqId=${requestId}`
+        );
+
+        return {
+          success: flwStatus === "successful",
+          status: flwStatus === "successful" ? "successful" : flwStatus === "failed" ? "failed" : "pending",
+          amount: Number(txData.amount) || 0,
+          currency: txData.currency || "NGN",
+          reference: txData.tx_ref,
+          flw_id: txData.id?.toString(),
+          customer: {
+            name: txData.customer?.name || "Customer",
+            email: txData.customer?.email || "customer@e-tech-hub.com",
+            phone: txData.customer?.phone_number || undefined,
+          },
+        };
+      }
+
+      logger.error(
+        `[PaymentVerificationService] Unexpected verification payload structure | tx_ref=${tx_ref} | reqId=${requestId}`
+      );
+      return {
+        success: false,
+        status: "pending",
+        amount: 0,
+        currency: "NGN",
+        reference: tx_ref,
+        flw_id: "",
+        customer: { name: "", email: "" },
+        message: "The payment verification payload returned unexpected results.",
+      };
+
+    } catch (error: any) {
+      const errorMsg = error.message || "Unknown verification failure";
+      logger.error(
+        `[PaymentVerificationService] Reference verification failed on provider side | tx_ref=${tx_ref} | error=${errorMsg} | reqId=${requestId}`
+      );
+      return {
+        success: false,
+        status: "failed",
+        amount: 0,
+        currency: "NGN",
+        reference: tx_ref,
+        flw_id: "",
+        customer: { name: "", email: "" },
+        message: "Failed to verify transaction reference with payment provider.",
+      };
+    }
+  }
 }
