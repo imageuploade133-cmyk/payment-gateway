@@ -474,7 +474,7 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
       email: req.body.email,
       is_permanent: req.body.is_permanent ?? req.body.isPermanent,
       bvn: req.body.bvn,
-      tx_ref: req.body.tx_ref ?? req.body.txRef,
+      tx_ref: req.body.tx_ref ?? req.body.txRef ?? (userId ? `user-wallet-${userId}` : undefined),
       phonenumber: req.body.phonenumber ?? req.body.phoneNumber ?? req.body.phone,
       firstname: req.body.firstname ?? req.body.firstName,
       lastname: req.body.lastname ?? req.body.lastName,
@@ -718,7 +718,131 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
     });
 
     if (result.success) {
-      res.status(200).json(result);
+      // Self-healing check: automatically credit user's wallet if this transaction is a successful deposit
+      // that hasn't been processed yet (serves as immediate fallback for missed webhooks).
+      const flwId = result.flw_id || transaction_id;
+      const amount = Number(result.amount) || 0;
+      const txRef = result.reference || "";
+      const email = result.customer?.email || "";
+
+      let credited = false;
+      let newBalance = null;
+
+      if (adminDb && amount > 0) {
+        try {
+          const idempotency = FirestoreIdempotency.getInstance();
+          const isDuplicate = await idempotency.isWebhookDuplicate(flwId);
+
+          if (!isDuplicate) {
+            logger.info(`[verifyPayment Self-Healing] Found unprocessed successful deposit flwId=${flwId}. Processing credit...`);
+            
+            // Mark as processed in Firestore and memory immediately to prevent race conditions
+            await idempotency.saveWebhookProcessed(flwId, "charge.completed");
+
+            let userId = "";
+
+            // 1. Try matching user-wallet-<uid> inside txRef
+            if (txRef) {
+              if (txRef.startsWith("user-wallet-")) {
+                userId = txRef.replace("user-wallet-", "");
+                logger.info(`[verifyPayment Self-Healing] User ID extracted from user-wallet prefix in txRef: ${userId}`);
+              } else if (txRef.startsWith("flw-tx-")) {
+                const parts = txRef.split("-");
+                if (parts.length >= 3) {
+                  userId = parts[2];
+                  logger.info(`[verifyPayment Self-Healing] User ID extracted from standard flw-tx pattern in txRef: ${userId}`);
+                }
+              }
+            }
+
+            // 2. Fallback: Lookup User document by email from 'users' collection
+            if (!userId && email) {
+              logger.info(`[verifyPayment Self-Healing] Falling back to email lookup inside 'users' collection for: ${email}`);
+              const userEmailSnap = await adminDb.collection("users").where("email", "==", email).get();
+              if (!userEmailSnap.empty) {
+                userId = userEmailSnap.docs[0].id;
+                logger.info(`[verifyPayment Self-Healing] User ID resolved via email lookup: ${userId}`);
+              }
+            }
+
+            if (userId) {
+              const userRef = adminDb.collection("users").doc(userId);
+              const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
+              const ledgerRef = adminDb.collection("transactions").doc(`tx-DEPOSIT-${flwId}`);
+
+              await adminDb.runTransaction(async (transaction) => {
+                const userDoc = await transaction.get(userRef);
+                if (!userDoc.exists) {
+                  throw new Error(`User profile document not found in Firestore for UID: ${userId}`);
+                }
+
+                const walletDoc = await transaction.get(walletRef);
+                const walletExists = walletDoc.exists;
+
+                // Credit legacy NGN user profile balance
+                const oldBalance = Number(userDoc.data()?.balance) || 0;
+                newBalance = oldBalance + amount;
+
+                transaction.update(userRef, {
+                  balance: FieldValue.increment(amount),
+                  updatedAt: new Date().toISOString()
+                });
+
+                // Credit sub-collection wallets balance
+                if (walletExists) {
+                  transaction.update(walletRef, {
+                    balance: FieldValue.increment(amount),
+                    updatedAt: new Date().toISOString()
+                  });
+                } else {
+                  transaction.set(walletRef, {
+                    userId,
+                    currency: "NGN",
+                    balance: amount,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                  });
+                }
+
+                // Create General Ledger transaction record for history
+                transaction.set(ledgerRef, {
+                  userId,
+                  amount,
+                  currency: result.currency || "NGN",
+                  reference: txRef || `DEP-${flwId}`,
+                  flwId: flwId,
+                  type: "DEPOSIT",
+                  description: "Virtual Account Funding via Bank Transfer (Verified-Backup)",
+                  recipientName: "Self",
+                  status: "SUCCESS",
+                  date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+                  time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+                  fee: 0,
+                  createdAt: new Date().toISOString(),
+                });
+              });
+
+              credited = true;
+              logger.info(`[verifyPayment Self-Healing] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
+            } else {
+              logger.error(`[verifyPayment Self-Healing] FAILED to resolve user ID for verified payment. Transaction ID: ${flwId} | txRef: ${txRef}`);
+            }
+          } else {
+            logger.info(`[verifyPayment Self-Healing] Transaction flwId=${flwId} was already credited previously.`);
+          }
+        } catch (creditErr: any) {
+          logger.error(`[verifyPayment Self-Healing] Credit Transaction FAILED for transaction_id=${flwId}: ${creditErr.message}`);
+        }
+      }
+
+      res.status(200).json({
+        ...result,
+        credited,
+        newBalance,
+        message: credited
+          ? `Payment verified and wallet credited successfully with ₦${amount.toLocaleString()}.`
+          : "Payment verified successfully."
+      });
     } else {
       res.status(400).json(result);
     }
