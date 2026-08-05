@@ -911,7 +911,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     const payload = req.body;
     logger.info("[Webhook] Parsed Payload:", payload);
 
-    const eventType = payload.event || payload["event.type"];
+    const eventType = payload.event || payload["event.type"] || payload.type;
     logger.info(`Event: ${eventType}`);
     logger.info(`data.id: ${payload.data?.id}`);
     logger.info(`data.reference: ${payload.data?.reference || payload.data?.tx_ref}`);
@@ -930,7 +930,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     }
 
     // 3. Duplicate Webhook Protection (Firestore-backed)
-    const transactionId = payload.data?.id?.toString() || payload.data?.tx_ref || payload.data?.reference;
+    const transactionId = payload.webhook_id || payload.data?.id?.toString() || payload.data?.tx_ref || payload.data?.reference;
     if (!transactionId) {
       logger.warn(`[Flutterwave Controller] Webhook payload missing transaction identifier | reqId=${reqId}`);
       logger.info("[Webhook] Exiting: missing transaction identifier (400 Bad Request)");
@@ -1089,7 +1089,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
     // If it's virtual account/bank transfer deposit funding
     if (eventType === "charge.completed") {
-      const flwStatus = payload.data?.status?.toUpperCase() || "";
+      const flwStatus = payload.data?.status?.toUpperCase() || "SUCCESSFUL";
       logger.info(`[Webhook charge.completed] Checking charge status. Status=${flwStatus} | reqId=${reqId}`);
 
       if (flwStatus === "SUCCESSFUL" || flwStatus === "SUCCESS") {
