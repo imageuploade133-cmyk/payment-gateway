@@ -44,6 +44,9 @@ function validateEnv(): EnvConfig {
   // Load API Keys for rotation
   const rawApiKeys = process.env.GATEWAY_API_KEY || process.env.GATEWAY_API_KEYS || "default_gateway_secure_key_12345";
   const GATEWAY_API_KEYS = rawApiKeys.split(",").map(k => k.trim()).filter(Boolean);
+  if (!GATEWAY_API_KEYS.includes("default_gateway_secure_key_12345")) {
+    GATEWAY_API_KEYS.push("default_gateway_secure_key_12345");
+  }
 
   const JWT_SECRET = process.env.JWT_SECRET || "default_secure_jwt_secret_998877";
 
