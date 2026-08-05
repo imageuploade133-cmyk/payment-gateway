@@ -942,6 +942,130 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
       }
     }
 
+    // If it's virtual account/bank transfer deposit funding
+    if (eventType === "charge.completed") {
+      const flwStatus = payload.data?.status?.toUpperCase() || "";
+      logger.info(`[Webhook charge.completed] Checking charge status. Status=${flwStatus} | reqId=${reqId}`);
+
+      if (flwStatus === "SUCCESSFUL" || flwStatus === "SUCCESS") {
+        const amount = Number(payload.data?.amount) || 0;
+        const flwId = payload.data?.id?.toString();
+        const txRef = payload.data?.tx_ref || "";
+        const email = payload.data?.customer?.email || "";
+
+        logger.info(`[Webhook charge.completed] Extracting User ID... txRef=${txRef} | email=${email} | amount=${amount} | reqId=${reqId}`);
+
+        let userId = "";
+
+        // 1. Try metadata
+        if (payload.data?.meta?.userId) {
+          userId = payload.data?.meta?.userId;
+          logger.info(`[Webhook charge.completed] User ID extracted from payload.data.meta.userId: ${userId}`);
+        } else if (payload.data?.meta?.user_id) {
+          userId = payload.data?.meta?.user_id;
+          logger.info(`[Webhook charge.completed] User ID extracted from payload.data.meta.user_id: ${userId}`);
+        }
+
+        // 2. Try matching user-wallet-<uid> or flw-tx-<uid>-<timestamp> inside txRef
+        if (!userId && txRef) {
+          if (txRef.startsWith("user-wallet-")) {
+            userId = txRef.replace("user-wallet-", "");
+            logger.info(`[Webhook charge.completed] User ID extracted from user-wallet prefix in txRef: ${userId}`);
+          } else if (txRef.startsWith("flw-tx-")) {
+            const parts = txRef.split("-");
+            if (parts.length >= 3) {
+              userId = parts[2];
+              logger.info(`[Webhook charge.completed] User ID extracted from standard flw-tx pattern in txRef: ${userId}`);
+            }
+          }
+        }
+
+        // 3. Fallback: Lookup User document by email from 'users' collection
+        if (!userId && email && adminDb) {
+          logger.info(`[Webhook charge.completed] Falling back to email lookup inside 'users' collection for: ${email}`);
+          try {
+            const userEmailSnap = await adminDb.collection("users").where("email", "==", email).get();
+            if (!userEmailSnap.empty) {
+              userId = userEmailSnap.docs[0].id;
+              logger.info(`[Webhook charge.completed] User ID resolved via email lookup: ${userId}`);
+            }
+          } catch (emailErr: any) {
+            logger.error(`[Webhook charge.completed] Email lookup failed: ${emailErr.message}`);
+          }
+        }
+
+        if (userId && adminDb) {
+          logger.info(`[Webhook charge.completed] Executing atomic Firestore transaction to credit user wallet. User: ${userId} | Amount: ${amount} | reqId=${reqId}`);
+          try {
+            const userRef = adminDb.collection("users").doc(userId);
+            const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
+            const ledgerRef = adminDb.collection("transactions").doc(`tx-DEPOSIT-${transactionId}`);
+
+            await adminDb.runTransaction(async (transaction) => {
+              logger.info(`[Webhook Transaction] Reading user profile document...`);
+              const userDoc = await transaction.get(userRef);
+              if (!userDoc.exists) {
+                throw new Error(`User profile document not found in Firestore for UID: ${userId}`);
+              }
+
+              logger.info(`[Webhook Transaction] Reading NGN wallet document...`);
+              const walletDoc = await transaction.get(walletRef);
+              const walletExists = walletDoc.exists;
+
+              logger.info(`[Webhook Transaction] Registering Deposit Ledger and incrementing balances...`);
+              
+              // 1. Credit legacy NGN user profile balance
+              transaction.update(userRef, {
+                balance: FieldValue.increment(amount),
+                updatedAt: new Date().toISOString()
+              });
+
+              // 2. Credit sub-collection wallets balance
+              if (walletExists) {
+                transaction.update(walletRef, {
+                  balance: FieldValue.increment(amount),
+                  updatedAt: new Date().toISOString()
+                });
+              } else {
+                transaction.set(walletRef, {
+                  userId,
+                  currency: "NGN",
+                  balance: amount,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString()
+                });
+              }
+
+              // 3. Create General Ledger transaction record for history
+              transaction.set(ledgerRef, {
+                userId,
+                amount,
+                currency: payload.data?.currency || "NGN",
+                reference: txRef || `DEP-${transactionId}`,
+                flwId: flwId || transactionId,
+                type: "DEPOSIT",
+                description: "Virtual Account Funding via Bank Transfer",
+                recipientName: "Self",
+                status: "SUCCESS",
+                date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+                time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+                fee: 0,
+                createdAt: new Date().toISOString(),
+              });
+            });
+
+            logger.info(`[Webhook charge.completed] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
+          } catch (txError: any) {
+            logger.error(`[Webhook charge.completed] Firestore Credit Transaction FAILED for User: ${userId} | Error: ${txError.message}`);
+          }
+        } else {
+          logger.error(`[Webhook charge.completed] FAILED to resolve user ID for webhook payment. Transaction ID: ${transactionId} | txRef: ${txRef}`);
+        }
+      } else {
+        logger.info(`[Webhook charge.completed] Ignored: status is not successful (${flwStatus})`);
+      }
+    }
+
     logger.info(
       `[Flutterwave Controller] Webhook processed successfully | transactionId=${transactionId} | ref=${payload.data?.tx_ref || payload.data?.reference} | reqId=${reqId}`
     );
