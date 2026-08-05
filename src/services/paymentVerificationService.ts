@@ -194,7 +194,25 @@ export class PaymentVerificationService {
     try {
       const client = getFlutterwaveClient();
 
-      const response = await client.request("get", `/transactions/verify_by_reference?tx_ref=${tx_ref}`);
+      let response: any;
+      try {
+        response = await client.request("get", `/transactions/verify_by_reference?tx_ref=${tx_ref}`);
+      } catch (err: any) {
+        logger.warn(
+          `[PaymentVerificationService] verify_by_reference failed with error: ${err.message}. Trying fallback general transactions list query...`
+        );
+        // Fallback: Query all transactions filtering by tx_ref
+        const queryRes = await client.request("get", `/transactions?tx_ref=${tx_ref}`);
+        if (queryRes && queryRes.status === "success" && Array.isArray(queryRes.data) && queryRes.data.length > 0) {
+          response = {
+            status: "success",
+            data: queryRes.data[0]
+          };
+          logger.info(`[PaymentVerificationService] Fallback general transactions query succeeded for tx_ref=${tx_ref}`);
+        } else {
+          throw err; // rethrow original error if fallback also yields no results
+        }
+      }
 
       if (response && response.status === "success" && response.data) {
         const txData = response.data;
