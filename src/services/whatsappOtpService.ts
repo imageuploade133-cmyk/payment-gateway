@@ -118,8 +118,6 @@ export class WhatsAppOtpService {
     if (whatsappApiUrl && whatsappApiKey && whatsappInstanceId) {
       try {
         const payload = {
-          instance_id: whatsappInstanceId,
-          access_token: whatsappApiKey,
           number: cleanPhone,
           message: messageText,
         };
@@ -128,7 +126,11 @@ export class WhatsAppOtpService {
 
         const res = await fetch(whatsappApiUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": whatsappApiKey,
+            "X-Instance-ID": whatsappInstanceId,
+          },
           body: JSON.stringify(payload),
         });
 
