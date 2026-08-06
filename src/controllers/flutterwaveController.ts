@@ -835,6 +835,19 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
 
               credited = true;
               logger.info(`[verifyPayment Self-Healing] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
+
+              // Send Notification on successful wallet deposit crediting
+              try {
+                const { NotificationService } = require("../services/notificationService");
+                await NotificationService.sendPushNotification(userId, {
+                  title: "💰 Deposit Successful",
+                  body: `₦${amount.toLocaleString()} has been credited to your wallet.`,
+                  type: "transaction",
+                  url: "/history",
+                });
+              } catch (notifErr: any) {
+                logger.error(`[verifyPayment Notification Error] Failed to send push: ${notifErr.message}`);
+              }
             } else {
               logger.error(`[verifyPayment Self-Healing] FAILED to resolve user ID for verified payment. Transaction ID: ${flwId} | txRef: ${txRef}`);
             }
