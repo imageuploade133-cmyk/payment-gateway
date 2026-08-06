@@ -197,6 +197,19 @@ export class KycService {
 
     logger.info(`[KycService] Successfully provisioned NGN & USD virtual accounts for verified user ${userId}`);
 
+    // Send KYC Approved Notification
+    try {
+      const { NotificationService } = require("./notificationService");
+      await NotificationService.sendPushNotification(userId, {
+        title: "🎉 KYC Identity Approved",
+        body: "Congratulations! Your identity verification is successful and your virtual accounts have been allocated.",
+        type: "security",
+        url: "/profile",
+      });
+    } catch (notifErr: any) {
+      logger.error(`[KycService Exception] Failed to send KYC approved notification: ${notifErr.message}`);
+    }
+
     return {
       success: true,
       status: "VERIFIED",

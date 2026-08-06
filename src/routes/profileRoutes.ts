@@ -62,6 +62,22 @@ router.post("/verify-kyc", gatewayAuthMiddleware, async (req: Request, res: Resp
     });
   } catch (error: any) {
     logger.error(`[ProfileRoutes] verify-kyc failure: ${error.message} | reqId=${reqId}`);
+
+    // Send KYC Rejected Notification
+    try {
+      const { NotificationService } = require("../services/notificationService");
+      if (req.body.userId) {
+        await NotificationService.sendPushNotification(req.body.userId, {
+          title: "❌ KYC Identity Rejected",
+          body: `Identity verification failed: ${error.message || "Please check your document details."}`,
+          type: "security",
+          url: "/profile",
+        });
+      }
+    } catch (notifErr: any) {
+      logger.error(`[ProfileRoutes Exception] Failed to send KYC rejection notification: ${notifErr.message}`);
+    }
+
     res.status(400).json({
       success: false,
       message: error.message || "Identity verification failed.",
