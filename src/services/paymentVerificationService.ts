@@ -10,6 +10,7 @@ export interface CreateVirtualAccountParams {
   firstname: string;
   lastname: string;
   requestId: string;
+  idempotencyKey?: string;
 }
 
 export interface VirtualAccountDetails {
@@ -47,14 +48,16 @@ export class PaymentVerificationService {
    * Provision a virtual account (permanent or dynamic) using Flutterwave.
    */
   public static async createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountDetails> {
-    const { email, is_permanent, bvn, tx_ref, phonenumber, firstname, lastname, requestId } = params;
+    const { email, is_permanent, bvn, tx_ref, phonenumber, firstname, lastname, requestId, idempotencyKey } = params;
 
     logger.info(
-      `[PaymentVerificationService] Creating virtual account | tx_ref=${tx_ref} | email=${email} | reqId=${requestId}`
+      `[PaymentVerificationService] Creating virtual account | tx_ref=${tx_ref} | email=${email} | idempotencyKey=${idempotencyKey} | reqId=${requestId}`
     );
 
     try {
       const client = getFlutterwaveClient();
+
+      const headers = idempotencyKey ? { "X-Idempotency-Key": idempotencyKey } : undefined;
 
       const response = await client.request("post", "/virtual-account-numbers", {
         email,
@@ -64,7 +67,7 @@ export class PaymentVerificationService {
         phonenumber,
         firstname,
         lastname,
-      });
+      }, headers);
 
       if (response && response.status === "success" && response.data) {
         logger.info(
@@ -108,6 +111,40 @@ export class PaymentVerificationService {
         reference: tx_ref,
         message: "Unable to provision virtual account details with provider.",
       };
+    }
+  }
+
+  /**
+   * Query virtual account details by its transaction reference (tx_ref) from Flutterwave.
+   * This is extremely important to verify if a virtual account already exists prior to retrying provisioning.
+   */
+  public static async getVirtualAccountByRef(tx_ref: string, requestId: string): Promise<any> {
+    logger.info(
+      `[PaymentVerificationService] Querying virtual account by reference | tx_ref=${tx_ref} | reqId=${requestId}`
+    );
+
+    try {
+      const client = getFlutterwaveClient();
+      const response = await client.request("get", `/virtual-account-numbers/${tx_ref}`);
+
+      if (response && response.status === "success" && response.data) {
+        logger.info(
+          `[PaymentVerificationService] Existing virtual account resolved successfully for tx_ref=${tx_ref}`
+        );
+        return {
+          success: true,
+          bank_name: response.data.bank_name || "Wema Bank",
+          account_number: response.data.account_number,
+          account_name: response.data.account_name,
+          currency: response.data.currency || "NGN",
+        };
+      }
+      return { success: false, message: "No virtual account found with this reference." };
+    } catch (error: any) {
+      logger.warn(
+        `[PaymentVerificationService] getVirtualAccountByRef returned error: ${error.message}. Resolving as not found.`
+      );
+      return { success: false, error: error.message };
     }
   }
 

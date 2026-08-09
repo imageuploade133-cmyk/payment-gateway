@@ -358,6 +358,14 @@ export class KycService {
     const hashedId = this.hashIdentityNumber(subData.documentNumber);
     const submissionRef = adminDb!.collection("kyc_submissions").doc(userId);
 
+    // 1. Establish deterministic tx_ref/idempotencyKey based on userId
+    const tx_ref = (subData as any).txRef || `flw-kyc-idempotent-${userId}`;
+
+    // Persist txRef to submissions document if not already written so that future retries use the exact same key
+    if (!(subData as any).txRef) {
+      await submissionRef.set({ txRef: tx_ref }, { merge: true });
+    }
+
     await this.writeAuditLog({
       userId,
       action: "KYC_PROVISIONING_STARTED",
@@ -370,46 +378,79 @@ export class KycService {
 
     let ngnAccount: any = null;
 
+    // 2. Query Flutterwave first by reference to verify if it has already been provisioned
     try {
-      const tx_ref = `flw-kyc-${userId}-${Date.now()}`;
-      logger.info(`[KycService] Provisioning static virtual account with Flutterwave. tx_ref=${tx_ref}`);
-
-      const flwResult = await PaymentVerificationService.createVirtualAccount({
-        email: subData.email,
-        is_permanent: true,
-        bvn: subData.documentNumber,
-        tx_ref,
-        phonenumber: subData.phone,
-        firstname: subData.firstName,
-        lastname: subData.lastName,
-        requestId: `kyc-admin-approve-${userId}`,
-      });
-
-      if (flwResult.success) {
+      logger.info(`[KycService] Idempotency Check: Querying Flutterwave for existing account reference | tx_ref=${tx_ref}`);
+      const checkRes = await PaymentVerificationService.getVirtualAccountByRef(tx_ref, requestId);
+      if (checkRes && checkRes.success) {
+        logger.info(`[KycService] Idempotency Match: Virtual account already exists for tx_ref=${tx_ref}. Restoring details.`);
         ngnAccount = {
-          bank_name: flwResult.bank_name,
-          account_number: flwResult.account_number,
-          account_name: flwResult.account_name,
-          currency: flwResult.currency,
+          bank_name: checkRes.bank_name,
+          account_number: checkRes.account_number,
+          account_name: checkRes.account_name,
+          currency: checkRes.currency,
         };
 
-        // Persist NGN static account details to wallet_accounts collection
+        // Persist NGN static account details to wallet_accounts collection immediately
         await adminDb!.collection("wallet_accounts").doc(userId).set({
           userId,
-          accountNumber: flwResult.account_number,
-          bankName: flwResult.bank_name,
-          accountName: flwResult.account_name,
-          currency: "NGN",
+          accountNumber: checkRes.account_number,
+          bankName: checkRes.bank_name,
+          accountName: checkRes.account_name,
+          currency: checkRes.currency || "NGN",
           isPermanent: true,
           status: "active",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         }, { merge: true });
-      } else {
-        throw new Error(flwResult.message || "Failed to receive success response from Flutterwave.");
       }
-    } catch (flwErr: any) {
-      logger.error(`[KycService] Upstream NGN virtual account creation failed: ${flwErr.message}`);
+    } catch (checkErr: any) {
+      logger.warn(`[KycService] Idempotency lookup error: ${checkErr.message}. Proceeding to create.`);
+    }
+
+    // 3. Create virtual account with deterministic tx_ref and X-Idempotency-Key if not resolved in step 2
+    if (!ngnAccount) {
+      try {
+        logger.info(`[KycService] Provisioning static virtual account with Flutterwave. tx_ref=${tx_ref}`);
+
+        const flwResult = await PaymentVerificationService.createVirtualAccount({
+          email: subData.email,
+          is_permanent: true,
+          bvn: subData.documentNumber,
+          tx_ref,
+          phonenumber: subData.phone,
+          firstname: subData.firstName,
+          lastname: subData.lastName,
+          requestId: `kyc-admin-approve-${userId}`,
+          idempotencyKey: tx_ref, // Utilizing Flutterwave-supported X-Idempotency-Key
+        });
+
+        if (flwResult.success) {
+          ngnAccount = {
+            bank_name: flwResult.bank_name,
+            account_number: flwResult.account_number,
+            account_name: flwResult.account_name,
+            currency: flwResult.currency,
+          };
+
+          // Persist NGN static account details to wallet_accounts collection
+          await adminDb!.collection("wallet_accounts").doc(userId).set({
+            userId,
+            accountNumber: flwResult.account_number,
+            bankName: flwResult.bank_name,
+            accountName: flwResult.account_name,
+            currency: "NGN",
+            isPermanent: true,
+            status: "active",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }, { merge: true });
+        } else {
+          throw new Error(flwResult.message || "Failed to receive success response from Flutterwave.");
+        }
+      } catch (flwErr: any) {
+        logger.error(`[KycService] Upstream NGN virtual account creation failed: ${flwErr.message}`);
+      }
     }
 
     if (ngnAccount) {
