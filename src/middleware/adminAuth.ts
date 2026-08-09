@@ -41,3 +41,31 @@ export function adminAuthMiddleware(
     message: "Forbidden: Admin privileges or a valid internal service API key are required to access this endpoint.",
   });
 }
+
+/**
+ * Strict middleware to restrict access to authenticated human administrators only.
+ * Strictly requires a verified Firebase Admin custom claim ({ admin: true }).
+ * S2S API keys are strictly rejected.
+ */
+export function strictHumanAdminAuthMiddleware(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const reqId = req.requestId;
+
+  // Check for Firebase Admin claim (admin == true)
+  if (req.user && req.user.admin === true) {
+    logger.info(`[StrictHumanAdmin] Admin privilege verified via Firebase Auth custom claims. User: ${req.user.uid} | reqId=${reqId}`);
+    return next();
+  }
+
+  logger.warn(
+    `[StrictHumanAdmin] Access denied to secure human-admin endpoint | user=${req.user?.uid || "anonymous"} | reqId=${reqId}`
+  );
+
+  res.status(403).json({
+    success: false,
+    message: "Forbidden: This administrative action requires a verified human administrator session. API Keys are not authorized.",
+  });
+}

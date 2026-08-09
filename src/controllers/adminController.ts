@@ -3,6 +3,8 @@ import adminDb from "../config/firebase";
 import logger from "../config/logger";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FieldValue } from "firebase-admin/firestore";
+import { KycService } from "../services/kycService";
+import { AuthenticatedRequest } from "../middleware/auth";
 
 interface FlwTxRecord {
   id: string;
@@ -134,10 +136,10 @@ export class AdminController {
           todaysInvestments,
           todaysAirtime,
           todaysBills,
-          webhookCount: webhookCount || 12,
-          verificationFailures: verificationFailures || failedDepositsCount,
-          duplicateBlockedCount: duplicateAttempts || 3,
-          averageVerificationTimeMs: 1250,
+          webhookCount: webhookCount,
+          verificationFailures: verificationFailures,
+          duplicateBlockedCount: duplicateAttempts,
+          averageVerificationTimeMs: null,
         },
       });
     } catch (error: any) {
@@ -340,6 +342,148 @@ export class AdminController {
     } catch (error: any) {
       logger.error(`[AdminController] runReconciliation exception: ${error.message} | reqId=${reqId}`);
       res.status(500).json({ success: false, message: "Ledger reconciliation scan failed.", error: error.message });
+    }
+  }
+
+  /**
+   * Securely retrieve PENDING KYC submissions. Visible only to human admins.
+   * We do not expose raw documents to regular users.
+   */
+  public static async getPendingKycSubmissions(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reqId = req.requestId;
+    try {
+      if (!adminDb) {
+        res.status(500).json({ success: false, message: "Firestore database not configured." });
+        return;
+      }
+
+      logger.info(`[AdminController] Admin ${req.user?.uid} fetching pending KYC submissions...`);
+
+      const pendingSnap = await adminDb.collection("kyc_submissions")
+        .where("status", "==", "PENDING")
+        .limit(100)
+        .get();
+
+      const pendingUsers = pendingSnap.docs.map(doc => {
+        const data = doc.data();
+        return {
+          uid: doc.id,
+          name: `${data.firstName || ""} ${data.lastName || ""}`.trim() || "SUBMITTED USER",
+          email: data.email || "",
+          phoneNumber: data.phone || "",
+          kycType: data.documentType || "bvn",
+          kycNumber: data.documentNumber || "•••••••••••",
+          kycStatus: data.status || "PENDING",
+          submittedAt: data.submittedAt || new Date().toISOString(),
+          capturedSelfie: data.capturedSelfie || null, // Securing within administrative session only
+          livenessChallenge: data.livenessChallenge || null
+        };
+      });
+
+      res.status(200).json({ success: true, pendingUsers });
+    } catch (error: any) {
+      logger.error(`[AdminController] getPendingKycSubmissions error: ${error.message} | reqId=${reqId}`);
+      res.status(500).json({ success: false, message: "Failed to fetch pending KYC submissions.", error: error.message });
+    }
+  }
+
+  /**
+   * Approve a user's KYC submission securely.
+   */
+  public static async approveKycSubmission(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reqId = req.requestId;
+    const { userId } = req.params;
+    const adminUid = req.user?.uid || "unknown-admin";
+
+    try {
+      if (!userId) {
+        res.status(400).json({ success: false, message: "User ID parameter is required." });
+        return;
+      }
+
+      logger.info(`[AdminController] Admin ${adminUid} approving KYC for user: ${userId} | reqId=${reqId}`);
+
+      const result = await KycService.approveKyc(userId, adminUid, `req-${reqId}-${Date.now()}`);
+
+      res.status(200).json({
+        success: true,
+        message: "User KYC successfully approved and static virtual account provisioned!",
+        data: result
+      });
+    } catch (error: any) {
+      logger.error(`[AdminController] approveKycSubmission failure: ${error.message} | reqId=${reqId}`);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to approve KYC verification."
+      });
+    }
+  }
+
+  /**
+   * Reject a user's KYC submission securely.
+   */
+  public static async rejectKycSubmission(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reqId = req.requestId;
+    const { userId } = req.params;
+    const { reason } = req.body;
+    const adminUid = req.user?.uid || "unknown-admin";
+
+    try {
+      if (!userId) {
+        res.status(400).json({ success: false, message: "User ID parameter is required." });
+        return;
+      }
+      if (!reason || !reason.trim()) {
+        res.status(400).json({ success: false, message: "Rejection reason is required." });
+        return;
+      }
+
+      logger.info(`[AdminController] Admin ${adminUid} rejecting KYC for user: ${userId} | reason: ${reason} | reqId=${reqId}`);
+
+      await KycService.rejectKyc(userId, adminUid, reason, `req-${reqId}-${Date.now()}`);
+
+      res.status(200).json({
+        success: true,
+        message: "User KYC rejected and notification dispatched successfully."
+      });
+    } catch (error: any) {
+      logger.error(`[AdminController] rejectKycSubmission failure: ${error.message} | reqId=${reqId}`);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to reject KYC verification."
+      });
+    }
+  }
+
+  /**
+   * Retry virtual account provisioning for a failed user
+   */
+  public static async retryKycProvisioning(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reqId = req.requestId;
+    const { userId } = req.params;
+    const adminUid = req.user?.uid || "unknown-admin";
+
+    try {
+      if (!userId) {
+        res.status(400).json({ success: false, message: "User ID parameter is required." });
+        return;
+      }
+
+      logger.info(`[AdminController] Admin ${adminUid} retrying KYC provisioning for user: ${userId} | reqId=${reqId}`);
+
+      const result = await KycService.retryProvisioning(userId, adminUid, `req-${reqId}-${Date.now()}`);
+
+      res.status(200).json({
+        success: true,
+        message: "Virtual account successfully provisioned on retry!",
+        data: result
+      });
+    } catch (error: any) {
+      logger.error(`[AdminController] retryKycProvisioning failure: ${error.message} | reqId=${reqId}`);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to retry provisioning."
+      });
     }
   }
 
