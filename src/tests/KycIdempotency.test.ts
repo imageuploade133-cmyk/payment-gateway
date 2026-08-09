@@ -1,5 +1,6 @@
 import { KycService } from "../services/kycService";
 import { PaymentVerificationService } from "../services/paymentVerificationService";
+import { SquadService } from "../services/squadService";
 import adminDb from "../config/firebase";
 
 // Mock Firebase Admin SDK with in-memory map emulation for documents
@@ -16,28 +17,36 @@ jest.mock("../config/firebase", () => {
     __esModule: true,
     default: {
       collection: (colName: string) => ({
-        doc: (docId: string) => ({
-          get: jest.fn().mockImplementation(async () => {
-            const key = `${colName}/${docId}`;
-            const val = store[key];
-            return {
-              exists: !!val,
-              data: () => val || null,
-            };
-          }),
-          set: jest.fn().mockImplementation(async (data: any, options?: { merge?: boolean }) => {
-            const key = `${colName}/${docId}`;
-            if (options?.merge && store[key]) {
+        doc: (docId: string) => {
+          const makeMockDoc = (dId: string) => ({
+            get: jest.fn().mockImplementation(async () => {
+              const key = `${colName}/${dId}`;
+              const val = store[key];
+              return {
+                exists: !!val,
+                data: () => val || null,
+              };
+            }),
+            set: jest.fn().mockImplementation(async (data: any, options?: { merge?: boolean }) => {
+              const key = `${colName}/${dId}`;
+              if (options?.merge && store[key]) {
+                store[key] = { ...store[key], ...data };
+              } else {
+                store[key] = data;
+              }
+            }),
+            update: jest.fn().mockImplementation(async (data: any) => {
+              const key = `${colName}/${dId}`;
               store[key] = { ...store[key], ...data };
-            } else {
-              store[key] = data;
-            }
-          }),
-          update: jest.fn().mockImplementation(async (data: any) => {
-            const key = `${colName}/${docId}`;
-            store[key] = { ...store[key], ...data };
-          }),
-        }),
+            }),
+            collection: (subCol: string) => {
+              return {
+                doc: (subId: string) => makeMockDoc(`${dId}/${subCol}/${subId}`),
+              };
+            },
+          });
+          return makeMockDoc(docId);
+        },
       }),
       runTransaction: jest.fn().mockImplementation(async (callback) => {
         const transactionMock = {
@@ -66,9 +75,10 @@ jest.mock("../services/notificationService", () => {
   };
 });
 
-// Spy/Mock PaymentVerificationService
+// Spy/Mock PaymentVerificationService & SquadService
 jest.spyOn(PaymentVerificationService, "createVirtualAccount");
 jest.spyOn(PaymentVerificationService, "getVirtualAccountByRef");
+jest.spyOn(SquadService, "createVirtualAccount");
 
 describe("KYC Deep Idempotency and Recovery Tests", () => {
   const userId = "idemp-user-123";
@@ -151,14 +161,14 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
       account_number: "9900012345",
       account_name: "James Holden",
       currency: "NGN",
-      reference: `flw-kyc-idempotent-${userId}`,
+      reference: `flutterwave-kyc-idempotent-${userId}`,
     });
 
-    const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId);
+    const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId, "flutterwave");
 
     expect(approveRes.success).toBe(true);
     expect(approveRes.status).toBe("VERIFIED");
-    expect(approveRes.ngnAccount.account_number).toBe("9900012345");
+    expect(approveRes.account.account_number).toBe("9900012345");
 
     // Verify database state updated to VERIFIED
     expect(store["kyc_submissions/" + userId].status).toBe("VERIFIED");
@@ -166,12 +176,62 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
     expect(store["wallet_accounts/" + userId]).toBeDefined();
     expect(store["wallet_accounts/" + userId].accountNumber).toBe("9900012345");
 
+    // Verify subcollection has account
+    expect(store[`wallet_accounts/${userId}/accounts/flutterwave`]).toBeDefined();
+    expect(store[`wallet_accounts/${userId}/accounts/flutterwave`].accountNumber).toBe("9900012345");
+
     // Verify calls: checked reference lookup first, then created account
     expect(PaymentVerificationService.getVirtualAccountByRef).toHaveBeenCalledWith(
-      `flw-kyc-idempotent-${userId}`,
+      `flutterwave-kyc-idempotent-${userId}`,
       mockRequestId
     );
     expect(PaymentVerificationService.createVirtualAccount).toHaveBeenCalled();
+  });
+
+  it("should perform human admin approval via Squadco, formatting phone correctly", async () => {
+    store["kyc_submissions/" + userId] = {
+      userId,
+      firstName: "James",
+      lastName: "Holden",
+      documentType: "bvn",
+      documentNumber: "12345678901",
+      email: "james@roci.com",
+      phone: "+2348012345678",
+      status: "PENDING",
+    };
+
+    (SquadService.createVirtualAccount as jest.Mock).mockResolvedValueOnce({
+      success: true,
+      bank_name: "Guaranty Trust Bank",
+      account_number: "5544332211",
+      account_name: "James Holden",
+      currency: "NGN",
+    });
+
+    const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId, "squad");
+
+    expect(approveRes.success).toBe(true);
+    expect(approveRes.status).toBe("VERIFIED");
+    expect(approveRes.account.account_number).toBe("5544332211");
+
+    // Verify stored in squad subcollection
+    expect(store[`wallet_accounts/${userId}/accounts/squad`]).toBeDefined();
+    expect(store[`wallet_accounts/${userId}/accounts/squad`].accountNumber).toBe("5544332211");
+
+    // Verify legacy main document points to Squad
+    expect(store["wallet_accounts/" + userId].provider).toBe("squad");
+    expect(store["wallet_accounts/" + userId].accountNumber).toBe("5544332211");
+
+    // Check SquadService call format
+    expect(SquadService.createVirtualAccount).toHaveBeenCalledWith({
+      email: "james@roci.com",
+      firstName: "James",
+      lastName: "Holden",
+      phone: "+2348012345678",
+      bvn: "12345678901",
+      customer_identifier: `squad-kyc-idempotent-${userId}`,
+      requestId: `kyc-admin-approve-${userId}`,
+    });
   });
 
   it("should satisfy crash-recovery pre-flight idempotency (skip FLW creation if reference exists)", async () => {
@@ -186,7 +246,7 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
       email: "james@roci.com",
       phone: "08012345678",
       status: "PENDING",
-      txRef: `flw-kyc-idempotent-${userId}`, // persistent reference already attached
+      flutterwaveTxRef: `flutterwave-kyc-idempotent-${userId}`, // persistent reference already attached
     };
 
     // Pre-flight check simulates resolving an already-created account on Flutterwave
@@ -198,12 +258,12 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
       currency: "NGN",
     });
 
-    const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId);
+    const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId, "flutterwave");
 
     // Verify recovery succeeded
     expect(approveRes.success).toBe(true);
     expect(approveRes.status).toBe("VERIFIED");
-    expect(approveRes.ngnAccount.account_number).toBe("9900012345");
+    expect(approveRes.account.account_number).toBe("9900012345");
 
     // Verify Flutterwave API create was NOT called again (preventing multiple account allocations)
     expect(PaymentVerificationService.createVirtualAccount).not.toHaveBeenCalled();
@@ -230,7 +290,7 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
     });
 
     // Approval fails provisioning
-    await expect(KycService.approveKyc(userId, mockAdminUid, mockRequestId)).rejects.toThrow(
+    await expect(KycService.approveKyc(userId, mockAdminUid, mockRequestId, "flutterwave")).rejects.toThrow(
       "Bank account allocation failed"
     );
 
@@ -246,10 +306,10 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
       account_number: "9900055555",
       account_name: "James Holden",
       currency: "NGN",
-      reference: `flw-kyc-idempotent-${userId}`,
+      reference: `flutterwave-kyc-idempotent-${userId}`,
     });
 
-    const retryRes = await KycService.retryProvisioning(userId, mockAdminUid, mockRequestId);
+    const retryRes = await KycService.retryProvisioning(userId, mockAdminUid, mockRequestId, "flutterwave");
     expect(retryRes.success).toBe(true);
     expect(retryRes.status).toBe("VERIFIED");
     expect(store["wallet_accounts/" + userId].accountNumber).toBe("9900055555");

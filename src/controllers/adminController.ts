@@ -393,6 +393,7 @@ export class AdminController {
   public static async approveKycSubmission(req: AuthenticatedRequest, res: Response): Promise<void> {
     const reqId = req.requestId;
     const { userId } = req.params;
+    const { provider } = req.body;
     const adminUid = req.user?.uid || "unknown-admin";
 
     try {
@@ -401,13 +402,21 @@ export class AdminController {
         return;
       }
 
-      logger.info(`[AdminController] Admin ${adminUid} approving KYC for user: ${userId} | reqId=${reqId}`);
+      if (!provider || (provider !== "flutterwave" && provider !== "squad")) {
+        res.status(400).json({
+          success: false,
+          message: "A valid provider ('flutterwave' or 'squad') must be explicitly selected."
+        });
+        return;
+      }
 
-      const result = await KycService.approveKyc(userId, adminUid, `req-${reqId}-${Date.now()}`);
+      logger.info(`[AdminController] Admin ${adminUid} approving KYC for user: ${userId} via provider: ${provider} | reqId=${reqId}`);
+
+      const result = await KycService.approveKyc(userId, adminUid, `req-${reqId}-${Date.now()}`, provider);
 
       res.status(200).json({
         success: true,
-        message: "User KYC successfully approved and static virtual account provisioned!",
+        message: `User KYC successfully approved and static virtual account provisioned via ${provider}!`,
         data: result
       });
     } catch (error: any) {
@@ -461,6 +470,7 @@ export class AdminController {
   public static async retryKycProvisioning(req: AuthenticatedRequest, res: Response): Promise<void> {
     const reqId = req.requestId;
     const { userId } = req.params;
+    const { provider } = req.body;
     const adminUid = req.user?.uid || "unknown-admin";
 
     try {
@@ -469,13 +479,21 @@ export class AdminController {
         return;
       }
 
-      logger.info(`[AdminController] Admin ${adminUid} retrying KYC provisioning for user: ${userId} | reqId=${reqId}`);
+      if (!provider || (provider !== "flutterwave" && provider !== "squad")) {
+        res.status(400).json({
+          success: false,
+          message: "A valid provider ('flutterwave' or 'squad') must be explicitly selected for retry."
+        });
+        return;
+      }
 
-      const result = await KycService.retryProvisioning(userId, adminUid, `req-${reqId}-${Date.now()}`);
+      logger.info(`[AdminController] Admin ${adminUid} retrying KYC provisioning for user: ${userId} via provider: ${provider} | reqId=${reqId}`);
+
+      const result = await KycService.retryProvisioning(userId, adminUid, `req-${reqId}-${Date.now()}`, provider);
 
       res.status(200).json({
         success: true,
-        message: "Virtual account successfully provisioned on retry!",
+        message: `Virtual account successfully provisioned on retry via ${provider}!`,
         data: result
       });
     } catch (error: any) {

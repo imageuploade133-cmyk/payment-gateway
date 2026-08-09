@@ -2,6 +2,7 @@ import crypto from "crypto";
 import adminDb from "../config/firebase";
 import logger from "../config/logger";
 import { PaymentVerificationService } from "./paymentVerificationService";
+import { SquadService } from "./squadService";
 import { KycStatus, KycSubmission } from "../types/kyc";
 
 export interface KycVerificationRequest {
@@ -221,9 +222,12 @@ export class KycService {
   /**
    * Approves a pending KYC submission and triggers idempotency-safe virtual account provisioning
    */
-  public static async approveKyc(userId: string, adminUid: string, requestId: string): Promise<any> {
+  public static async approveKyc(userId: string, adminUid: string, requestId: string, provider: "flutterwave" | "squad"): Promise<any> {
     if (!adminDb) {
       throw new Error("Firestore Admin Database is not initialized.");
+    }
+    if (!provider || (provider !== "flutterwave" && provider !== "squad")) {
+      throw new Error("A valid provider must be explicitly selected.");
     }
 
     const submissionRef = adminDb.collection("kyc_submissions").doc(userId);
@@ -238,13 +242,14 @@ export class KycService {
       return { success: true, status: "VERIFIED" };
     }
 
-    // Check pre-flight: does a virtual account already exist in Firebase from a previous run?
-    const accountDocRef = adminDb.collection("wallet_accounts").doc(userId);
-    const accountDoc = await accountDocRef.get();
-    if (accountDoc.exists) {
-      logger.info(`[KycService] Pre-flight found existing virtual account details for user: ${userId}. Recovering state.`);
+    // Check pre-flight: does this specific provider virtual account already exist in Firebase?
+    const provAccountRef = adminDb.collection("wallet_accounts").doc(userId).collection("accounts").doc(provider);
+    const provAccountDoc = await provAccountRef.get();
+    if (provAccountDoc.exists) {
+      logger.info(`[KycService] Pre-flight found existing ${provider} account details for user: ${userId}. Recovering state.`);
+      const accData = provAccountDoc.data();
 
-      // Ensure hash and user state is VERIFIED
+      // Ensure hash and user state is VERIFIED, and main document is aligned
       const hashedId = this.hashIdentityNumber(subData.documentNumber);
       await adminDb.collection("kyc_hashes").doc(hashedId).set({
         userId,
@@ -259,13 +264,36 @@ export class KycService {
         updatedAt: new Date().toISOString(),
       }, { merge: true });
 
+      // Update main legacy wallet document
+      await adminDb.collection("wallet_accounts").doc(userId).set({
+        userId,
+        accountNumber: accData?.accountNumber,
+        bankName: accData?.bankName,
+        accountName: accData?.accountName,
+        currency: accData?.currency || "NGN",
+        provider,
+        isPermanent: true,
+        status: "active",
+        [`provider_${provider}`]: true,
+        updatedAt: new Date().toISOString(),
+      }, { merge: true });
+
       await submissionRef.set({
         status: "VERIFIED",
         reviewedBy: adminUid,
         reviewedAt: new Date().toISOString(),
       }, { merge: true });
 
-      return { success: true, status: "VERIFIED" };
+      return {
+        success: true,
+        status: "VERIFIED",
+        account: {
+          bank_name: accData?.bankName,
+          account_number: accData?.accountNumber,
+          account_name: accData?.accountName,
+          currency: accData?.currency,
+        }
+      };
     }
 
     // 1. Claim State transition PENDING -> PROCESSING via Transaction to guarantee lock
@@ -297,15 +325,18 @@ export class KycService {
     });
 
     // 2. Provisioning Stage: Execute outside Firestore transaction
-    return await this.provisionStaticVirtualAccount(userId, subData, adminUid, requestId);
+    return await this.provisionStaticVirtualAccount(userId, subData, adminUid, requestId, provider);
   }
 
   /**
    * Retries virtual account provisioning if it previously failed (status: PROVISIONING_FAILED)
    */
-  public static async retryProvisioning(userId: string, adminUid: string, requestId: string): Promise<any> {
+  public static async retryProvisioning(userId: string, adminUid: string, requestId: string, provider: "flutterwave" | "squad"): Promise<any> {
     if (!adminDb) {
       throw new Error("Firestore Admin Database is not initialized.");
+    }
+    if (!provider || (provider !== "flutterwave" && provider !== "squad")) {
+      throw new Error("A valid provider must be explicitly selected.");
     }
 
     const submissionRef = adminDb.collection("kyc_submissions").doc(userId);
@@ -343,27 +374,28 @@ export class KycService {
       requestId
     });
 
-    return await this.provisionStaticVirtualAccount(userId, subData, adminUid, requestId);
+    return await this.provisionStaticVirtualAccount(userId, subData, adminUid, requestId, provider);
   }
 
   /**
-   * Perform actual external S2S API call to provision Wema bank virtual account via Flutterwave
+   * Perform actual external S2S API call to provision Wema bank or GTBank virtual account
    */
   private static async provisionStaticVirtualAccount(
     userId: string,
     subData: KycSubmission,
     adminUid: string,
-    requestId: string
+    requestId: string,
+    provider: "flutterwave" | "squad"
   ): Promise<any> {
     const hashedId = this.hashIdentityNumber(subData.documentNumber);
     const submissionRef = adminDb!.collection("kyc_submissions").doc(userId);
 
-    // 1. Establish deterministic tx_ref/idempotencyKey based on userId
-    const tx_ref = (subData as any).txRef || `flw-kyc-idempotent-${userId}`;
+    // 1. Establish deterministic tx_ref/idempotencyKey based on provider
+    const tx_ref = (subData as any)[`${provider}TxRef`] || `${provider}-kyc-idempotent-${userId}`;
 
     // Persist txRef to submissions document if not already written so that future retries use the exact same key
-    if (!(subData as any).txRef) {
-      await submissionRef.set({ txRef: tx_ref }, { merge: true });
+    if (!(subData as any)[`${provider}TxRef`]) {
+      await submissionRef.set({ [`${provider}TxRef`]: tx_ref }, { merge: true });
     }
 
     await this.writeAuditLog({
@@ -376,91 +408,136 @@ export class KycService {
       requestId
     });
 
-    let ngnAccount: any = null;
+    let allocatedAccount: any = null;
 
-    // 2. Query Flutterwave first by reference to verify if it has already been provisioned
-    try {
-      logger.info(`[KycService] Idempotency Check: Querying Flutterwave for existing account reference | tx_ref=${tx_ref}`);
-      const checkRes = await PaymentVerificationService.getVirtualAccountByRef(tx_ref, requestId);
-      if (checkRes && checkRes.success) {
-        logger.info(`[KycService] Idempotency Match: Virtual account already exists for tx_ref=${tx_ref}. Restoring details.`);
-        ngnAccount = {
-          bank_name: checkRes.bank_name,
-          account_number: checkRes.account_number,
-          account_name: checkRes.account_name,
-          currency: checkRes.currency,
-        };
-
-        // Persist NGN static account details to wallet_accounts collection immediately
-        await adminDb!.collection("wallet_accounts").doc(userId).set({
-          userId,
-          accountNumber: checkRes.account_number,
-          bankName: checkRes.bank_name,
-          accountName: checkRes.account_name,
-          currency: checkRes.currency || "NGN",
-          isPermanent: true,
-          status: "active",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }, { merge: true });
-      }
-    } catch (checkErr: any) {
-      logger.warn(`[KycService] Idempotency lookup error: ${checkErr.message}. Proceeding to create.`);
+    // 2. Query Local Database Check First to ensure duplicate safety before S2S triggers
+    const provAccountRef = adminDb!.collection("wallet_accounts").doc(userId).collection("accounts").doc(provider);
+    const provAccountDoc = await provAccountRef.get();
+    if (provAccountDoc.exists) {
+      logger.info(`[KycService] Idempotency Match: Local ${provider} account already exists. Recovering details.`);
+      const accData = provAccountDoc.data();
+      allocatedAccount = {
+        bank_name: accData?.bankName,
+        account_number: accData?.accountNumber,
+        account_name: accData?.accountName,
+        currency: accData?.currency,
+      };
     }
 
-    // 3. Create virtual account with deterministic tx_ref and X-Idempotency-Key if not resolved in step 2
-    if (!ngnAccount) {
+    // 3. Query Upstream Provider if not resolved locally in step 2
+    if (!allocatedAccount && provider === "flutterwave") {
       try {
-        logger.info(`[KycService] Provisioning static virtual account with Flutterwave. tx_ref=${tx_ref}`);
-
-        const flwResult = await PaymentVerificationService.createVirtualAccount({
-          email: subData.email,
-          is_permanent: true,
-          bvn: subData.documentNumber,
-          tx_ref,
-          phonenumber: subData.phone,
-          firstname: subData.firstName,
-          lastname: subData.lastName,
-          requestId: `kyc-admin-approve-${userId}`,
-          idempotencyKey: tx_ref, // Utilizing Flutterwave-supported X-Idempotency-Key
-        });
-
-        if (flwResult.success) {
-          ngnAccount = {
-            bank_name: flwResult.bank_name,
-            account_number: flwResult.account_number,
-            account_name: flwResult.account_name,
-            currency: flwResult.currency,
+        logger.info(`[KycService] Flutterwave Idempotency Check: Querying FLW for reference | tx_ref=${tx_ref}`);
+        const checkRes = await PaymentVerificationService.getVirtualAccountByRef(tx_ref, requestId);
+        if (checkRes && checkRes.success) {
+          logger.info(`[KycService] Flutterwave Idempotency Match found. Restoring details.`);
+          allocatedAccount = {
+            bank_name: checkRes.bank_name,
+            account_number: checkRes.account_number,
+            account_name: checkRes.account_name,
+            currency: checkRes.currency,
           };
-
-          // Persist NGN static account details to wallet_accounts collection
-          await adminDb!.collection("wallet_accounts").doc(userId).set({
-            userId,
-            accountNumber: flwResult.account_number,
-            bankName: flwResult.bank_name,
-            accountName: flwResult.account_name,
-            currency: "NGN",
-            isPermanent: true,
-            status: "active",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          }, { merge: true });
-        } else {
-          throw new Error(flwResult.message || "Failed to receive success response from Flutterwave.");
         }
-      } catch (flwErr: any) {
-        logger.error(`[KycService] Upstream NGN virtual account creation failed: ${flwErr.message}`);
+      } catch (checkErr: any) {
+        logger.warn(`[KycService] Flutterwave lookup error: ${checkErr.message}. Proceeding to create.`);
       }
     }
 
-    if (ngnAccount) {
-      // 4. On Success: Save duplicate checks and transition user state to VERIFIED
+    // 4. Create Account if not resolved in pre-flight checks
+    if (!allocatedAccount) {
+      if (provider === "flutterwave") {
+        try {
+          logger.info(`[KycService] Creating Flutterwave virtual account. tx_ref=${tx_ref}`);
+          const flwResult = await PaymentVerificationService.createVirtualAccount({
+            email: subData.email,
+            is_permanent: true,
+            bvn: subData.documentNumber,
+            tx_ref,
+            phonenumber: subData.phone,
+            firstname: subData.firstName,
+            lastname: subData.lastName,
+            requestId: `kyc-admin-approve-${userId}`,
+            idempotencyKey: tx_ref,
+          });
+
+          if (flwResult.success) {
+            allocatedAccount = {
+              bank_name: flwResult.bank_name,
+              account_number: flwResult.account_number,
+              account_name: flwResult.account_name,
+              currency: flwResult.currency,
+            };
+          } else {
+            throw new Error(flwResult.message || "Failed to receive success from Flutterwave.");
+          }
+        } catch (flwErr: any) {
+          logger.error(`[KycService] Flutterwave account creation failed: ${flwErr.message}`);
+        }
+      } else if (provider === "squad") {
+        try {
+          logger.info(`[KycService] Creating Squad virtual account. customer_identifier=${tx_ref}`);
+          const squadResult = await SquadService.createVirtualAccount({
+            email: subData.email,
+            firstName: subData.firstName,
+            lastName: subData.lastName,
+            phone: subData.phone,
+            bvn: subData.documentNumber,
+            customer_identifier: tx_ref,
+            requestId: `kyc-admin-approve-${userId}`,
+          });
+
+          if (squadResult.success) {
+            allocatedAccount = {
+              bank_name: squadResult.bank_name,
+              account_number: squadResult.account_number,
+              account_name: squadResult.account_name,
+              currency: squadResult.currency,
+            };
+          } else {
+            throw new Error(squadResult.message || "Failed to receive success from Squadco.");
+          }
+        } catch (squadErr: any) {
+          logger.error(`[KycService] Squadco account creation failed: ${squadErr.message}`);
+        }
+      }
+    }
+
+    if (allocatedAccount) {
+      // 5. On Success: Save duplicate checks and transition user state to VERIFIED
       const hashDocRef = adminDb!.collection("kyc_hashes").doc(hashedId);
       await hashDocRef.set({
         userId,
         documentType: subData.documentType,
         createdAt: new Date().toISOString(),
       });
+
+      // Persist to provider-specific subcollection document
+      await provAccountRef.set({
+        userId,
+        accountNumber: allocatedAccount.account_number,
+        bankName: allocatedAccount.bank_name,
+        accountName: allocatedAccount.account_name,
+        currency: allocatedAccount.currency || "NGN",
+        reference: tx_ref,
+        provider,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      // Update legacy main document (maintaining default account number details for backward compatibility)
+      await adminDb!.collection("wallet_accounts").doc(userId).set({
+        userId,
+        accountNumber: allocatedAccount.account_number,
+        bankName: allocatedAccount.bank_name,
+        accountName: allocatedAccount.account_name,
+        currency: allocatedAccount.currency || "NGN",
+        provider,
+        isPermanent: true,
+        status: "active",
+        [`provider_${provider}`]: true,
+        updatedAt: new Date().toISOString(),
+      }, { merge: true });
 
       // Update user state and submission state
       await adminDb!.collection("users").doc(userId).set({
@@ -492,7 +569,7 @@ export class KycService {
         const { NotificationService } = require("./notificationService");
         await NotificationService.sendPushNotification(userId, {
           title: "🎉 KYC Identity Approved",
-          body: "Congratulations! Your identity verification is successful and your virtual accounts have been allocated.",
+          body: `Congratulations! Your identity has been verified and your virtual account has been allocated via ${provider === "squad" ? "Squad" : "Flutterwave"}.`,
           type: "security",
           url: "/profile",
         });
@@ -503,10 +580,10 @@ export class KycService {
       return {
         success: true,
         status: "VERIFIED",
-        ngnAccount
+        account: allocatedAccount
       };
     } else {
-      // 5. On Failure: Update state to PROVISIONING_FAILED (retryable)
+      // 6. On Failure: Update state to PROVISIONING_FAILED (retryable)
       await submissionRef.set({
         status: "PROVISIONING_FAILED",
       }, { merge: true });
@@ -518,17 +595,17 @@ export class KycService {
         timestamp: new Date().toISOString(),
         previousStatus: "PROVISIONING",
         newStatus: "PROVISIONING_FAILED",
-        reason: "Flutterwave static virtual account allocation offline or failed.",
+        reason: `${provider === "squad" ? "Squad" : "Flutterwave"} static virtual account allocation failed.`,
         requestId
       });
 
-      // Update user kycStatus in users collection back to PENDING or PROVISIONING_FAILED
+      // Update user kycStatus in users collection back to PROVISIONING_FAILED
       await adminDb!.collection("users").doc(userId).set({
         kycStatus: "PROVISIONING_FAILED",
         updatedAt: new Date().toISOString(),
       }, { merge: true });
 
-      throw new Error("Bank account allocation failed. State preserved as PROVISIONING_FAILED for retry.");
+      throw new Error(`Bank account allocation failed via ${provider}. State preserved as PROVISIONING_FAILED.`);
     }
   }
 
