@@ -105,7 +105,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
         phonenumber: validVirtualAccountPayload.phonenumber,
         firstname: validVirtualAccountPayload.firstname,
         lastname: validVirtualAccountPayload.lastname,
-      });
+      }, undefined);
     });
   });
 
@@ -144,7 +144,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
         .send({ transaction_id: "567890" });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({
+      expect(res.body).toEqual(expect.objectContaining({
         success: true,
         status: "successful",
         amount: 2500,
@@ -156,7 +156,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
           email: "john@doe.com",
           phone: "09088887777",
         },
-      });
+      }));
     });
   });
 

@@ -22,6 +22,8 @@ export interface EnvConfig {
   WHATSAPP_INSTANCE_ID: string;
   WHATSAPP_ADMIN_USERNAME: string;
   WHATSAPP_ADMIN_PASSWORD: string;
+  SQUAD_BASE_URL: string;
+  SQUAD_SECRET_KEY: string;
 }
 
 function validateEnv(): EnvConfig {
@@ -73,6 +75,14 @@ function validateEnv(): EnvConfig {
     logger.warn(`[WhatsApp] Missing environment variables: ${missingWhatsappVars.join(", ")}`);
   }
 
+  // Squad Configurations
+  const SQUAD_BASE_URL = process.env.SQUAD_BASE_URL || "https://sandbox-api-d.squadco.com";
+  const SQUAD_SECRET_KEY = process.env.SQUAD_SECRET_KEY || "";
+
+  if (NODE_ENV === "production" && !SQUAD_SECRET_KEY) {
+    logger.warn("[Config] Production mode active but SQUAD_SECRET_KEY is missing. Squad virtual-account provisioning will fail.");
+  }
+
   const config: EnvConfig = {
     PORT,
     NODE_ENV,
@@ -92,6 +102,8 @@ function validateEnv(): EnvConfig {
     WHATSAPP_INSTANCE_ID,
     WHATSAPP_ADMIN_USERNAME,
     WHATSAPP_ADMIN_PASSWORD,
+    SQUAD_BASE_URL,
+    SQUAD_SECRET_KEY,
   };
 
   logger.info(`[Config] Environment validated successfully. Mode: ${NODE_ENV} | Active API Keys loaded: ${GATEWAY_API_KEYS.length}`);
