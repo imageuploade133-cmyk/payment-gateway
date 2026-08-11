@@ -1,6 +1,7 @@
 import axios, { AxiosResponse } from "axios";
 import logger from "../config/logger";
 import { clubkonnectConfig, networkCache, DEFAULT_NETWORK_MAPPINGS, dataPlanCache, DEFAULT_DATA_PLANS } from "../config/clubkonnect";
+import { adminDb } from "../config/firebase";
 
 export interface ClubkonnectBalanceResponse {
   success: boolean;
@@ -61,16 +62,30 @@ export class ClubkonnectService {
       const response: AxiosResponse = await axios.get(url, { timeout: 10000 });
       logger.info(`[Clubkonnect Service] Dynamic network response | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`);
 
-      const data = response.data;
+      let data = response.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data.trim());
+        } catch (parseErr: any) {
+          logger.error(`[Clubkonnect Service] Failed to parse network raw string as JSON: ${parseErr.message}`);
+        }
+      }
+
       if (data && typeof data === "object") {
         const newMappings: Record<string, string> = {};
-        for (const [key, val] of Object.entries(data)) {
-          if (typeof val === "string" || typeof val === "number") {
-            const normalizedKey = key.trim().toUpperCase();
-            newMappings[normalizedKey] = String(val).trim();
-            // Handle common alias e.g. Etisalat / 9Mobile
-            if (normalizedKey === "ETISALAT") {
-              newMappings["9MOBILE"] = String(val).trim();
+        const networksList = Array.isArray(data.MOBILE_NETWORK) ? data.MOBILE_NETWORK : [];
+        for (const item of networksList) {
+          if (item && item.NETWORK_NAME && item.NETWORK_ID) {
+            const name = String(item.NETWORK_NAME).trim().toUpperCase();
+            const id = String(item.NETWORK_ID).trim();
+            newMappings[name] = id;
+            if (name === "GLO") {
+              newMappings["GLO"] = id;
+            }
+            if (name === "T2MOBILE" || name === "ETISALAT" || name === "9ONLINE" || name === "9MOBILE") {
+              newMappings["T2MOBILE"] = id;
+              newMappings["9MOBILE"] = id;
+              newMappings["ETISALAT"] = id;
             }
           }
         }
@@ -116,15 +131,26 @@ export class ClubkonnectService {
     const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
     if (!USER_ID || !API_KEY) return;
 
-    const url = `${BASE_URL}/APIDatasharePlansV1.asp?UserID=${USER_ID}&APIKey=${API_KEY}`;
-    logger.info(`[Clubkonnect Service] Refreshing dynamic mobile data plans cache | reqId=${requestId}`);
+    // Call the correct verified Clubkonnect API endpoint: APIDatabundlePlansV2.asp
+    const url = `${BASE_URL}/APIDatabundlePlansV2.asp?UserID=${USER_ID}&APIKey=${API_KEY}`;
+    logger.info(`[Clubkonnect Service] Refreshing dynamic mobile data plans cache via APIDatabundlePlansV2.asp | reqId=${requestId}`);
 
     try {
       const response: AxiosResponse = await axios.get(url, { timeout: 10000 });
-      logger.info(`[Clubkonnect Service] Dynamic data plans response | status=${response.status} | reqId=${requestId}`);
+      logger.info(`[Clubkonnect Service] Dynamic data plans response received | status=s${response.status} | reqId=${requestId}`);
 
-      const data = response.data;
-      // If we receive valid object data from provider, we can dynamically cache plans
+      let data = response.data;
+      if (typeof data === "string") {
+        try {
+          data = JSON.parse(data.trim());
+        } catch (parseErr: any) {
+          logger.error(`[Clubkonnect Service] Failed to parse data plans raw string as JSON: ${parseErr.message}`);
+        }
+      }
+
+      // Log the exact raw response body so we can see it in VM logs!
+      logger.info(`[Clubkonnect Service] Dynamic data plans response raw body: ${JSON.stringify(data)}`);
+
       if (data && typeof data === "object") {
         const plansGrouped: Record<string, any[]> = {
           "MTN": [],
@@ -133,16 +159,102 @@ export class ClubkonnectService {
           "9MOBILE": []
         };
 
-        // Example parsing from Clubkonnect data share plan structure
-        for (const [key, val] of Object.entries(data)) {
-          if (Array.isArray(val)) {
-            const normalizedNetwork = key.trim().toUpperCase();
-            plansGrouped[normalizedNetwork] = val.map((plan: any) => ({
-              item_code: plan.plan_id || plan.id || `${normalizedNetwork.toLowerCase()}_${plan.size || "plan"}`,
-              name: plan.name || `${normalizedNetwork} ${plan.size || "Data Plan"}`,
-              amount: Number(plan.amount || plan.price) || 0,
-              plan_code: plan.plan_code || plan.id || "",
-            }));
+        // 1. Resolve core payload (unpack wrappers e.g. "MOBILE_NETWORK" or "MOBILE_DATABUNDLE" which wraps network grouped objects!)
+        let payload = data;
+        const possibleWrappers = ["MOBILE_NETWORK", "MOBILE_DATABUNDLE", "DATABUNDLE", "DATA", "MOBILE_DATA"];
+        for (const wrapper of possibleWrappers) {
+          if (data[wrapper] && typeof data[wrapper] === "object") {
+            payload = data[wrapper];
+            break;
+          }
+        }
+
+        // 2. Map payload dynamically supporting BOTH flat array and network object schemas
+        if (Array.isArray(payload)) {
+          // Flat list of products across all networks
+          for (const item of payload) {
+            if (!item || typeof item !== "object") continue;
+
+            let list: any[] = [];
+            if (Array.isArray(item.PRODUCT)) list = item.PRODUCT;
+            else if (Array.isArray(item.product)) list = item.product;
+            else if (Array.isArray(item.products)) list = item.products;
+            else list = [item];
+
+            for (const sub of list) {
+              const rawNet = sub.NETWORK_NAME || sub.NETWORK || sub.network || sub.MobileNetwork || item.NETWORK_NAME || item.NETWORK || item.network || "";
+              const normNet = String(rawNet).trim().toUpperCase();
+              let targetNet = "";
+              if (normNet.includes("MTN")) targetNet = "MTN";
+              else if (normNet.includes("GLO")) targetNet = "GLO";
+              else if (normNet.includes("AIRTEL")) targetNet = "AIRTEL";
+              else if (normNet.includes("9MOBILE") || normNet.includes("9MOB") || normNet.includes("ETISALAT") || normNet.includes("T2MOBILE") || normNet.includes("M_9MOBILE")) targetNet = "9MOBILE";
+
+              if (targetNet) {
+                const id = sub.PRODUCT_ID || sub.productId || sub.product_id || sub.plan_id || sub.id || sub.ID || "";
+                const name = sub.PRODUCT_NAME || sub.productName || sub.product_name || sub.name || sub.NAME || sub.plan_name || sub.PLAN_NAME || sub.DESCRIPTION || "";
+                const amount = Number(sub.PRODUCT_AMOUNT || sub.productAmount || sub.product_amount || sub.amount || sub.AMOUNT || sub.PRICE || sub.price || sub.PLAN_AMOUNT || sub.plan_amount || 0);
+                const plan_code = sub.PRODUCT_CODE || sub.productCode || sub.product_code || sub.plan_code || sub.PLAN_CODE || id || "";
+
+                if (id && name && amount > 0) {
+                  plansGrouped[targetNet].push({
+                    item_code: `${targetNet.toLowerCase()}_${String(id).trim()}`,
+                    name: String(name).trim(),
+                    amount,
+                    plan_code: String(plan_code).trim(),
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          // Grouped by network name
+          for (const [key, val] of Object.entries(payload)) {
+            const normNet = key.trim().toUpperCase();
+            let targetNet = "";
+            if (normNet.includes("MTN") || normNet === "01") targetNet = "MTN";
+            else if (normNet.includes("GLO") || normNet === "02") targetNet = "GLO";
+            else if (normNet.includes("AIRTEL") || normNet === "04") targetNet = "AIRTEL";
+            else if (normNet.includes("9MOBILE") || normNet.includes("9MOB") || normNet.includes("ETISALAT") || normNet.includes("T2MOBILE") || normNet.includes("M_9MOBILE") || normNet === "03") targetNet = "9MOBILE";
+
+            if (targetNet) {
+              const itemsList = Array.isArray(val) ? val : [val];
+              for (const item of itemsList) {
+                if (!item || typeof item !== "object") continue;
+
+                // Resolve products array supporting nested PRODUCT array or flat list directly
+                let productsArray: any[] = [];
+                if (Array.isArray(item.PRODUCT)) {
+                  productsArray = item.PRODUCT;
+                } else if (Array.isArray(item.product)) {
+                  productsArray = item.product;
+                } else if (Array.isArray(item.products)) {
+                  productsArray = item.products;
+                } else if (item.PRODUCT && typeof item.PRODUCT === "object") {
+                  productsArray = Array.isArray(item.PRODUCT) ? item.PRODUCT : [item.PRODUCT];
+                } else {
+                  productsArray = [item];
+                }
+
+                for (const sub of productsArray) {
+                  if (!sub || typeof sub !== "object") continue;
+
+                  const id = sub.PRODUCT_ID || sub.productId || sub.product_id || sub.plan_id || sub.id || sub.ID || "";
+                  const name = sub.PRODUCT_NAME || sub.productName || sub.product_name || sub.name || sub.NAME || sub.plan_name || sub.PLAN_NAME || sub.DESCRIPTION || "";
+                  const amount = Number(sub.PRODUCT_AMOUNT || sub.productAmount || sub.product_amount || sub.amount || sub.AMOUNT || sub.PRICE || sub.price || sub.PLAN_AMOUNT || sub.plan_amount || 0);
+                  const plan_code = sub.PRODUCT_CODE || sub.productCode || sub.product_code || sub.plan_code || sub.PLAN_CODE || id || "";
+
+                  if (id && name && amount > 0) {
+                    plansGrouped[targetNet].push({
+                      item_code: `${targetNet.toLowerCase()}_${String(id).trim()}`,
+                      name: String(name).trim(),
+                      amount,
+                      plan_code: String(plan_code).trim(),
+                    });
+                  }
+                }
+              }
+            }
           }
         }
 
@@ -151,7 +263,24 @@ export class ClubkonnectService {
         if (planCount > 0) {
           dataPlanCache.plans = plansGrouped;
           dataPlanCache.lastFetched = Date.now();
-          logger.info(`[Clubkonnect Service] Successfully cached ${planCount} data plans from API.`);
+          
+          const mtnCount = plansGrouped.MTN.length;
+          const gloCount = plansGrouped.GLO.length;
+          const airtelCount = plansGrouped.AIRTEL.length;
+          const mobile9Count = plansGrouped["9MOBILE"].length;
+          logger.info(`[Clubkonnect Service] Successfully parsed dynamic data plans | MTN=${mtnCount} | GLO=${gloCount} | 9MOBILE=${mobile9Count} | AIRTEL=s${airtelCount} | TOTAL=s${planCount}\n`);
+          
+          if (adminDb) {
+            try {
+              await adminDb.collection("config").doc("vtu_data_plans_cache").set({
+                plans: plansGrouped,
+                lastFetched: Date.now()
+              }, { merge: true });
+              logger.info(`[Clubkonnect Service] Persistent Firestore cache updated with s${planCount} plans.`);
+            } catch (dbErr: any) {
+              logger.error(`[Clubkonnect Service] Failed to update Firestore plans cache: s${dbErr.message}`);
+            }
+          }
           return;
         }
       }
@@ -162,15 +291,30 @@ export class ClubkonnectService {
     }
   }
 
-  /**
-   * Resolves and fetches the available data plans.
-   */
   static async getDataPlans(networkName?: string, requestId?: string): Promise<any[]> {
     const now = Date.now();
     const cacheDuration = 12 * 60 * 60 * 1000; // 12 hours cache
 
     if (now - dataPlanCache.lastFetched > cacheDuration) {
       await this.refreshDataPlanCache(requestId);
+    }
+
+    // Fallback: If memory cache is empty/expired (e.g. after restart or api error), load from Firestore
+    const hasPlans = Object.values(dataPlanCache.plans).some(arr => arr.length > 0);
+    if (!hasPlans && adminDb) {
+      try {
+        const docSnap = await adminDb.collection("config").doc("vtu_data_plans_cache").get();
+        if (docSnap.exists) {
+          const docData = docSnap.data();
+          if (docData && docData.plans) {
+            dataPlanCache.plans = docData.plans;
+            dataPlanCache.lastFetched = docData.lastFetched || Date.now();
+            logger.info(`[Clubkonnect Service] Primed memory plans cache from persistent Firestore document.`);
+          }
+        }
+      } catch (dbErr: any) {
+        logger.error(`[Clubkonnect Service] Failed to load plans cache from Firestore: ${dbErr.message}`);
+      }
     }
 
     if (networkName) {

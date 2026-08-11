@@ -171,6 +171,116 @@ describe("Clubkonnect Provider Integration Tests", () => {
     });
   });
 
+  describe("ClubkonnectService.refreshDataPlanCache (Official Production Nested Schema)", () => {
+    it("should successfully parse the exact production nested MOBILE_NETWORK structure from VM logs", async () => {
+      mockedAxios.get.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          "MOBILE_NETWORK": {
+            "MTN": [
+              {
+                "ID": "01",
+                "PRODUCT": [
+                  {
+                    "PRODUCT_SNO": "1",
+                    "PRODUCT_CODE": "2",
+                    "PRODUCT_ID": "500",
+                    "PRODUCT_NAME": "500 MB - Weekly (SME)",
+                    "PRODUCT_AMOUNT": "307"
+                  }
+                ]
+              }
+            ],
+            "Glo": [
+              {
+                "ID": "02",
+                "PRODUCT": [
+                  {
+                    "PRODUCT_SNO": "1",
+                    "PRODUCT_CODE": "1",
+                    "PRODUCT_ID": "200",
+                    "PRODUCT_NAME": "200 MB - 14 days (SME)",
+                    "PRODUCT_AMOUNT": "94"
+                  }
+                ]
+              }
+            ],
+            "m_9mobile": [
+              {
+                "ID": "03",
+                "PRODUCT": [
+                  {
+                    "PRODUCT_SNO": "1",
+                    "PRODUCT_CODE": "1",
+                    "PRODUCT_ID": "50",
+                    "PRODUCT_NAME": "50 MB - 30 days (SME)",
+                    "PRODUCT_AMOUNT": "25"
+                  }
+                ]
+              }
+            ],
+            "Airtel": [
+              {
+                "ID": "04",
+                "PRODUCT": [
+                  {
+                    "PRODUCT_SNO": "11",
+                    "PRODUCT_CODE": "14",
+                    "PRODUCT_ID": "499.91",
+                    "PRODUCT_NAME": "1GB - 1 day (Awoof Data)",
+                    "PRODUCT_AMOUNT": "484.91"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      });
+
+      // Clear memory cache so it runs refresh
+      const { dataPlanCache } = require("../config/clubkonnect");
+      dataPlanCache.lastFetched = 0;
+      dataPlanCache.plans = {};
+
+      const plans = await ClubkonnectService.getDataPlans("MTN", "test-req-id-prod");
+      
+      expect(plans.length).toBe(1);
+      expect(plans[0]).toEqual({
+        item_code: "mtn_500",
+        name: "500 MB - Weekly (SME)",
+        amount: 307,
+        plan_code: "2"
+      });
+
+      const gloPlans = await ClubkonnectService.getDataPlans("GLO", "test-req-id-prod-glo");
+      expect(gloPlans.length).toBe(1);
+      expect(gloPlans[0]).toEqual({
+        item_code: "glo_200",
+        name: "200 MB - 14 days (SME)",
+        amount: 94,
+        plan_code: "1"
+      });
+
+      const mobile9Plans = await ClubkonnectService.getDataPlans("9MOBILE", "test-req-id-prod-9mob");
+      expect(mobile9Plans.length).toBe(1);
+      expect(mobile9Plans[0]).toEqual({
+        item_code: "9mobile_50",
+        name: "50 MB - 30 days (SME)",
+        amount: 25,
+        plan_code: "1"
+      });
+
+      const airtelPlans = await ClubkonnectService.getDataPlans("AIRTEL", "test-req-id-prod-airtel");
+      expect(airtelPlans.length).toBe(1);
+      expect(airtelPlans[0]).toEqual({
+        item_code: "airtel_499.91",
+        name: "1GB - 1 day (Awoof Data)",
+        amount: 484.91,
+        plan_code: "14"
+      });
+    });
+  });
+
   describe("ClubkonnectService.purchaseData", () => {
     it("should successfully purchase mobile data plan", async () => {
       mockedAxios.get.mockResolvedValueOnce({
@@ -237,7 +347,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.length).toBeGreaterThan(0);
-      expect(res.body.data[0].item_code).toBe("mtn_500mb");
+      expect(res.body.data[0].item_code).toBe("mtn_500");
     });
   });
 
@@ -331,7 +441,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
         .send({
           network: "MTN",
           phone: "08031234567",
-          item_code: "mtn_1gb",
+          item_code: "mtn_500",
         });
 
       expect(res.status).toBe(200);

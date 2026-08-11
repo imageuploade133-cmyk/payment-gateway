@@ -47,29 +47,12 @@ export const networkCache: NetworkCache = {
   lastFetched: 0,
 };
 
-// Hardcoded default data plan packages as reliable fallback
+// Hardcoded default data plan packages as reliable fallback (De-hardcoded for fully dynamic fetch)
 export const DEFAULT_DATA_PLANS: Record<string, any[]> = {
-  "MTN": [
-    { item_code: "mtn_500mb", name: "MTN 500MB (SME Datashare) - 30 Days", amount: 150, plan_code: "1" },
-    { item_code: "mtn_1gb", name: "MTN 1GB (SME Datashare) - 30 Days", amount: 280, plan_code: "2" },
-    { item_code: "mtn_2gb", name: "MTN 2GB (SME Datashare) - 30 Days", amount: 560, plan_code: "3" },
-    { item_code: "mtn_5gb", name: "MTN 5GB (SME Datashare) - 30 Days", amount: 1400, plan_code: "4" },
-    { item_code: "mtn_10gb", name: "MTN 10GB (SME Datashare) - 30 Days", amount: 2800, plan_code: "5" },
-  ],
-  "GLO": [
-    { item_code: "glo_1gb", name: "Glo 1.05GB - 14 Days", amount: 450, plan_code: "glo-1" },
-    { item_code: "glo_2gb", name: "Glo 2.9GB - 30 Days", amount: 900, plan_code: "glo-2" },
-    { item_code: "glo_5gb", name: "Glo 5.8GB - 30 Days", amount: 1350, plan_code: "glo-3" },
-  ],
-  "AIRTEL": [
-    { item_code: "airtel_1gb", name: "Airtel 1GB - 30 Days", amount: 350, plan_code: "airtel-1" },
-    { item_code: "airtel_2gb", name: "Airtel 2GB - 30 Days", amount: 700, plan_code: "airtel-2" },
-    { item_code: "airtel_5gb", name: "Airtel 5GB - 30 Days", amount: 1400, plan_code: "airtel-3" },
-  ],
-  "9MOBILE": [
-    { item_code: "9mob_1gb", name: "9mobile 1GB - 30 Days", amount: 400, plan_code: "9mob-1" },
-    { item_code: "9mob_2gb", name: "9mobile 2GB - 30 Days", amount: 800, plan_code: "9mob-2" },
-  ]
+  "MTN": [],
+  "GLO": [],
+  "AIRTEL": [],
+  "9MOBILE": []
 };
 
 // Data Plan Cache configuration
