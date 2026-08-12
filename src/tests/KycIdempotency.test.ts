@@ -2,6 +2,10 @@ import { KycService } from "../services/kycService";
 import { PaymentVerificationService } from "../services/paymentVerificationService";
 import { SquadService } from "../services/squadService";
 import adminDb from "../config/firebase";
+import axios from "axios";
+
+jest.mock("axios");
+const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 // Mock Firebase Admin SDK with in-memory map emulation for documents
 const store: Record<string, any> = {};
@@ -313,5 +317,361 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
     expect(retryRes.success).toBe(true);
     expect(retryRes.status).toBe("VERIFIED");
     expect(store["wallet_accounts/" + userId].accountNumber).toBe("9900055555");
+  });
+
+  describe("Squad Comprehensive KYC & Virtual Account Integration", () => {
+    beforeEach(() => {
+      // Restore spy to call through to original implementation
+      try {
+        (SquadService.createVirtualAccount as any).mockRestore();
+      } catch (e) {}
+      jest.spyOn(SquadService, "createVirtualAccount");
+    });
+
+    it("should succeed with complete KYC having middle name and phone", async () => {
+      // Complete KYC with a middle name in firstName
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James Alister",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "+2348012345678",
+        status: "PENDING",
+      };
+
+      // Mock Squad API success response
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            bank_name: "Guaranty Trust Bank",
+            account_number: "5544332211",
+            account_name: "James Alister Holden",
+            currency: "NGN",
+          },
+        },
+      });
+
+      const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId, "squad");
+      expect(approveRes.success).toBe(true);
+      expect(approveRes.status).toBe("VERIFIED");
+      expect(approveRes.account.account_number).toBe("5544332211");
+      expect(approveRes.account.bank_name).toBe("Guaranty Trust Bank");
+    });
+
+    it("should succeed with KYC without middle name", async () => {
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "+2348012345678",
+        status: "PENDING",
+      };
+
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            bank_name: "Guaranty Trust Bank",
+            account_number: "5544332211",
+            account_name: "James Holden",
+            currency: "NGN",
+          },
+        },
+      });
+
+      const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId, "squad");
+      expect(approveRes.success).toBe(true);
+      expect(approveRes.account.account_number).toBe("5544332211");
+    });
+
+    it("should fail validation if KYC and user profile are missing phone", async () => {
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "", // Missing
+        status: "PENDING",
+      };
+
+      store["users/" + userId] = {
+        uid: userId,
+        email: "james@roci.com",
+        phoneNumber: "", // Also missing
+      };
+
+      await expect(KycService.approveKyc(userId, mockAdminUid, mockRequestId, "squad")).rejects.toThrow(
+        "Squad provisioning validation failed: mobile number is missing from verified KYC record"
+      );
+    });
+
+    it("should fail validation with empty phone string", async () => {
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: mobile number is missing from verified KYC record"
+      );
+    });
+
+    it("should fail validation with whitespace-only phone", async () => {
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "    ",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: mobile number is missing from verified KYC record"
+      );
+    });
+
+    it("should correctly normalize various Nigerian phone formats to 11 digits", async () => {
+      // Test normalization helper via actual validation
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "+234 801-234-5678", // complex formatting
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            bank_name: "Guaranty Trust Bank",
+            account_number: "5544332211",
+            account_name: "James Holden",
+            currency: "NGN",
+          },
+        },
+      });
+
+      const res = await SquadService.createVirtualAccount(params);
+      expect(res.success).toBe(true);
+
+      // Verify what got called to post
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          mobile_num: "08012345678", // Normalized perfectly to 11 local digits!
+        }),
+        expect.any(Object)
+      );
+    });
+
+    it("should fail validation when first name is missing", async () => {
+      const params = {
+        email: "james@roci.com",
+        firstName: "",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: first name is missing from verified KYC record"
+      );
+    });
+
+    it("should fail validation when last name is missing", async () => {
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "   ",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: last name is missing from verified KYC record"
+      );
+    });
+
+    it("should fail validation when email is missing", async () => {
+      const params = {
+        email: "",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: email is missing from verified KYC record"
+      );
+    });
+
+    it("should fail validation when bvn (document number) is missing", async () => {
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "  ",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: bvn is missing from verified KYC record"
+      );
+    });
+
+    it("should fail validation when customer identifier is missing", async () => {
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "",
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: customer identifier is missing from verified KYC record"
+      );
+    });
+
+    it("should handle Squadco API HTTP 400 error and transition state correctly", async () => {
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "08012345678",
+        status: "PENDING",
+      };
+
+      // Mock Squad API 400 failure
+      mockedAxios.post.mockRejectedValueOnce({
+        response: {
+          status: 400,
+          data: {
+            status: 400,
+            success: false,
+            message: "Invalid BVN payload mismatch",
+          },
+        },
+      });
+
+      await expect(KycService.approveKyc(userId, mockAdminUid, mockRequestId, "squad")).rejects.toThrow(
+        "Bank account allocation failed via squad. State preserved as PROVISIONING_FAILED."
+      );
+
+      expect(store["kyc_submissions/" + userId].status).toBe("PROVISIONING_FAILED");
+      expect(store["users/" + userId].kycStatus).toBe("PROVISIONING_FAILED");
+    });
+
+    it("should retry successfully from PROVISIONING_FAILED and register", async () => {
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "08012345678",
+        status: "PROVISIONING_FAILED",
+      };
+
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            bank_name: "Guaranty Trust Bank",
+            account_number: "5544332211",
+            account_name: "James Holden",
+            currency: "NGN",
+          },
+        },
+      });
+
+      const retryRes = await KycService.retryProvisioning(userId, mockAdminUid, mockRequestId, "squad");
+      expect(retryRes.success).toBe(true);
+      expect(retryRes.status).toBe("VERIFIED");
+      expect(store["wallet_accounts/" + userId].accountNumber).toBe("5544332211");
+    });
+
+    it("should prevent duplicate approval when user KYC is already VERIFIED", async () => {
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "08012345678",
+        status: "VERIFIED",
+      };
+
+      const approveRes = await KycService.approveKyc(userId, mockAdminUid, mockRequestId, "squad");
+      expect(approveRes.success).toBe(true);
+      expect(approveRes.status).toBe("VERIFIED");
+
+      // Verify Squad API was NOT called again
+      expect(mockedAxios.post).not.toHaveBeenCalled();
+    });
+
+    it("should satisfy crash-recovery pre-flight idempotency on retry with pre-existing wallet account details", async () => {
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "08012345678",
+        status: "PROVISIONING_FAILED",
+      };
+
+      // Simulate local Firestore wallet_accounts has already recorded squad details from a past partial run
+      store[`wallet_accounts/${userId}/accounts/squad`] = {
+        userId,
+        accountNumber: "5544332211",
+        bankName: "Guaranty Trust Bank",
+        accountName: "James Holden",
+        currency: "NGN",
+      };
+
+      const retryRes = await KycService.retryProvisioning(userId, mockAdminUid, mockRequestId, "squad");
+      expect(retryRes.success).toBe(true);
+      expect(retryRes.status).toBe("VERIFIED");
+      expect(retryRes.account.account_number).toBe("5544332211");
+
+      // Verify Squad API was bypassed due to local pre-flight match
+      expect(mockedAxios.post).not.toHaveBeenCalled();
+    });
   });
 });

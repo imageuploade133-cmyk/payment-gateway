@@ -36,7 +36,7 @@ export class SquadService {
   /**
    * Cleans phone number format exactly to 11 local digits (e.g. 08012345678)
    */
-  private static formatMobileNumber(phone: string): string {
+  public static formatMobileNumber(phone: string): string {
     let clean = phone.trim().replace(/[^0-9]/g, "");
     if (clean.startsWith("234") && clean.length > 10) {
       clean = "0" + clean.substring(3);
@@ -55,22 +55,43 @@ export class SquadService {
    */
   public static async createVirtualAccount(params: SquadVirtualAccountParams): Promise<SquadVirtualAccountResponse> {
     const { email, firstName, lastName, phone, bvn, customer_identifier, requestId } = params;
-    const cleanPhone = this.formatMobileNumber(phone);
+
+    // Validate required fields before constructing the payload and calling API
+    if (!firstName || !firstName.trim()) {
+      throw new Error("Squad provisioning validation failed: first name is missing from verified KYC record");
+    }
+    if (!lastName || !lastName.trim()) {
+      throw new Error("Squad provisioning validation failed: last name is missing from verified KYC record");
+    }
+    if (!email || !email.trim()) {
+      throw new Error("Squad provisioning validation failed: email is missing from verified KYC record");
+    }
+    if (!bvn || !bvn.trim()) {
+      throw new Error("Squad provisioning validation failed: bvn is missing from verified KYC record");
+    }
+    if (!customer_identifier || !customer_identifier.trim()) {
+      throw new Error("Squad provisioning validation failed: customer identifier is missing from verified KYC record");
+    }
+
+    const cleanPhone = this.formatMobileNumber(phone || "");
+    if (!cleanPhone || cleanPhone.trim() === "") {
+      throw new Error("Squad provisioning validation failed: mobile number is missing from verified KYC record");
+    }
 
     logger.info(
       `[SquadService] Requesting virtual account | email=${email} | identifier=${customer_identifier} | reqId=${requestId}`
     );
 
     const payload = {
-      first_name: firstName,
-      last_name: lastName,
+      first_name: firstName.trim(),
+      last_name: lastName.trim(),
       mobile_num: cleanPhone,
       dob: "01/01/2000", // Standard safe fallback format mm/dd/yyyy
-      email: email,
-      bvn: bvn,
+      email: email.trim(),
+      bvn: bvn.trim(),
       gender: "1", // Generic fallback: '1' - Male, '2' - Female
       address: "E-Global Head Office, Kano, Nigeria",
-      customer_identifier: customer_identifier,
+      customer_identifier: customer_identifier.trim(),
     };
 
     try {

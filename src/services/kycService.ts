@@ -398,6 +398,42 @@ export class KycService {
       await submissionRef.set({ [`${provider}TxRef`]: tx_ref }, { merge: true });
     }
 
+    // Resolve authoritative fields by merging submission with users profile
+    const userDocRef = adminDb!.collection("users").doc(userId);
+    const userDoc = await userDocRef.get();
+    const userData = userDoc.exists ? userDoc.data() : null;
+
+    const resolvedEmail = (subData.email || "").trim() || (userData?.email || "").trim();
+    const resolvedFirstName = (subData.firstName || "").trim() || (userData?.firstName || "").trim() || (userData?.name || "").trim().split(" ")[0] || "";
+    const resolvedLastName = (subData.lastName || "").trim() || (userData?.lastName || "").trim() || (userData?.name || "").trim().split(" ").slice(1).join(" ") || "";
+    const resolvedPhone = (subData.phone || "").trim() || (userData?.phoneNumber || "").trim() || (userData?.phone || "").trim();
+    const resolvedBvn = (subData.documentNumber || "").trim() || (userData?.bvn || "").trim() || (userData?.nin || "").trim();
+
+    // Perform validation BEFORE any provider API request
+    if (!resolvedFirstName) {
+      throw new Error(`${provider === "squad" ? "Squad" : "Flutterwave"} provisioning validation failed: first name is missing from verified KYC record`);
+    }
+    if (!resolvedLastName) {
+      throw new Error(`${provider === "squad" ? "Squad" : "Flutterwave"} provisioning validation failed: last name is missing from verified KYC record`);
+    }
+    if (!resolvedEmail) {
+      throw new Error(`${provider === "squad" ? "Squad" : "Flutterwave"} provisioning validation failed: email is missing from verified KYC record`);
+    }
+    if (!resolvedBvn) {
+      throw new Error(`${provider === "squad" ? "Squad" : "Flutterwave"} provisioning validation failed: bvn is missing from verified KYC record`);
+    }
+    if (!resolvedPhone) {
+      throw new Error(`${provider === "squad" ? "Squad" : "Flutterwave"} provisioning validation failed: mobile number is missing from verified KYC record`);
+    }
+
+    // If provider is squad, verify that formatted phone number is not empty
+    if (provider === "squad") {
+      const formattedPhone = SquadService.formatMobileNumber(resolvedPhone);
+      if (!formattedPhone || formattedPhone.trim() === "") {
+        throw new Error("Squad provisioning validation failed: mobile number is missing from verified KYC record");
+      }
+    }
+
     await this.writeAuditLog({
       userId,
       action: "KYC_PROVISIONING_STARTED",
@@ -449,13 +485,13 @@ export class KycService {
         try {
           logger.info(`[KycService] Creating Flutterwave virtual account. tx_ref=${tx_ref}`);
           const flwResult = await PaymentVerificationService.createVirtualAccount({
-            email: subData.email,
+            email: resolvedEmail,
             is_permanent: true,
-            bvn: subData.documentNumber,
+            bvn: resolvedBvn,
             tx_ref,
-            phonenumber: subData.phone,
-            firstname: subData.firstName,
-            lastname: subData.lastName,
+            phonenumber: resolvedPhone,
+            firstname: resolvedFirstName,
+            lastname: resolvedLastName,
             requestId: `kyc-admin-approve-${userId}`,
             idempotencyKey: tx_ref,
           });
@@ -477,11 +513,11 @@ export class KycService {
         try {
           logger.info(`[KycService] Creating Squad virtual account. customer_identifier=${tx_ref}`);
           const squadResult = await SquadService.createVirtualAccount({
-            email: subData.email,
-            firstName: subData.firstName,
-            lastName: subData.lastName,
-            phone: subData.phone,
-            bvn: subData.documentNumber,
+            email: resolvedEmail,
+            firstName: resolvedFirstName,
+            lastName: resolvedLastName,
+            phone: resolvedPhone,
+            bvn: resolvedBvn,
             customer_identifier: tx_ref,
             requestId: `kyc-admin-approve-${userId}`,
           });
