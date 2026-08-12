@@ -64,7 +64,6 @@ export class SquadService {
     const payload = {
       first_name: firstName,
       last_name: lastName,
-      middle_name: "",
       mobile_num: cleanPhone,
       dob: "01/01/2000", // Standard safe fallback format mm/dd/yyyy
       email: email,
