@@ -3,6 +3,7 @@ import { PaymentVerificationService } from "../services/paymentVerificationServi
 import { SquadService } from "../services/squadService";
 import adminDb from "../config/firebase";
 import axios from "axios";
+import { env } from "../config/env";
 
 jest.mock("axios");
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -95,6 +96,8 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
     for (const key in store) {
       delete store[key];
     }
+    // Set a default SQUAD_BENEFICIARY_ACCOUNT for standard tests
+    env.SQUAD_BENEFICIARY_ACCOUNT = "1234567890";
   });
 
   it("should successfully submit KYC as PENDING and block duplicates when verified in kyc_hashes", async () => {
@@ -672,6 +675,80 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
 
       // Verify Squad API was bypassed due to local pre-flight match
       expect(mockedAxios.post).not.toHaveBeenCalled();
+    });
+
+    it("should fail validation if SQUAD_BENEFICIARY_ACCOUNT is missing/empty", async () => {
+      env.SQUAD_BENEFICIARY_ACCOUNT = "";
+
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: SQUAD_BENEFICIARY_ACCOUNT environment variable is missing or empty"
+      );
+    });
+
+    it("should fail validation if SQUAD_BENEFICIARY_ACCOUNT is not exactly 10 digits", async () => {
+      env.SQUAD_BENEFICIARY_ACCOUNT = "12345"; // Invalid length
+
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      await expect(SquadService.createVirtualAccount(params)).rejects.toThrow(
+        "Squad provisioning validation failed: SQUAD_BENEFICIARY_ACCOUNT must be exactly 10 digits"
+      );
+    });
+
+    it("should include a valid SQUAD_BENEFICIARY_ACCOUNT in the post payload", async () => {
+      env.SQUAD_BENEFICIARY_ACCOUNT = "9988776655";
+
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            bank_name: "Guaranty Trust Bank",
+            account_number: "5544332211",
+            account_name: "James Holden",
+            currency: "NGN",
+          },
+        },
+      });
+
+      const res = await SquadService.createVirtualAccount(params);
+      expect(res.success).toBe(true);
+
+      // Verify the correct beneficiary_account property is included in the payload sent to Squad
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          beneficiary_account: "9988776655",
+        }),
+        expect.any(Object)
+      );
     });
   });
 });
