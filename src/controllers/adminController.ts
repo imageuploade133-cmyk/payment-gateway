@@ -360,7 +360,7 @@ export class AdminController {
       logger.info(`[AdminController] Admin ${req.user?.uid} fetching pending KYC submissions...`);
 
       const pendingSnap = await adminDb.collection("kyc_submissions")
-        .where("status", "==", "PENDING")
+        .where("status", "!=", "VERIFIED")
         .limit(100)
         .get();
 
