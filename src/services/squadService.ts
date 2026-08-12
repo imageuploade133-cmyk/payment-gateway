@@ -78,6 +78,15 @@ export class SquadService {
       throw new Error("Squad provisioning validation failed: mobile number is missing from verified KYC record");
     }
 
+    // Pre-provider validation for SQUAD_BENEFICIARY_ACCOUNT configuration
+    const beneficiaryAccount = env.SQUAD_BENEFICIARY_ACCOUNT ? env.SQUAD_BENEFICIARY_ACCOUNT.trim() : "";
+    if (!beneficiaryAccount) {
+      throw new Error("Squad provisioning validation failed: SQUAD_BENEFICIARY_ACCOUNT environment variable is missing or empty");
+    }
+    if (!/^\d{10}$/.test(beneficiaryAccount)) {
+      throw new Error("Squad provisioning validation failed: SQUAD_BENEFICIARY_ACCOUNT must be exactly 10 digits");
+    }
+
     logger.info(
       `[SquadService] Requesting virtual account | email=${email} | identifier=${customer_identifier} | reqId=${requestId}`
     );
@@ -92,6 +101,7 @@ export class SquadService {
       gender: "1", // Generic fallback: '1' - Male, '2' - Female
       address: "E-Global Head Office, Kano, Nigeria",
       customer_identifier: customer_identifier.trim(),
+      beneficiary_account: beneficiaryAccount,
     };
 
     try {
