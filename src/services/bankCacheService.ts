@@ -226,7 +226,7 @@ export class BankCacheService {
    * Retrieves the bank list. Handles TTL expiration, automatic fallback if Flutterwave is down,
    * and reports cache hits and misses.
    */
-  public async getBanks(): Promise<{ success: boolean; updatedAt: string; cached: boolean; count: number; data: Bank[] }> {
+  public async getBanks(): Promise<{ success: boolean; status?: string; updatedAt: string; cached: boolean; count: number; data: Bank[] }> {
     const now = Date.now();
     const isExpired = !this.lastUpdated || (now - this.lastUpdated.getTime() > this.cacheTTLMs);
 
@@ -236,6 +236,7 @@ export class BankCacheService {
         await this.refreshBanks();
         return {
           success: true,
+          status: "success",
           updatedAt: this.lastUpdated?.toISOString() || new Date().toISOString(),
           cached: false,
           count: this.cachedBanks.length,
@@ -246,6 +247,7 @@ export class BankCacheService {
           logger.warn(`[BankCacheService] Flutterwave temporarily offline: Falling back to expired cached version. error=${err.message}`);
           return {
             success: true,
+            status: "success",
             updatedAt: this.lastUpdated?.toISOString() || new Date().toISOString(),
             cached: true,
             count: this.cachedBanks.length,
@@ -261,6 +263,7 @@ export class BankCacheService {
     logger.info("[BankCacheService] Cache hit: Returning active cached banks.");
     return {
       success: true,
+      status: "success",
       updatedAt: this.lastUpdated?.toISOString() || new Date().toISOString(),
       cached: true,
       count: this.cachedBanks.length,
