@@ -1,4 +1,5 @@
 import { ReconciliationService } from "../services/reconciliationService";
+import { ClubkonnectService } from "../services/clubkonnect.service";
 
 // Mock Firebase Admin SDK
 jest.mock("firebase-admin/app", () => ({
@@ -7,11 +8,30 @@ jest.mock("firebase-admin/app", () => ({
   cert: jest.fn(),
 }));
 
+jest.mock("firebase-admin/firestore", () => {
+  return {
+    FieldValue: {
+      increment: jest.fn((amount) => ({ operand: amount })),
+    },
+  };
+});
+
+// Mock Clubkonnect Service
+jest.mock("../services/clubkonnect.service", () => {
+  return {
+    ClubkonnectService: {
+      queryAirtimeTransaction: jest.fn(),
+    },
+  };
+});
+
 // Setup mock Firestore state
 let mockTransfers: Record<string, any> = {};
 let mockUsers: Record<string, any> = {};
 let mockLocks: Record<string, any> = {};
 let mockTransactions: Record<string, any> = {};
+let mockVtuTransactions: Record<string, any> = {};
+let mockVtuLocks: Record<string, any> = {};
 
 jest.mock("../config/firebase", () => {
   const getMockDoc = (collectionName: string, id: string) => {
@@ -30,6 +50,12 @@ jest.mock("../config/firebase", () => {
         } else if (collectionName === "reconciliation_locks" && mockLocks[id]) {
           exists = true;
           data = mockLocks[id];
+        } else if (collectionName === "vtu_transactions" && mockVtuTransactions[id]) {
+          exists = true;
+          data = mockVtuTransactions[id];
+        } else if (collectionName === "vtu_reconciliation_locks" && mockVtuLocks[id]) {
+          exists = true;
+          data = mockVtuLocks[id];
         }
         return {
           exists,
@@ -40,8 +66,12 @@ jest.mock("../config/firebase", () => {
       set: jest.fn(async (data: any, options?: any) => {
         if (collectionName === "reconciliation_locks") {
           mockLocks[id] = data;
+        } else if (collectionName === "vtu_reconciliation_locks") {
+          mockVtuLocks[id] = data;
         } else if (collectionName === "transfers") {
           mockTransfers[id] = { ...mockTransfers[id], ...data };
+        } else if (collectionName === "vtu_transactions") {
+          mockVtuTransactions[id] = { ...mockVtuTransactions[id], ...data };
         } else if (collectionName === "users") {
           mockUsers[id] = { ...mockUsers[id], ...data };
         } else if (collectionName === "transactions") {
@@ -51,6 +81,8 @@ jest.mock("../config/firebase", () => {
       update: jest.fn(async (data: any) => {
         if (collectionName === "transfers") {
           mockTransfers[id] = { ...mockTransfers[id], ...data };
+        } else if (collectionName === "vtu_transactions") {
+          mockVtuTransactions[id] = { ...mockVtuTransactions[id], ...data };
         } else if (collectionName === "users") {
           mockUsers[id] = { ...mockUsers[id], ...data };
         }
@@ -58,6 +90,8 @@ jest.mock("../config/firebase", () => {
       delete: jest.fn(async () => {
         if (collectionName === "reconciliation_locks") {
           delete mockLocks[id];
+        } else if (collectionName === "vtu_reconciliation_locks") {
+          delete mockVtuLocks[id];
         }
       }),
     };
@@ -66,6 +100,18 @@ jest.mock("../config/firebase", () => {
   const getMockCollection = (collectionName: string) => {
     return {
       doc: jest.fn((id: string) => getMockDoc(collectionName, id)),
+      where: jest.fn(() => ({
+        get: jest.fn(async () => {
+          const list = Object.entries(mockVtuTransactions)
+            .filter(([_, v]) => v.status === "Pending")
+            .map(([k, v]) => getMockDoc("vtu_transactions", k));
+          return {
+            empty: list.length === 0,
+            size: list.length,
+            docs: list,
+          };
+        }),
+      })),
     };
   };
 
@@ -87,6 +133,12 @@ jest.mock("../config/firebase", () => {
           } else if (collection === "reconciliation_locks" && mockLocks[path]) {
             exists = true;
             data = mockLocks[path];
+          } else if (collection === "vtu_reconciliation_locks" && mockVtuLocks[path]) {
+            exists = true;
+            data = mockVtuLocks[path];
+          } else if (collection === "vtu_transactions" && mockVtuTransactions[path]) {
+            exists = true;
+            data = mockVtuTransactions[path];
           }
           return {
             exists,
@@ -99,8 +151,12 @@ jest.mock("../config/firebase", () => {
           const collection = docRef._collection || "transactions";
           if (collection === "reconciliation_locks") {
             mockLocks[path] = data;
+          } else if (collection === "vtu_reconciliation_locks") {
+            mockVtuLocks[path] = data;
           } else if (collection === "transfers") {
             mockTransfers[path] = { ...mockTransfers[path], ...data };
+          } else if (collection === "vtu_transactions") {
+            mockVtuTransactions[path] = { ...mockVtuTransactions[path], ...data };
           } else if (collection === "transactions") {
             mockTransactions[path] = data;
           }
@@ -110,12 +166,21 @@ jest.mock("../config/firebase", () => {
           const collection = docRef._collection || "transfers";
           if (collection === "transfers") {
             mockTransfers[path] = { ...mockTransfers[path], ...data };
+          } else if (collection === "vtu_transactions") {
+            mockVtuTransactions[path] = { ...mockVtuTransactions[path], ...data };
           } else if (collection === "users") {
             if (data && "balance" in data) {
-              mockUsers[path].balance = data.balance;
+              if (typeof data.balance === "object" && data.balance !== null && "operand" in data.balance) {
+                // Handle FieldValue.increment
+                mockUsers[path].balance = (mockUsers[path].balance || 0) + data.balance.operand;
+              } else {
+                mockUsers[path].balance = data.balance;
+              }
             } else {
               mockUsers[path] = { ...mockUsers[path], ...data };
             }
+          } else if (collection === "transactions") {
+            mockTransactions[path] = { ...mockTransactions[path], ...data };
           }
         }),
       });
@@ -184,5 +249,158 @@ describe("Reconciliation Service Integration Tests", () => {
 
     // Balance remains exactly 15,010 (was not refunded twice!)
     expect(mockUsers["C1vJGqceoGO57mVFYNM40URxCUL2"].balance).toBe(15010);
+  });
+
+  describe("VTU Automated Reconciliation Tests", () => {
+    const transactionRef = "VTU-AIR-test-vtu-id";
+
+    beforeEach(() => {
+      mockVtuTransactions = {};
+      mockVtuLocks = {};
+      mockUsers = {};
+      mockTransactions = {};
+      jest.clearAllMocks();
+    });
+
+    it("should successfully transition a pending VTU transaction to Delivered when provider query succeeds", async () => {
+      mockVtuTransactions[transactionRef] = {
+        userId: "test-user-id",
+        amount: 200,
+        status: "Pending",
+        phone: "08031234567",
+        requestId: "test-vtu-id",
+        providerOrderId: "112233",
+        type: "Airtime",
+      };
+
+      mockUsers["test-user-id"] = {
+        userId: "test-user-id",
+        balance: 1000,
+      };
+
+      // Mock query response to return "Delivered"
+      (ClubkonnectService.queryAirtimeTransaction as jest.Mock).mockResolvedValueOnce({
+        success: true,
+        status: "Delivered",
+        orderId: "112233",
+        remark: "Successful delivery",
+      });
+
+      const reconService = ReconciliationService.getInstance();
+      const result = await reconService.reconcileSingleVtuTransaction(transactionRef);
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe("Delivered");
+
+      // Verify DB updates
+      expect(mockVtuTransactions[transactionRef].status).toBe("Delivered");
+      // The general ledger transactions record is updated to SUCCESS
+      expect(mockTransactions[`tx-${transactionRef}`].status).toBe("SUCCESS");
+      // No refund should be processed, so balance is unchanged
+      expect(mockUsers["test-user-id"].balance).toBe(1000);
+    });
+
+    it("should successfully transition a pending VTU transaction to Failed and trigger a secure refund on provider failure", async () => {
+      mockVtuTransactions[transactionRef] = {
+        userId: "test-user-id",
+        amount: 200,
+        status: "Pending",
+        phone: "08031234567",
+        requestId: "test-vtu-id",
+        providerOrderId: "112233",
+        type: "Airtime",
+        refundProcessed: false,
+      };
+
+      mockUsers["test-user-id"] = {
+        userId: "test-user-id",
+        balance: 1000,
+      };
+
+      // Mock query response to return "Failed"
+      (ClubkonnectService.queryAirtimeTransaction as jest.Mock).mockResolvedValueOnce({
+        success: true,
+        status: "Failed",
+        orderId: "112233",
+        remark: "Invalid number",
+      });
+
+      const reconService = ReconciliationService.getInstance();
+      const result = await reconService.reconcileSingleVtuTransaction(transactionRef);
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe("Failed");
+
+      // Verify DB updates
+      expect(mockVtuTransactions[transactionRef].status).toBe("Failed");
+      expect(mockVtuTransactions[transactionRef].refundProcessed).toBe(true);
+
+      // Verify general ledger transactions record status is updated to FAILED
+      expect(mockTransactions[`tx-${transactionRef}`].status).toBe("FAILED");
+
+      // Verify refund ledger transaction is created
+      expect(mockTransactions[`tx-REFUND-${transactionRef}`]).toBeDefined();
+      expect(mockTransactions[`tx-REFUND-${transactionRef}`].amount).toBe(200);
+      expect(mockTransactions[`tx-REFUND-${transactionRef}`].status).toBe("SUCCESS");
+
+      // Verify user balance is atomically refunded (+200)
+      expect(mockUsers["test-user-id"].balance).toBe(1200);
+    });
+
+    it("should keep status Pending if the provider returns an ambiguous response", async () => {
+      mockVtuTransactions[transactionRef] = {
+        userId: "test-user-id",
+        amount: 200,
+        status: "Pending",
+        phone: "08031234567",
+        requestId: "test-vtu-id",
+        providerOrderId: "112233",
+        type: "Airtime",
+      };
+
+      mockUsers["test-user-id"] = {
+        userId: "test-user-id",
+        balance: 1000,
+      };
+
+      // Mock query response to return "Processing" or unknown
+      (ClubkonnectService.queryAirtimeTransaction as jest.Mock).mockResolvedValueOnce({
+        success: true,
+        status: "Processing",
+        orderId: "112233",
+        remark: "In progress",
+      });
+
+      const reconService = ReconciliationService.getInstance();
+      const result = await reconService.reconcileSingleVtuTransaction(transactionRef);
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe("Pending");
+
+      // Verify DB is untouched
+      expect(mockVtuTransactions[transactionRef].status).toBe("Pending");
+      expect(mockUsers["test-user-id"].balance).toBe(1000);
+    });
+
+    it("should skip already terminal transactions idempotently", async () => {
+      mockVtuTransactions[transactionRef] = {
+        userId: "test-user-id",
+        amount: 200,
+        status: "Delivered",
+        phone: "08031234567",
+        requestId: "test-vtu-id",
+        providerOrderId: "112233",
+        type: "Airtime",
+      };
+
+      const reconService = ReconciliationService.getInstance();
+      const result = await reconService.reconcileSingleVtuTransaction(transactionRef);
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe("DELIVERED"); // returns the existing uppercase status and exits early
+
+      // No API calls should be made
+      expect(ClubkonnectService.queryAirtimeTransaction).not.toHaveBeenCalled();
+    });
   });
 });
