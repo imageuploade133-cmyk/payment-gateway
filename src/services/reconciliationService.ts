@@ -327,9 +327,12 @@ export class ReconciliationService {
       let targetStatus: "Delivered" | "Failed" | "Pending" = "Pending";
       let isFailure = false;
 
-      if (providerStatus === "delivered" || providerStatus === "successful") {
+      const successStatuses = ["delivered", "successful", "success", "order_completed", "completed"];
+      const failureStatuses = ["failed", "cancelled", "refunded", "order_failed", "order_cancelled", "order_refunded", "rejected"];
+
+      if (successStatuses.includes(providerStatus)) {
         targetStatus = "Delivered";
-      } else if (providerStatus === "failed" || providerStatus === "cancelled" || providerStatus === "refunded") {
+      } else if (failureStatuses.includes(providerStatus)) {
         targetStatus = "Failed";
         isFailure = true;
       } else {

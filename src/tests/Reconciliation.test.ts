@@ -278,10 +278,10 @@ describe("Reconciliation Service Integration Tests", () => {
         balance: 1000,
       };
 
-      // Mock query response to return "Delivered"
+      // Mock query response to return "ORDER_COMPLETED"
       (ClubkonnectService.queryAirtimeTransaction as jest.Mock).mockResolvedValueOnce({
         success: true,
-        status: "Delivered",
+        status: "ORDER_COMPLETED",
         orderId: "112233",
         remark: "Successful delivery",
       });
