@@ -333,9 +333,31 @@ describe("Clubkonnect Provider Integration Tests", () => {
   });
 
   describe("GET /api/vtu/networks", () => {
-    it("should return HTTP 200 and available networks list", async () => {
+    it("should return HTTP 200 and available networks list for a valid network response", async () => {
+      mockedAxios.get.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          MOBILE_NETWORK: [
+            { NETWORK_NAME: "MTN", NETWORK_ID: "01" },
+            { NETWORK_NAME: "GLO", NETWORK_ID: "02" },
+            { NETWORK_NAME: "AIRTEL", NETWORK_ID: "04" },
+            { NETWORK_NAME: "9MOBILE", NETWORK_ID: "03" }
+          ]
+        }
+      });
+
       const res = await request(app).get("/api/vtu/networks");
       expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.networks).toEqual(expect.arrayContaining(["MTN", "GLO", "AIRTEL", "9MOBILE"]));
+    });
+
+    it("should fail fast and fallback to cached networks when provider response is invalid or undefined", async () => {
+      // Mock to return undefined/error response
+      mockedAxios.get.mockResolvedValueOnce(undefined as any);
+
+      const res = await request(app).get("/api/vtu/networks");
+      expect(res.status).toBe(200); // returns 200 using local fallback mapping
       expect(res.body.success).toBe(true);
       expect(res.body.networks).toEqual(expect.arrayContaining(["MTN", "GLO", "AIRTEL", "9MOBILE"]));
     });

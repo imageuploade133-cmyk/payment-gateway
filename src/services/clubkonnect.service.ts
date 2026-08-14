@@ -60,6 +60,9 @@ export class ClubkonnectService {
 
     try {
       const response: AxiosResponse = await axios.get(url, { timeout: 10000 });
+      if (!response) {
+        throw new Error("Empty response received from Clubkonnect API");
+      }
       logger.info(`[Clubkonnect Service] Dynamic network response | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`);
 
       let data = response.data;
@@ -137,6 +140,9 @@ export class ClubkonnectService {
 
     try {
       const response: AxiosResponse = await axios.get(url, { timeout: 10000 });
+      if (!response) {
+        throw new Error("Empty response received from Clubkonnect API");
+      }
       logger.info(`[Clubkonnect Service] Dynamic data plans response received | status=s${response.status} | reqId=${requestId}`);
 
       let data = response.data;
