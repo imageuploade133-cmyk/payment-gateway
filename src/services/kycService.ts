@@ -538,7 +538,7 @@ export class KycService {
       }
     }
 
-    if (allocatedAccount) {
+    if (allocatedAccount && allocatedAccount.account_number && typeof allocatedAccount.account_number === "string" && allocatedAccount.account_number.trim()) {
       // 5. On Success: Save duplicate checks and transition user state to VERIFIED
       const hashDocRef = adminDb!.collection("kyc_hashes").doc(hashedId);
       await hashDocRef.set({

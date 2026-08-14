@@ -113,14 +113,29 @@ export class SquadService {
 
       if (response.data && response.data.success && response.data.data) {
         const accData = response.data.data;
+        const accountNumberRaw = accData.virtual_account_number || accData.account_number;
+        const accountNumber = accountNumberRaw ? String(accountNumberRaw).trim() : "";
+
+        if (!accountNumber) {
+          logger.error(`[SquadService] Provisioning error: virtual_account_number is missing in success response | reqId=${requestId}`);
+          return {
+            success: false,
+            bank_name: "",
+            account_number: "",
+            account_name: "",
+            currency: "NGN",
+            message: "Squad API success response did not contain a valid virtual account number.",
+          };
+        }
+
         logger.info(
-          `[SquadService] Account provisioned successfully | accountNumber=${accData.account_number} | reqId=${requestId}`
+          `[SquadService] Account provisioned successfully | accountNumber=${accountNumber} | reqId=${requestId}`
         );
         return {
           success: true,
           bank_name: accData.bank_name || "Guaranty Trust Bank",
-          account_number: accData.account_number,
-          account_name: accData.account_name || `${firstName} ${lastName}`,
+          account_number: accountNumber,
+          account_name: accData.account_name || accData.customer_name || `${firstName} ${lastName}`,
           currency: accData.currency || "NGN",
         };
       }
@@ -152,12 +167,15 @@ export class SquadService {
         logger.warn(`[SquadService] Conflict response detected from Squad. Attempting safe recovery. Message: ${resData.message}`);
         
         // If Squad returns the existing account details directly inside the error payload or data block, recover it
-        if (resData.data && resData.data.account_number) {
+        const conflictAccRaw = resData.data?.virtual_account_number || resData.data?.account_number;
+        const conflictAcc = conflictAccRaw ? String(conflictAccRaw).trim() : "";
+
+        if (conflictAcc) {
           return {
             success: true,
             bank_name: resData.data.bank_name || "Guaranty Trust Bank",
-            account_number: resData.data.account_number,
-            account_name: resData.data.account_name || `${firstName} ${lastName}`,
+            account_number: conflictAcc,
+            account_name: resData.data.account_name || resData.data.customer_name || `${firstName} ${lastName}`,
             currency: resData.data.currency || "NGN",
             message: "Recovered successfully from existing Squad registration."
           };
