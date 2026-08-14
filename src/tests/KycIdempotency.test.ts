@@ -750,5 +750,72 @@ describe("KYC Deep Idempotency and Recovery Tests", () => {
         expect.any(Object)
       );
     });
+
+    it("should successfully retry provisioning when state is stuck in PROCESSING", async () => {
+      store["kyc_submissions/" + userId] = {
+        userId,
+        firstName: "James",
+        lastName: "Holden",
+        documentType: "bvn",
+        documentNumber: "12345678901",
+        email: "james@roci.com",
+        phone: "08012345678",
+        status: "PROCESSING", // stuck in PROCESSING
+      };
+
+      // Mock Squad API to return existing/success details
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            bank_name: "Guaranty Trust Bank",
+            virtual_account_number: "5544332211",
+            account_name: "James Holden",
+            currency: "NGN",
+          },
+        },
+      });
+
+      const retryRes = await KycService.retryProvisioning(userId, mockAdminUid, mockRequestId, "squad");
+      expect(retryRes.success).toBe(true);
+      expect(retryRes.status).toBe("VERIFIED");
+      expect(retryRes.account.account_number).toBe("5544332211");
+
+      // Submission status should now be VERIFIED
+      expect(store["kyc_submissions/" + userId].status).toBe("VERIFIED");
+    });
+
+    it("should recover existing account details from Squad conflict response", async () => {
+      const params = {
+        email: "james@roci.com",
+        firstName: "James",
+        lastName: "Holden",
+        phone: "08012345678",
+        bvn: "12345678901",
+        customer_identifier: "squad-kyc-idempotent-" + userId,
+        requestId: "req-111",
+      };
+
+      // Mock to return 400 with duplicate message
+      mockedAxios.post.mockRejectedValueOnce({
+        response: {
+          status: 400,
+          data: {
+            success: false,
+            message: "customer_identifier already exists",
+            data: {
+              bank_name: "Guaranty Trust Bank",
+              virtual_account_number: "5544332211",
+              account_name: "James Holden",
+              currency: "NGN",
+            },
+          },
+        },
+      });
+
+      const res = await SquadService.createVirtualAccount(params);
+      expect(res.success).toBe(true);
+      expect(res.account_number).toBe("5544332211");
+    });
   });
 });

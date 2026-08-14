@@ -329,7 +329,7 @@ export class KycService {
   }
 
   /**
-   * Retries virtual account provisioning if it previously failed (status: PROVISIONING_FAILED)
+   * Retries virtual account provisioning if it previously failed (status: PROVISIONING_FAILED or stuck in PROCESSING)
    */
   public static async retryProvisioning(userId: string, adminUid: string, requestId: string, provider: "flutterwave" | "squad"): Promise<any> {
     if (!adminDb) {
@@ -346,22 +346,24 @@ export class KycService {
     }
 
     const subData = subSnap.data() as KycSubmission;
-    if (subData.status !== "PROVISIONING_FAILED") {
+    if (subData.status !== "PROVISIONING_FAILED" && subData.status !== "PROCESSING") {
       throw new Error(`Cannot retry provisioning for user in status: ${subData.status}`);
     }
 
-    // Transition state PROVISIONING_FAILED -> PROCESSING to lock concurrent retries
+    // Transition state PROVISIONING_FAILED/PROCESSING -> PROCESSING to lock concurrent retries
     await adminDb.runTransaction(async (transaction) => {
       const freshSnap = await transaction.get(submissionRef);
       const freshData = freshSnap.data() as KycSubmission;
-      if (freshData.status !== "PROVISIONING_FAILED") {
+      if (freshData.status !== "PROVISIONING_FAILED" && freshData.status !== "PROCESSING") {
         throw new Error("Another action is already processing this request.");
       }
-      transaction.update(submissionRef, {
-        status: "PROCESSING",
-        reviewedBy: adminUid,
-        reviewedAt: new Date().toISOString(),
-      });
+      if (freshData.status === "PROVISIONING_FAILED") {
+        transaction.update(submissionRef, {
+          status: "PROCESSING",
+          reviewedBy: adminUid,
+          reviewedAt: new Date().toISOString(),
+        });
+      }
     });
 
     await this.writeAuditLog({
@@ -369,7 +371,7 @@ export class KycService {
       action: "KYC_PROVISIONING_RETRY",
       adminUid,
       timestamp: new Date().toISOString(),
-      previousStatus: "PROVISIONING_FAILED",
+      previousStatus: subData.status,
       newStatus: "PROCESSING",
       requestId
     });
