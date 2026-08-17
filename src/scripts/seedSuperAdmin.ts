@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import { firebase, adminDb } from "../config/firebase";
 
 const SUPER_ADMIN_EMAIL = "abdulkadir123shaba@gmail.com";
