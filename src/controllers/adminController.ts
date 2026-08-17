@@ -5,6 +5,8 @@ import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FieldValue } from "firebase-admin/firestore";
 import { KycService } from "../services/kycService";
 import { AuthenticatedRequest } from "../middleware/auth";
+import { logAdminAction } from "../middleware/adminAuth";
+import { firebase } from "../config/firebase";
 
 interface FlwTxRecord {
   id: string;
@@ -575,6 +577,247 @@ export class AdminController {
     } catch (error: any) {
       logger.error(`[AdminController] syncBanks exception: ${error.message} | reqId=${reqId}`);
       res.status(500).json({ success: false, message: "Failed to sync bank list.", error: error.message });
+    }
+  }
+
+  /**
+   * GET /api/admin/admins - Fetch all administrator accounts from admin_users
+   */
+  public static async getAdmins(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reqId = req.requestId;
+    try {
+      if (!adminDb) {
+        res.status(500).json({ success: false, message: "Firestore database not configured." });
+        return;
+      }
+
+      const snap = await adminDb.collection("admin_users").orderBy("createdAt", "desc").get();
+      const admins: any[] = [];
+      snap.forEach((doc) => {
+        admins.push({ uid: doc.id, ...doc.data() });
+      });
+
+      res.status(200).json({
+        success: true,
+        admins,
+        callerRole: req.adminUser?.role || "admin",
+      });
+    } catch (error: any) {
+      logger.error(`[AdminController] getAdmins exception: ${error.message} | reqId=${reqId}`);
+      res.status(500).json({ success: false, message: "Failed to fetch administrator directory.", error: error.message });
+    }
+  }
+
+  /**
+   * POST /api/admin/admins - Create, update, or delete administrator accounts
+   */
+  public static async manageAdmin(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reqId = req.requestId;
+    const { action, adminData } = req.body;
+    const callerAdmin = req.adminUser;
+    const now = new Date().toISOString();
+
+    if (!callerAdmin) {
+      res.status(403).json({ success: false, message: "Forbidden: Administrator context missing." });
+      return;
+    }
+
+    const isSuperAdmin = callerAdmin.role === "super_admin" || callerAdmin.email === "abdulkadir123shaba@gmail.com";
+    if (!isSuperAdmin) {
+      res.status(403).json({ success: false, message: "Forbidden: Only Super Admins can manage administrator accounts." });
+      return;
+    }
+
+    try {
+      if (!adminDb) {
+        res.status(500).json({ success: false, message: "Firestore database not configured." });
+        return;
+      }
+
+      if (action === "create_admin") {
+        const { email, password, displayName, role, permissions } = adminData || {};
+        if (!email || !email.includes("@")) {
+          res.status(400).json({ success: false, message: "Valid administrator email address is required." });
+          return;
+        }
+
+        const cleanEmail = String(email).trim().toLowerCase();
+
+        // Check if admin already exists in admin_users
+        const existingSnap = await adminDb.collection("admin_users").where("email", "==", cleanEmail).limit(1).get();
+        if (!existingSnap.empty) {
+          res.status(400).json({ success: false, message: "An administrator with this email already exists." });
+          return;
+        }
+
+        let firebaseUid = "";
+        if (firebase.app) {
+          const { getAuth } = require("firebase-admin/auth");
+          try {
+            const userByEmail = await getAuth(firebase.app).getUserByEmail(cleanEmail);
+            firebaseUid = userByEmail.uid;
+          } catch {
+            if (!password || password.length < 6) {
+              res.status(400).json({ success: false, message: "Password must be at least 6 characters long." });
+              return;
+            }
+            const createdUser = await getAuth(firebase.app).createUser({
+              email: cleanEmail,
+              password,
+              displayName: displayName || cleanEmail.split("@")[0],
+            });
+            firebaseUid = createdUser.uid;
+          }
+
+          // Set Custom Claims
+          try {
+            await getAuth(firebase.app).setCustomUserClaims(firebaseUid, {
+              admin: true,
+              role: role || "admin",
+            });
+          } catch (e: any) {
+            logger.warn(`[AdminController] Custom claim set error: ${e.message}`);
+          }
+        } else {
+          firebaseUid = `admin_${Date.now()}`;
+        }
+
+        const newAdminRecord = {
+          uid: firebaseUid,
+          email: cleanEmail,
+          displayName: displayName || cleanEmail.split("@")[0],
+          role: role || "admin",
+          permissions: Array.isArray(permissions) ? permissions : ["users.view", "transactions.view", "kyc.view"],
+          status: "active",
+          createdBy: callerAdmin.email || callerAdmin.uid,
+          createdAt: now,
+          updatedAt: now,
+          lastLoginAt: "",
+          mfaEnabled: false,
+        };
+
+        await adminDb.collection("admin_users").doc(firebaseUid).set(newAdminRecord);
+
+        await logAdminAction({
+          adminUid: callerAdmin.uid,
+          adminEmail: callerAdmin.email || "",
+          action: "create_admin",
+          resource: "admin_users",
+          resourceId: firebaseUid,
+          newValue: newAdminRecord,
+          result: "SUCCESS",
+        });
+
+        res.status(200).json({
+          success: true,
+          message: `Administrator ${cleanEmail} created successfully!`,
+          admin: newAdminRecord,
+        });
+
+      } else if (action === "update_admin") {
+        const { targetUid, role, permissions, status, displayName } = adminData || {};
+        if (!targetUid) {
+          res.status(400).json({ success: false, message: "Target administrator UID is required." });
+          return;
+        }
+
+        const targetRef = adminDb.collection("admin_users").doc(targetUid);
+        const targetSnap = await targetRef.get();
+        if (!targetSnap.exists) {
+          res.status(404).json({ success: false, message: "Administrator document not found." });
+          return;
+        }
+
+        const currentData = targetSnap.data() || {};
+
+        // Guard against disabling or demoting the last Super Admin
+        if (currentData.role === "super_admin" && ((role && role !== "super_admin") || status === "disabled")) {
+          const superAdminSnap = await adminDb.collection("admin_users")
+            .where("role", "==", "super_admin")
+            .where("status", "==", "active")
+            .get();
+
+          if (superAdminSnap.size <= 1) {
+            res.status(400).json({ success: false, message: "Cannot disable or demote the last remaining active Super Admin." });
+            return;
+          }
+        }
+
+        const updatePayload: any = { updatedAt: now };
+        if (role !== undefined) updatePayload.role = role;
+        if (permissions !== undefined) updatePayload.permissions = permissions;
+        if (status !== undefined) updatePayload.status = status;
+        if (displayName !== undefined) updatePayload.displayName = displayName;
+
+        await targetRef.update(updatePayload);
+
+        await logAdminAction({
+          adminUid: callerAdmin.uid,
+          adminEmail: callerAdmin.email || "",
+          action: "update_admin",
+          resource: "admin_users",
+          resourceId: targetUid,
+          oldValue: currentData,
+          newValue: updatePayload,
+          result: "SUCCESS",
+        });
+
+        res.status(200).json({
+          success: true,
+          message: "Administrator account updated successfully!",
+        });
+
+      } else if (action === "delete_admin") {
+        const { targetUid } = adminData || {};
+        if (!targetUid) {
+          res.status(400).json({ success: false, message: "Target administrator UID is required." });
+          return;
+        }
+
+        const targetRef = adminDb.collection("admin_users").doc(targetUid);
+        const targetSnap = await targetRef.get();
+        if (!targetSnap.exists) {
+          res.status(404).json({ success: false, message: "Administrator document not found." });
+          return;
+        }
+
+        const currentData = targetSnap.data() || {};
+
+        if (currentData.role === "super_admin") {
+          const superAdminSnap = await adminDb.collection("admin_users")
+            .where("role", "==", "super_admin")
+            .where("status", "==", "active")
+            .get();
+
+          if (superAdminSnap.size <= 1) {
+            res.status(400).json({ success: false, message: "Cannot delete the last remaining active Super Admin." });
+            return;
+          }
+        }
+
+        await targetRef.delete();
+
+        await logAdminAction({
+          adminUid: callerAdmin.uid,
+          adminEmail: callerAdmin.email || "",
+          action: "delete_admin",
+          resource: "admin_users",
+          resourceId: targetUid,
+          oldValue: currentData,
+          result: "SUCCESS",
+        });
+
+        res.status(200).json({
+          success: true,
+          message: "Administrator removed successfully!",
+        });
+
+      } else {
+        res.status(400).json({ success: false, message: "Invalid action specified." });
+      }
+    } catch (error: any) {
+      logger.error(`[AdminController] manageAdmin exception: ${error.message} | reqId=${reqId}`);
+      res.status(500).json({ success: false, message: "Operation failed.", error: error.message });
     }
   }
 }

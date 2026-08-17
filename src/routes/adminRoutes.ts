@@ -1,19 +1,29 @@
 import { Router } from "express";
 import { AdminController } from "../controllers/adminController";
 import { gatewayAuthMiddleware } from "../middleware/auth";
-import { adminAuthMiddleware, strictHumanAdminAuthMiddleware } from "../middleware/adminAuth";
+import {
+  adminAuthMiddleware,
+  strictHumanAdminAuthMiddleware,
+  requireFirebaseAuth,
+  requireAdmin,
+  requirePermission,
+} from "../middleware/adminAuth";
 
 const router = Router();
 
-// Secure admin-only endpoints: requires gatewayAuthMiddleware to authenticate token/key, then adminAuthMiddleware to assert privilege
+// Secure admin metrics, reconciliation, and bank sync (supports S2S API key or Firebase Auth token)
 router.post("/metrics", gatewayAuthMiddleware, adminAuthMiddleware, AdminController.getMetrics);
 router.post("/reconciliation", gatewayAuthMiddleware, adminAuthMiddleware, AdminController.runReconciliation);
 router.post("/sync-banks", gatewayAuthMiddleware, adminAuthMiddleware, AdminController.syncBanks);
 
-// Secure human-only KYC administrative endpoints (strictly require verified Firebase Admin ID Token, X-API-Key is denied)
-router.get("/kyc/pending", gatewayAuthMiddleware, strictHumanAdminAuthMiddleware, AdminController.getPendingKycSubmissions);
-router.post("/kyc/:userId/approve", gatewayAuthMiddleware, strictHumanAdminAuthMiddleware, AdminController.approveKycSubmission);
-router.post("/kyc/:userId/reject", gatewayAuthMiddleware, strictHumanAdminAuthMiddleware, AdminController.rejectKycSubmission);
-router.post("/kyc/:userId/retry-provisioning", gatewayAuthMiddleware, strictHumanAdminAuthMiddleware, AdminController.retryKycProvisioning);
+// Secure human-only KYC administrative endpoints
+router.get("/kyc/pending", requireFirebaseAuth, requireAdmin, requirePermission("kyc.view"), AdminController.getPendingKycSubmissions);
+router.post("/kyc/:userId/approve", requireFirebaseAuth, requireAdmin, requirePermission("kyc.approve"), AdminController.approveKycSubmission);
+router.post("/kyc/:userId/reject", requireFirebaseAuth, requireAdmin, requirePermission("kyc.reject"), AdminController.rejectKycSubmission);
+router.post("/kyc/:userId/retry-provisioning", requireFirebaseAuth, requireAdmin, requirePermission("kyc.approve"), AdminController.retryKycProvisioning);
+
+// Secure Admin Management endpoints (strictly requires Firebase Auth + requireAdmin + requirePermission("admins.view" / "admins.edit"))
+router.get("/admins", requireFirebaseAuth, requireAdmin, requirePermission("admins.view"), AdminController.getAdmins);
+router.post("/admins", requireFirebaseAuth, requireAdmin, requirePermission("admins.edit"), AdminController.manageAdmin);
 
 export default router;

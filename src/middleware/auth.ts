@@ -6,6 +6,7 @@ import { firebase } from "../config/firebase";
 
 export interface AuthenticatedRequest extends Request {
   user?: any;
+  adminUser?: any;
 }
 
 /**
