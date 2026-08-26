@@ -22,6 +22,8 @@ export interface EnvConfig {
   WHATSAPP_INSTANCE_ID: string;
   WHATSAPP_ADMIN_USERNAME: string;
   WHATSAPP_ADMIN_PASSWORD: string;
+  EMAIL_API_URL: string;
+  EMAIL_API_KEY: string;
   SQUAD_BASE_URL: string;
   SQUAD_SECRET_KEY: string;
   SQUAD_BENEFICIARY_ACCOUNT?: string;
@@ -76,6 +78,13 @@ function validateEnv(): EnvConfig {
     logger.warn(`[WhatsApp] Missing environment variables: ${missingWhatsappVars.join(", ")}`);
   }
 
+  const EMAIL_API_URL = process.env.EMAIL_API_URL || "";
+  const EMAIL_API_KEY = process.env.EMAIL_API_KEY || "";
+
+  if (!process.env.EMAIL_API_URL || !process.env.EMAIL_API_KEY) {
+    logger.warn("[Email] Missing environment variables: EMAIL_API_URL or EMAIL_API_KEY");
+  }
+
   // Squad Configurations
   const SQUAD_BASE_URL = process.env.SQUAD_BASE_URL || "https://sandbox-api-d.squadco.com";
   const SQUAD_SECRET_KEY = process.env.SQUAD_SECRET_KEY || "";
@@ -104,6 +113,8 @@ function validateEnv(): EnvConfig {
     WHATSAPP_INSTANCE_ID,
     WHATSAPP_ADMIN_USERNAME,
     WHATSAPP_ADMIN_PASSWORD,
+    EMAIL_API_URL,
+    EMAIL_API_KEY,
     SQUAD_BASE_URL,
     SQUAD_SECRET_KEY,
     SQUAD_BENEFICIARY_ACCOUNT,
