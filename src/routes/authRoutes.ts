@@ -72,7 +72,8 @@ router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Respo
     }
 
     if (channel === "email") {
-      const result = await EmailOtpService.sendPinResetOtp(uid);
+      const authEmail = req.user?.email;
+      const result = await EmailOtpService.sendPinResetOtp(uid, authEmail);
       res.status(200).json({
         success: true,
         message: result.message || "PIN reset OTP sent to registered email address.",
