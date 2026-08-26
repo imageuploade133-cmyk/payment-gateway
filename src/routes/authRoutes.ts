@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { WhatsAppOtpService } from "../services/whatsappOtpService";
+import { EmailOtpService } from "../services/emailOtpService";
 import { gatewayAuthMiddleware } from "../middleware/auth";
 import adminDb from "../config/firebase";
 import logger from "../config/logger";
@@ -58,16 +59,29 @@ router.post("/verify-otp", gatewayAuthMiddleware, async (req: Request, res: Resp
 
 /**
  * Endpoint to trigger a PIN reset OTP based on user token
- * Authenticates user via Firebase ID Token, resolves phone, and dispatches OTP
+ * Authenticates user via Firebase ID Token, resolves phone/email, and dispatches OTP
  */
 router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
+    const { channel } = req.body;
+
     if (!uid) {
       res.status(401).json({ success: false, message: "Unauthorized: Missing user authentication token." });
       return;
     }
 
+    if (channel === "email") {
+      const result = await EmailOtpService.sendPinResetOtp(uid);
+      res.status(200).json({
+        success: true,
+        message: result.message || "PIN reset OTP sent to registered email address.",
+        ...(result.devOtp ? { devOtpCode: result.devOtp } : {}),
+      });
+      return;
+    }
+
+    // Default or channel === "whatsapp": Keep existing WhatsApp implementation unchanged
     if (!adminDb) {
       res.status(500).json({ success: false, message: "Firestore database not configured." });
       return;
@@ -101,12 +115,12 @@ router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Respo
 
 /**
  * Endpoint to verify PIN reset OTP based on user token
- * Authenticates user via Firebase ID Token, resolves phone, and verifies OTP
+ * Authenticates user via Firebase ID Token, resolves session, and verifies OTP
  */
 router.post("/pin-verify-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
-    const { otpCode } = req.body;
+    const { otpCode, channel } = req.body;
 
     if (!uid) {
       res.status(401).json({ success: false, message: "Unauthorized: Missing user authentication token." });
@@ -118,6 +132,16 @@ router.post("/pin-verify-otp", gatewayAuthMiddleware, async (req: any, res: Resp
       return;
     }
 
+    if (channel === "email") {
+      const result = await EmailOtpService.verifyPinResetOtp(uid, otpCode);
+      res.status(200).json({
+        success: true,
+        message: result.message || "Email OTP verified successfully.",
+      });
+      return;
+    }
+
+    // Default or channel === "whatsapp": Keep existing WhatsApp verification implementation unchanged
     if (!adminDb) {
       res.status(500).json({ success: false, message: "Firestore database not configured." });
       return;
