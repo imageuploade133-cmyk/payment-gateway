@@ -41,7 +41,7 @@ export class EmailOtpService {
   /**
    * Sends a PIN Reset OTP via the external Email API to the user's registered email.
    */
-  public static async sendPinResetOtp(uid: string): Promise<{ message: string; devOtp?: string }> {
+  public static async sendPinResetOtp(uid: string, authEmail?: string): Promise<{ message: string; devOtp?: string }> {
     const isProd = env.NODE_ENV === "production";
     const emailApiUrl = env.EMAIL_API_URL;
     const emailApiKey = env.EMAIL_API_KEY;
@@ -55,18 +55,15 @@ export class EmailOtpService {
       throw new Error("Firestore Admin Database not initialized.");
     }
 
-    // Retrieve user's registered email and profile details from Firestore
+    // Retrieve user's registered email and profile details from Firestore or decoded Auth token
     const userSnap = await adminDb.collection("users").doc(uid).get();
-    if (!userSnap.exists) {
-      throw new Error("User profile not found.");
-    }
+    const userData = userSnap.exists ? userSnap.data() : null;
+    const resolvedEmail = (userData?.email || userData?.emailAddress || userData?.userEmail || authEmail || "").trim();
 
-    const userData = userSnap.data();
-    const userEmail = userData?.email?.trim();
-
-    if (!userEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) {
+    if (!resolvedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resolvedEmail)) {
       throw new Error("No valid registered email address found on this profile.");
     }
+    const userEmail = resolvedEmail;
 
     const docId = `pin_reset_email_${uid}`;
     const sessionDocRef = adminDb.collection("otp_sessions").doc(docId);
