@@ -30,6 +30,13 @@ function escapeHtml(str: string): string {
   });
 }
 
+function sanitizeLogMessage(message: string, apiKey?: string): string {
+  if (!apiKey || !message) return message;
+  const cleanKey = apiKey.trim().replace(/^["']|["']$/g, "");
+  if (!cleanKey) return message;
+  return message.split(cleanKey).join("[REDACTED_API_KEY]");
+}
+
 export class EmailOtpService {
   /**
    * Generates a cryptographically secure 6-digit OTP string
@@ -134,39 +141,60 @@ export class EmailOtpService {
       </div>
     `;
 
-    const cleanBaseUrl = emailApiUrl.replace(/\/+$/, "");
-    const sendEndpoint = `${cleanBaseUrl}/api/email/send`;
+    const sendEndpoint = (emailApiUrl || "").trim().replace(/^["']|["']$/g, "");
+    const cleanApiKey = (emailApiKey || "").trim().replace(/^["']|["']$/g, "");
+
+    logger.info(`[EmailOtpService] Target Email API endpoint resolved: ${sendEndpoint}`);
 
     let sendSuccess = false;
     let apiErrorLog = "";
 
-    try {
-      logger.info(`[EmailOtpService] Dispatching PIN reset OTP email to ${userEmail}...`);
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts && !sendSuccess; attempt++) {
+      try {
+        logger.info(`[EmailOtpService] Dispatching PIN reset OTP email to ${userEmail} (Attempt ${attempt}/${maxAttempts})...`);
 
-      const res = await fetch(sendEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": emailApiKey,
-        },
-        body: JSON.stringify({
-          to: userEmail,
-          subject: "Your E-Global Pay OTP",
-          html: htmlContent,
-        }),
-      });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000); // 25-second timeout per attempt
 
-      if (res.ok) {
-        sendSuccess = true;
-        logger.info(`[EmailOtpService] OTP email successfully delivered to ${userEmail}.`);
-      } else {
-        const textResp = await res.text();
-        apiErrorLog = `HTTP ${res.status}: ${textResp}`;
-        logger.error(`[EmailOtpService] Email API returned error status | ${apiErrorLog}`);
+        const res = await fetch(sendEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${cleanApiKey}`,
+          },
+          body: JSON.stringify({
+            to: userEmail,
+            subject: "Your E-Global Pay OTP",
+            html: htmlContent,
+          }),
+          signal: controller.signal,
+        }).finally(() => clearTimeout(timeoutId));
+
+        if (res.ok) {
+          sendSuccess = true;
+          logger.info(`[EmailOtpService] OTP email successfully delivered to ${userEmail}.`);
+        } else {
+          const textResp = await res.text().catch(() => "");
+          const sanitizedResp = sanitizeLogMessage(textResp, cleanApiKey);
+          apiErrorLog = `HTTP ${res.status}: ${sanitizedResp}`;
+          logger.error(`[EmailOtpService] Email API returned error status | ${apiErrorLog}`);
+        }
+      } catch (err: any) {
+        if (err.name === "AbortError") {
+          apiErrorLog = "Email API dispatch timed out after 25 seconds (connection issue).";
+        } else {
+          const causeMsg = err.cause ? ` | Cause: ${err.cause.message || err.cause.code || JSON.stringify(err.cause)}` : "";
+          const rawErr = `${err.message || "Network request failed"}${causeMsg}`;
+          apiErrorLog = sanitizeLogMessage(rawErr, cleanApiKey);
+        }
+        logger.error(`[EmailOtpService] Email API dispatch exception (Attempt ${attempt}): ${apiErrorLog}`);
       }
-    } catch (err: any) {
-      apiErrorLog = err.message || "Network request failed";
-      logger.error(`[EmailOtpService] Email API dispatch exception: ${apiErrorLog}`);
+
+      if (!sendSuccess && attempt < maxAttempts) {
+        logger.info(`[EmailOtpService] Retrying email dispatch in 2 seconds...`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
     }
 
     if (!sendSuccess) {
