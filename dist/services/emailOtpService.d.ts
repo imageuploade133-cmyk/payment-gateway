@@ -16,7 +16,7 @@ export declare class EmailOtpService {
      */
     private static generateOtp;
     /**
-     * Sends a PIN Reset OTP via the external Email API to the user's registered email.
+     * Sends a PIN Reset OTP via the WhatsAPI HUB Email API to the user's registered email.
      */
     static sendPinResetOtp(uid: string, authEmail?: string): Promise<{
         message: string;

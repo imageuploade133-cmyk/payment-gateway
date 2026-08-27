@@ -29,6 +29,18 @@ function sanitizeLogMessage(message, apiKey) {
         return message;
     return message.split(cleanKey).join("[REDACTED_API_KEY]");
 }
+function resolveWhatsApiEmailEndpoint(rawUrl) {
+    let cleaned = (rawUrl || "").trim().replace(/^["']|["']$/g, "").replace(/\/+$/, "");
+    if (!cleaned)
+        return "";
+    if (cleaned.endsWith("/api/email/send"))
+        return cleaned;
+    if (cleaned.endsWith("/api/email"))
+        return `${cleaned}/send`;
+    if (cleaned.endsWith("/api"))
+        return `${cleaned}/email/send`;
+    return `${cleaned}/api/email/send`;
+}
 class EmailOtpService {
     /**
      * Generates a cryptographically secure 6-digit OTP string
@@ -37,12 +49,13 @@ class EmailOtpService {
         return crypto_1.default.randomInt(100000, 1000000).toString();
     }
     /**
-     * Sends a PIN Reset OTP via the external Email API to the user's registered email.
+     * Sends a PIN Reset OTP via the WhatsAPI HUB Email API to the user's registered email.
      */
     static async sendPinResetOtp(uid, authEmail) {
         const isProd = env_1.env.NODE_ENV === "production";
         const emailApiUrl = env_1.env.EMAIL_API_URL;
         const emailApiKey = env_1.env.EMAIL_API_KEY;
+        const emailInstanceId = env_1.env.EMAIL_INSTANCE_ID || "";
         if (!emailApiUrl || !emailApiKey) {
             logger_1.default.error("[EmailOtpService] Configuration Error: EMAIL_API_URL or EMAIL_API_KEY is missing.");
             throw new Error("Email service configuration is incomplete. Please contact support.");
@@ -116,9 +129,10 @@ class EmailOtpService {
         <p style="color: #777; font-size: 12px; margin-top: 24px;">If you did not request a PIN reset, please ignore this email or contact support.</p>
       </div>
     `;
-        const sendEndpoint = (emailApiUrl || "").trim().replace(/^["']|["']$/g, "");
+        const sendEndpoint = resolveWhatsApiEmailEndpoint(emailApiUrl);
         const cleanApiKey = (emailApiKey || "").trim().replace(/^["']|["']$/g, "");
-        logger_1.default.info(`[EmailOtpService] Target Email API endpoint resolved: ${sendEndpoint}`);
+        const cleanInstanceId = (emailInstanceId || "").trim().replace(/^["']|["']$/g, "");
+        logger_1.default.info(`[EmailOtpService] Target WhatsAPI Email endpoint resolved: ${sendEndpoint}`);
         let sendSuccess = false;
         let apiErrorLog = "";
         const maxAttempts = 2;
@@ -126,13 +140,19 @@ class EmailOtpService {
             try {
                 logger_1.default.info(`[EmailOtpService] Dispatching PIN reset OTP email to ${userEmail} (Attempt ${attempt}/${maxAttempts})...`);
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 25000); // 25-second timeout per attempt
+                const timeoutId = setTimeout(() => controller.abort(), 20000); // 20-second timeout per attempt
+                const headers = {
+                    "Content-Type": "application/json",
+                    "X-API-Key": cleanApiKey,
+                    "Authorization": `Bearer ${cleanApiKey}`,
+                };
+                if (cleanInstanceId) {
+                    headers["X-Instance-ID"] = cleanInstanceId;
+                    headers["X-Project-ID"] = cleanInstanceId;
+                }
                 const res = await fetch(sendEndpoint, {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${cleanApiKey}`,
-                    },
+                    headers,
                     body: JSON.stringify({
                         to: userEmail,
                         subject: "Your E-Global Pay OTP",
@@ -149,11 +169,15 @@ class EmailOtpService {
                     const sanitizedResp = sanitizeLogMessage(textResp, cleanApiKey);
                     apiErrorLog = `HTTP ${res.status}: ${sanitizedResp}`;
                     logger_1.default.error(`[EmailOtpService] Email API returned error status | ${apiErrorLog}`);
+                    // Do NOT retry 400, 401, 403, or 429 permanent errors
+                    if ([400, 401, 403, 429].includes(res.status)) {
+                        break;
+                    }
                 }
             }
             catch (err) {
                 if (err.name === "AbortError") {
-                    apiErrorLog = "Email API dispatch timed out after 25 seconds (connection issue).";
+                    apiErrorLog = "Email API dispatch timed out after 20 seconds.";
                 }
                 else {
                     const causeMsg = err.cause ? ` | Cause: ${err.cause.message || err.cause.code || JSON.stringify(err.cause)}` : "";

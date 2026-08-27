@@ -24,6 +24,7 @@ export interface EnvConfig {
   WHATSAPP_ADMIN_PASSWORD: string;
   EMAIL_API_URL: string;
   EMAIL_API_KEY: string;
+  EMAIL_INSTANCE_ID?: string;
   SQUAD_BASE_URL: string;
   SQUAD_SECRET_KEY: string;
   SQUAD_BENEFICIARY_ACCOUNT?: string;
@@ -80,6 +81,7 @@ function validateEnv(): EnvConfig {
 
   const EMAIL_API_URL = process.env.EMAIL_API_URL || "";
   const EMAIL_API_KEY = process.env.EMAIL_API_KEY || "";
+  const EMAIL_INSTANCE_ID = process.env.EMAIL_INSTANCE_ID || process.env.EMAIL_PROJECT_ID || "";
 
   if (!process.env.EMAIL_API_URL || !process.env.EMAIL_API_KEY) {
     logger.warn("[Email] Missing environment variables: EMAIL_API_URL or EMAIL_API_KEY");
@@ -115,6 +117,7 @@ function validateEnv(): EnvConfig {
     WHATSAPP_ADMIN_PASSWORD,
     EMAIL_API_URL,
     EMAIL_API_KEY,
+    EMAIL_INSTANCE_ID,
     SQUAD_BASE_URL,
     SQUAD_SECRET_KEY,
     SQUAD_BENEFICIARY_ACCOUNT,
