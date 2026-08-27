@@ -55,14 +55,26 @@ export class EmailOtpService {
       throw new Error("Firestore Admin Database not initialized.");
     }
 
+    logger.info(`[EmailOtpService] Looking up email for authenticated uid: ${uid}`);
+
     // Retrieve user's registered email and profile details from Firestore or decoded Auth token
     const userSnap = await adminDb.collection("users").doc(uid).get();
     const userData = userSnap.exists ? userSnap.data() : null;
+
+    if (!userSnap.exists) {
+      logger.warn(`[EmailOtpService] Profile document users/${uid} does not exist in Firestore.`);
+    } else {
+      logger.info(`[EmailOtpService] Profile document users/${uid} retrieved successfully.`);
+    }
+
     const resolvedEmail = (userData?.email || userData?.emailAddress || userData?.userEmail || authEmail || "").trim();
 
     if (!resolvedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(resolvedEmail)) {
+      logger.error(`[EmailOtpService] Email resolution failed for uid ${uid}. No valid email in Firestore doc or auth token.`);
       throw new Error("No valid registered email address found on this profile.");
     }
+
+    logger.info(`[EmailOtpService] Registered email found; preparing Email OTP dispatch.`);
     const userEmail = resolvedEmail;
 
     const docId = `pin_reset_email_${uid}`;
