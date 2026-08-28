@@ -267,8 +267,11 @@ class EmailOtpService {
                 throw new Error(`Incorrect verification code. You have ${remaining} attempts remaining before lockout.`);
             }
         }
-        // Successful verification: invalidate/delete session immediately to make it single-use
-        await sessionDocRef.delete();
+        // Successful verification: mark session as verified and extend expiry so final PIN reset step can consume it
+        await sessionDocRef.update({
+            verified: true,
+            expiresAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+        });
         // Audit Log for success
         await firebase_1.default.collection("otp_audits").add({
             uid,
