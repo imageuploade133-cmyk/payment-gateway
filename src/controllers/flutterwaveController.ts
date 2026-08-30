@@ -235,11 +235,11 @@ export const getExchangeRates = async (req: Request, res: Response, next: NextFu
     const amountNum = parseFloat((req.query.amount as string) || "1");
     const amount = isNaN(amountNum) || amountNum <= 0 ? 1 : amountNum;
 
-    const allowed = ["NGN", "USD", "XOF"];
+    const allowed = ["NGN", "USD", "EUR", "GBP", "GHS", "KES", "XOF", "XAF", "CAD", "ZAR", "TZS", "UGX", "RWF", "ZMW"];
     if (!allowed.includes(sourceCurrency) || !allowed.includes(destinationCurrency)) {
       res.status(400).json({
         success: false,
-        message: "Invalid currency specified. Supported currencies are NGN, USD, XOF.",
+        message: `Invalid currency specified. Supported currencies include: ${allowed.join(", ")}.`,
       });
       return;
     }

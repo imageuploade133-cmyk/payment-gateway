@@ -47,119 +47,97 @@ describe("GET /api/flutterwave/rates VM Endpoint Tests", () => {
     expect(res.body.secretKey).toBeUndefined();
   });
 
-  it("should return normalized live rates for NGN -> USD", async () => {
+  it("should return normalized live rates for GHS -> NGN", async () => {
     mockClient.request.mockResolvedValueOnce({
       status: "success",
       message: "Transfer rate fetched",
       data: {
-        rate: 0.000732,
-        source: { currency: "NGN", amount: 1 },
-        destination: { currency: "USD", amount: 0.000732 },
+        rate: 88.5,
+        source: { currency: "GHS", amount: 1 },
+        destination: { currency: "NGN", amount: 88.5 },
       },
     });
 
     const res = await request(app)
-      .get("/api/flutterwave/rates?sourceCurrency=NGN&destinationCurrency=USD&amount=1")
+      .get("/api/flutterwave/rates?sourceCurrency=GHS&destinationCurrency=NGN&amount=1")
       .set(S2S_HEADERS);
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.sourceCurrency).toBe("NGN");
-    expect(res.body.destinationCurrency).toBe("USD");
-    expect(res.body.rate).toBe(0.000732);
-  });
-
-  it("should handle XOF -> NGN direct queries correctly", async () => {
-    mockClient.request.mockResolvedValueOnce({
-      status: "success",
-      message: "Transfer rate fetched",
-      data: {
-        rate: 2.45,
-        source: { currency: "XOF", amount: 1 },
-        destination: { currency: "NGN", amount: 2.45 },
-      },
-    });
-
-    const res = await request(app)
-      .get("/api/flutterwave/rates?sourceCurrency=XOF&destinationCurrency=NGN&amount=1")
-      .set(S2S_HEADERS);
-
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.sourceCurrency).toBe("XOF");
+    expect(res.body.sourceCurrency).toBe("GHS");
     expect(res.body.destinationCurrency).toBe("NGN");
-    expect(res.body.rate).toBe(2.45);
+    expect(res.body.rate).toBe(88.5);
   });
 
-  it("should handle NGN -> XOF direct queries correctly", async () => {
+  it("should return normalized live rates for KES -> NGN", async () => {
     mockClient.request.mockResolvedValueOnce({
       status: "success",
       message: "Transfer rate fetched",
       data: {
-        rate: 0.408,
-        source: { currency: "NGN", amount: 1 },
-        destination: { currency: "XOF", amount: 0.408 },
+        rate: 10.2,
+        source: { currency: "KES", amount: 1 },
+        destination: { currency: "NGN", amount: 10.2 },
       },
     });
 
     const res = await request(app)
-      .get("/api/flutterwave/rates?sourceCurrency=NGN&destinationCurrency=XOF&amount=1")
+      .get("/api/flutterwave/rates?sourceCurrency=KES&destinationCurrency=NGN&amount=1")
       .set(S2S_HEADERS);
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.sourceCurrency).toBe("NGN");
-    expect(res.body.destinationCurrency).toBe("XOF");
-    expect(res.body.rate).toBe(0.408);
+    expect(res.body.sourceCurrency).toBe("KES");
+    expect(res.body.destinationCurrency).toBe("NGN");
+    expect(res.body.rate).toBe(10.2);
   });
 
-  it("should handle USD -> XOF direct queries correctly", async () => {
+  it("should return normalized live rates for GBP -> NGN", async () => {
     mockClient.request.mockResolvedValueOnce({
       status: "success",
       message: "Transfer rate fetched",
       data: {
-        rate: 556.8,
-        source: { currency: "USD", amount: 1 },
-        destination: { currency: "XOF", amount: 556.8 },
+        rate: 1720.5,
+        source: { currency: "GBP", amount: 1 },
+        destination: { currency: "NGN", amount: 1720.5 },
       },
     });
 
     const res = await request(app)
-      .get("/api/flutterwave/rates?sourceCurrency=USD&destinationCurrency=XOF&amount=1")
+      .get("/api/flutterwave/rates?sourceCurrency=GBP&destinationCurrency=NGN&amount=1")
       .set(S2S_HEADERS);
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.sourceCurrency).toBe("USD");
-    expect(res.body.destinationCurrency).toBe("XOF");
-    expect(res.body.rate).toBe(556.8);
+    expect(res.body.sourceCurrency).toBe("GBP");
+    expect(res.body.destinationCurrency).toBe("NGN");
+    expect(res.body.rate).toBe(1720.5);
   });
 
-  it("should handle XOF -> USD direct queries correctly", async () => {
+  it("should return normalized live rates for EUR -> NGN", async () => {
     mockClient.request.mockResolvedValueOnce({
       status: "success",
       message: "Transfer rate fetched",
       data: {
-        rate: 0.00179,
-        source: { currency: "XOF", amount: 1 },
-        destination: { currency: "USD", amount: 0.00179 },
+        rate: 1480.25,
+        source: { currency: "EUR", amount: 1 },
+        destination: { currency: "NGN", amount: 1480.25 },
       },
     });
 
-    const res = await request(app)
-      .get("/api/flutterwave/rates?sourceCurrency=XOF&destinationCurrency=USD&amount=1")
-      .set(S2S_HEADERS);
-
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.sourceCurrency).toBe("XOF");
-    expect(res.body.destinationCurrency).toBe("USD");
-    expect(res.body.rate).toBe(0.00179);
-  });
-
-  it("should reject invalid currency parameters", async () => {
     const res = await request(app)
       .get("/api/flutterwave/rates?sourceCurrency=EUR&destinationCurrency=NGN&amount=1")
+      .set(S2S_HEADERS);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.sourceCurrency).toBe("EUR");
+    expect(res.body.destinationCurrency).toBe("NGN");
+    expect(res.body.rate).toBe(1480.25);
+  });
+
+  it("should reject invalid unsupported currency parameters", async () => {
+    const res = await request(app)
+      .get("/api/flutterwave/rates?sourceCurrency=XYZ&destinationCurrency=NGN&amount=1")
       .set(S2S_HEADERS);
 
     expect(res.status).toBe(400);
