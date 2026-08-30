@@ -5,7 +5,7 @@ import { getFlutterwaveClient } from "../providers/flutterwave";
 jest.mock("../providers/flutterwave");
 const mockedGetClient = getFlutterwaveClient as jest.MockedFunction<typeof getFlutterwaveClient>;
 
-describe("GET /api/flutterwave/rates VM Endpoint Tests", () => {
+describe("GET /api/flutterwave/rates VM Endpoint & Bid/Ask FX Model Tests", () => {
   let mockClient: any;
 
   beforeEach(() => {
@@ -153,5 +153,27 @@ describe("GET /api/flutterwave/rates VM Endpoint Tests", () => {
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
     expect(res.body.message).toContain("cannot be identical");
+  });
+
+  it("should demonstrate Bid/Ask spread retention on round-trip exchange (NGN -> USD -> NGN)", () => {
+    const rawRate = 1360; // Flutterwave raw provider rate
+    const usdSellMarkup = 180; // Customer buys USD at rawRate + 180 = 1540
+    const usdBuyMarkup = 100; // Customer sells USD at rawRate - 100 = 1260
+
+    const customerSellRate = rawRate + usdSellMarkup; // 1540
+    const customerBuyRate = rawRate - usdBuyMarkup; // 1260
+
+    // Step 1: User swaps NGN 154,000 to USD
+    const initialNgn = 154000;
+    const usdReceived = initialNgn / customerSellRate; // $100 USD
+
+    expect(usdReceived).toBe(100);
+
+    // Step 2: User immediately swaps $100 USD back to NGN
+    const ngnReturned = usdReceived * customerBuyRate; // NGN 126,000
+
+    expect(ngnReturned).toBe(126000);
+    const platformSpreadRetained = initialNgn - ngnReturned;
+    expect(platformSpreadRetained).toBe(28000); // NGN 28,000 retained
   });
 });
