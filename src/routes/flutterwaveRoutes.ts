@@ -9,6 +9,7 @@ const router = Router();
 router.post("/proxy", gatewayAuthMiddleware, flwController.proxy);
 router.get("/banks", gatewayAuthMiddleware, flwController.getBanks);
 router.post("/banks/refresh", gatewayAuthMiddleware, flwController.refreshBanksList);
+router.get("/rates", gatewayAuthMiddleware, flwController.getExchangeRates);
 router.get("/transfer-fee", gatewayAuthMiddleware, flwController.getTransferFee);
 router.post("/initialize", gatewayAuthMiddleware, flwController.initializePayment);
 router.post("/resolve-account", gatewayAuthMiddleware, accountResolutionRateLimiter, flwController.resolveAccount);

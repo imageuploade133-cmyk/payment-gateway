@@ -207,6 +207,112 @@ export const resolveAccount = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+const rateCache: Map<string, { data: any; expiresAt: number }> = new Map();
+const RATE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+export const getExchangeRates = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received getExchangeRates request | reqId=${reqId}`);
+
+  try {
+    let sourceCurrency = (
+      (req.query.sourceCurrency as string) ||
+      (req.query.source_currency as string) ||
+      (req.query.from as string) ||
+      "USD"
+    ).trim().toUpperCase();
+
+    let destinationCurrency = (
+      (req.query.destinationCurrency as string) ||
+      (req.query.destination_currency as string) ||
+      (req.query.to as string) ||
+      "NGN"
+    ).trim().toUpperCase();
+
+    if (sourceCurrency === "FCFA") sourceCurrency = "XOF";
+    if (destinationCurrency === "FCFA") destinationCurrency = "XOF";
+
+    const amountNum = parseFloat((req.query.amount as string) || "1");
+    const amount = isNaN(amountNum) || amountNum <= 0 ? 1 : amountNum;
+
+    const allowed = ["NGN", "USD", "XOF"];
+    if (!allowed.includes(sourceCurrency) || !allowed.includes(destinationCurrency)) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid currency specified. Supported currencies are NGN, USD, XOF.",
+      });
+      return;
+    }
+
+    if (sourceCurrency === destinationCurrency) {
+      res.status(400).json({
+        success: false,
+        message: "Source and destination currencies cannot be identical.",
+      });
+      return;
+    }
+
+    const cacheKey = `${sourceCurrency}_${destinationCurrency}_${amount}`;
+    const now = Date.now();
+    const cached = rateCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) {
+      logger.info(`[Flutterwave Controller] Returning cached exchange rate for ${cacheKey}`);
+      res.status(200).json(cached.data);
+      return;
+    }
+
+    const client = getFlutterwaveClient();
+    logger.info(`Sending to Flutterwave (Transfer Rates): source_currency=${sourceCurrency}&destination_currency=${destinationCurrency}&amount=${amount}`);
+
+    const response = await client.request(
+      "get",
+      `/transfers/rates?amount=${amount}&destination_currency=${destinationCurrency}&source_currency=${sourceCurrency}`
+    );
+
+    logger.info("[Flutterwave Controller] Transfer rate response:", response);
+
+    if (response && response.status === "success" && response.data) {
+      const rawRate = Number(response.data.rate);
+      if (isNaN(rawRate) || rawRate <= 0) {
+        res.status(400).json({
+          success: false,
+          message: "Invalid exchange rate value returned by Flutterwave provider.",
+        });
+        return;
+      }
+
+      const destinationAmount = Number((amount * rawRate).toFixed(6));
+
+      const responseData = {
+        success: true,
+        provider: "flutterwave",
+        sourceCurrency,
+        destinationCurrency,
+        rate: rawRate,
+        sourceAmount: amount,
+        destinationAmount,
+        fetchedAt: new Date().toISOString(),
+      };
+
+      rateCache.set(cacheKey, { data: responseData, expiresAt: now + RATE_CACHE_TTL_MS });
+
+      res.status(200).json(responseData);
+    } else {
+      res.status(400).json({
+        success: false,
+        message: response?.message || "Failed to retrieve transfer rate from Flutterwave provider.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getExchangeRates exception | error=${error.message} | reqId=${reqId}`);
+    res.status(500).json({
+      success: false,
+      message: "An internal server error occurred while retrieving exchange rate.",
+    });
+  }
+};
+
 export const getTransferFee = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received getTransferFee request | reqId=${reqId}`);
