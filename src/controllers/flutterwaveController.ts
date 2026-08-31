@@ -1018,10 +1018,13 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
   logger.info(`[Webhook] Method: ${method}`);
   logger.info(`[Webhook] URL: ${url}`);
   logger.info(`[Webhook] IP Address: ${ip}`);
-  logger.info("[Webhook] Headers:", req.headers);
-  logger.info("[Webhook] Signature Header:", signature);
+  const sanitizedHeaders = { ...req.headers };
+  if (sanitizedHeaders["verif-hash"]) {
+    sanitizedHeaders["verif-hash"] = "[REDACTED]";
+  }
+  logger.info("[Webhook] Headers:", sanitizedHeaders);
+  logger.info("[Webhook] Signature Header Present:", !!signature);
   logger.info(`[Webhook] Raw Body Length: ${rawBodyString.length}`);
-  logger.info("[Webhook] Raw Body:", rawBodyString);
 
   try {
     const client = getFlutterwaveClient();
@@ -1033,7 +1036,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
     if (!verified) {
       logger.warn(`[Flutterwave Controller] Signature verification failed: Unauthorized Webhook Signature received | reqId=${reqId}`);
-      logger.warn(`[Webhook] Received verif-hash: "${signature}"`);
+      logger.warn(`[Webhook] Received verif-hash header present: ${!!signature}`);
       logger.warn(`[Webhook] Configured webhook secret length: ${env.FLW_WEBHOOK_SECRET?.length || 0}`);
       logger.info("[Webhook] Exiting: signature hash mismatch (401 Unauthorized)");
       res.status(401).json({
@@ -1125,31 +1128,40 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         if (adminDb) {
           try {
             const transferRef = adminDb.collection("transfers").doc(reference);
+            const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
 
             logger.info(`[Webhook] Starting Firestore atomic transaction for transfer reconciliation... | reference=${reference}`);
             await adminDb.runTransaction(async (transaction) => {
-              logger.info(`[Webhook Transaction] Querying Firestore transfer doc... | reference=${reference}`);
+              logger.info(`[Webhook Transaction] Querying Firestore transfer & unified transaction docs... | reference=${reference}`);
               const transferDoc = await transaction.get(transferRef);
-              if (!transferDoc.exists) {
-                logger.warn(`[Webhook] Transfer doc not found in Firestore for reference: ${reference}`);
-                logger.info("[Webhook] Transaction not found - Exiting transaction.");
+              const unifiedTxDoc = await transaction.get(unifiedTxRef);
+
+              if (!transferDoc.exists && !unifiedTxDoc.exists) {
+                logger.warn(`[Webhook] Neither transfer doc nor unified transaction doc found in Firestore for reference: ${reference}`);
+                logger.info("[Webhook] Documents not found - Exiting transaction.");
                 return;
               }
 
-              logger.info(`[Webhook Transaction] Transfer doc loaded successfully.`);
-              const transferData = transferDoc.data() || {};
-              const currentStatus = transferData.status || "PENDING";
+              logger.info(`[Webhook Transaction] Documents loaded successfully.`);
+              const transferData = transferDoc.exists ? (transferDoc.data() || {}) : {};
+              const currentTransferStatus = transferData.status || "PENDING";
 
-              // If already terminal (SUCCESS, FAILED, REVERSED), ignore status update & refund (guarantee idempotency)
-              if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED") {
-                logger.info(`[Webhook] Transfer ${reference} is already in a terminal state: ${currentStatus}. Webhook ignored.`);
-                logger.info("[Webhook] Exiting: terminal status already reached");
+              const unifiedData = unifiedTxDoc.exists ? (unifiedTxDoc.data() || {}) : {};
+              const currentUnifiedStatus = unifiedData.status || "PENDING";
+
+              // Check if both documents are already in terminal state
+              const isTransferTerminal = currentTransferStatus === "SUCCESS" || currentTransferStatus === "FAILED" || currentTransferStatus === "REVERSED";
+              const isUnifiedTerminal = currentUnifiedStatus === "SUCCESS" || currentUnifiedStatus === "FAILED" || currentUnifiedStatus === "REVERSED";
+
+              if (isTransferTerminal && isUnifiedTerminal) {
+                logger.info(`[Webhook] Transfer ${reference} and unified transaction tx-${reference} are both in terminal state. Webhook ignored.`);
+                logger.info("[Webhook] Exiting: terminal status already reached on both records.");
                 return;
               }
 
-              const userId = transferData.userId;
-              const amount = Number(transferData.amount) || 0;
-              const fee = Number(transferData.fee) || 0;
+              const userId = transferData.userId || unifiedData.userId;
+              const amount = Number(transferData.amount ?? unifiedData.amount ?? 0);
+              const fee = Number(transferData.fee ?? unifiedData.fee ?? transferData.transferFee ?? unifiedData.transferFee ?? 0);
               const totalRefund = amount + fee;
 
               const updatePayload: Record<string, any> = {
@@ -1162,8 +1174,17 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 updatedAt: new Date().toISOString()
               };
 
-              // Atomically refund wallet if failed or reversed and not already refunded
-              if (mappedStatus === "FAILED" || mappedStatus === "REVERSED") {
+              const unifiedUpdatePayload: Record<string, any> = {
+                status: mappedStatus,
+                providerStatus: flwStatus || null,
+                providerReference: payload.data?.reference || null,
+                providerTransactionId: flwId || null,
+                webhookReceivedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              };
+
+              // Atomically refund wallet if failed or reversed and transfer record was not already refunded
+              if ((mappedStatus === "FAILED" || mappedStatus === "REVERSED") && !isTransferTerminal) {
                 logger.info(`[Webhook Transaction] Transfer failed. Performing refund evaluations...`);
                 
                 if (transferData.refunded) {
@@ -1189,8 +1210,8 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                       currency: "NGN",
                       reference: `REFUND-${reference}`,
                       type: "DEPOSIT",
-                      description: `Refund for failed transfer: ${transferData.description || `Transfer to ${transferData.recipientName}`}`,
-                      recipientName: transferData.recipientName || "Self",
+                      description: `Refund for failed transfer: ${transferData.description || unifiedData.description || `Transfer to ${transferData.recipientName || unifiedData.recipientName || "Recipient"}`}`,
+                      recipientName: transferData.recipientName || unifiedData.recipientName || "Self",
                       status: "SUCCESS",
                       date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
                       time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
@@ -1208,10 +1229,51 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 }
               }
 
-              // Update transfer record status
-              logger.info(`[Webhook Transaction] Saving status transition update payload to Firestore... | reference=${reference}`);
-              transaction.update(transferRef, updatePayload);
-              logger.info(`[Webhook Transfer Updated] Transfer status transition to ${mappedStatus} saved in transaction for reference: ${reference}`);
+              // Update transfer record if it exists and is not already terminal
+              if (transferDoc.exists && !isTransferTerminal) {
+                logger.info(`[Webhook Transaction] Saving transfers/${reference} status update...`);
+                transaction.update(transferRef, updatePayload);
+              }
+
+              // Update or set unified transaction record
+              if (unifiedTxDoc.exists) {
+                logger.info(`[Webhook Transaction] Saving transactions/tx-${reference} status update...`);
+                transaction.update(unifiedTxRef, unifiedUpdatePayload);
+              } else if (transferDoc.exists) {
+                logger.info(`[Webhook Transaction] Creating transactions/tx-${reference}...`);
+                transaction.set(unifiedTxRef, {
+                  userId: transferData.userId || "N/A",
+                  amount: transferData.amount || 0,
+                  currency: transferData.currency || "NGN",
+                  providerReference: payload.data?.reference || flwId || null,
+                  providerTransactionId: flwId || null,
+                  transactionNumber: reference,
+                  provider: "Flutterwave",
+                  status: mappedStatus,
+                  providerStatus: flwStatus || null,
+                  type: "TRANSFER",
+                  category: "transfer",
+                  direction: "outgoing",
+                  title: "Transfer To",
+                  description: transferData.description || `Transfer to ${transferData.recipientName || "Recipient"}`,
+                  recipientName: transferData.recipientName || null,
+                  recipientBankName: transferData.recipientBankName || transferData.bankName || null,
+                  recipientAccountNumber: transferData.recipientAccountNumber || transferData.accountNumber || null,
+                  beneficiaryName: transferData.beneficiaryName || transferData.recipientName || null,
+                  beneficiaryAccountNumber: transferData.beneficiaryAccountNumber || transferData.accountNumber || null,
+                  beneficiaryBankCode: transferData.beneficiaryBankCode || transferData.bankCode || null,
+                  beneficiaryBankName: transferData.beneficiaryBankName || transferData.bankName || null,
+                  fee: transferData.fee || 0,
+                  transferFee: transferData.transferFee || transferData.fee || 0,
+                  vat: transferData.vat || 0,
+                  markup: transferData.markup || 0,
+                  totalDebited: transferData.totalDebited || (Number(transferData.amount || 0) + Number(transferData.fee || 0)),
+                  transactionDate: transferData.createdAt || new Date().toISOString(),
+                  webhookReceivedAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString()
+                }, { merge: true });
+              }
+              logger.info(`[Webhook Transfer Updated] Transfer & unified transaction status transition to ${mappedStatus} saved in transaction for reference: ${reference}`);
             });
 
             logger.info(`[Flutterwave Controller Webhook] Successfully processed transfer status update for reference: ${reference}`);
