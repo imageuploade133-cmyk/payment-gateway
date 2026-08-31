@@ -65,7 +65,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     next = jest.fn();
   });
 
-  it("A. Should classify virtual account deposit as type VIRTUAL_ACCOUNT_DEPOSIT and category DEPOSIT", async () => {
+  it("A. Should classify virtual account deposit as type TRANSFER, category TRANSFER, and direction CREDIT", async () => {
     const mockUserDoc = { exists: true, data: () => ({ balance: 500 }) };
     const mockWalletDoc = { exists: true, data: () => ({ balance: 500 }) };
 
@@ -102,9 +102,10 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(setRecord).not.toBeNull();
-    expect(setRecord.type).toBe("VIRTUAL_ACCOUNT_DEPOSIT");
-    expect(setRecord.category).toBe("DEPOSIT");
+    expect(setRecord.type).toBe("TRANSFER");
+    expect(setRecord.category).toBe("TRANSFER");
     expect(setRecord.direction).toBe("CREDIT");
+    expect(setRecord.creditedTo).toBe("Available Balance");
     expect(setRecord.fundingMethod).toBe("Virtual Account");
     expect(setRecord.provider).toBe("Flutterwave");
     expect(setRecord.amount).toBe(100);
@@ -160,14 +161,17 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     expect(setRecord.senderName).toBeUndefined();
     expect(setRecord.senderAccountNumber).toBeUndefined();
     expect(setRecord.beneficiaryName).toBeUndefined();
+    expect(setRecord.type).toBe("TRANSFER");
+    expect(setRecord.category).toBe("TRANSFER");
   });
 
-  it("G. Regression Test: Proves Virtual Account Deposit != Outward Bank Transfer", () => {
+  it("G. Regression Test: Proves Incoming Transfer != Outward Bank Transfer", () => {
     const depositRecord = {
-      type: "VIRTUAL_ACCOUNT_DEPOSIT",
-      category: "DEPOSIT",
+      type: "TRANSFER",
+      category: "TRANSFER",
       direction: "CREDIT",
       fundingMethod: "Virtual Account",
+      creditedTo: "Available Balance",
       provider: "Flutterwave",
       amount: 100,
     };
@@ -183,8 +187,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
       fee: 10,
     };
 
-    expect(depositRecord.category).not.toBe(transferRecord.category);
     expect(depositRecord.direction).not.toBe(transferRecord.direction);
-    expect(depositRecord.type).not.toBe(transferRecord.type);
+    expect(depositRecord.creditedTo).toBe("Available Balance");
   });
 });

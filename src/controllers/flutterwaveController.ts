@@ -922,9 +922,9 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                 }
 
                 // Extract sender details from verify result if present
-                const senderName = (result as any).sender_name || (result as any).senderName || (result as any).customer?.name || undefined;
-                const senderBankName = (result as any).sender_bank || (result as any).senderBankName || undefined;
-                const senderAccountNumber = (result as any).sender_account || (result as any).senderAccountNumber || undefined;
+                const senderName = (result as any).sender_name || (result as any).senderName || (result as any).originatorname || (result as any).originator_name || (result as any).customer?.name || undefined;
+                const senderBankName = (result as any).sender_bank || (result as any).senderBankName || (result as any).originatorbankname || (result as any).originator_bank || undefined;
+                const senderAccountNumber = (result as any).sender_account || (result as any).senderAccountNumber || (result as any).originatoraccountnumber || (result as any).originator_account || undefined;
 
                 // Create General Ledger transaction record for history
                 transaction.set(ledgerRef, {
@@ -933,11 +933,14 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                   currency: result.currency || "NGN",
                   reference: txRef || `DEP-${flwId}`,
                   flwId: flwId,
-                  type: "VIRTUAL_ACCOUNT_DEPOSIT",
-                  category: "DEPOSIT",
+                  providerTransactionId: flwId,
+                  providerReference: txRef || `DEP-${flwId}`,
+                  type: "TRANSFER",
+                  category: "TRANSFER",
                   direction: "CREDIT",
                   description: senderName ? `Transfer From ${senderName}` : "Transfer From Virtual Account",
                   recipientName: "Self",
+                  creditedTo: "Available Balance",
                   fundingMethod: "Virtual Account",
                   senderName,
                   senderBankName,
@@ -1329,11 +1332,12 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 flwId: flwId || transactionId,
                 providerTransactionId: flwId || transactionId,
                 providerReference: txRef || `DEP-${transactionId}`,
-                type: "VIRTUAL_ACCOUNT_DEPOSIT",
-                category: "DEPOSIT",
+                type: "TRANSFER",
+                category: "TRANSFER",
                 direction: "CREDIT",
                 description: senderName ? `Transfer From ${senderName}` : "Transfer From Virtual Account",
                 recipientName: "Self",
+                creditedTo: "Available Balance",
                 fundingMethod: "Virtual Account",
                 senderName: senderName || undefined,
                 senderBankName: senderBankName || undefined,
