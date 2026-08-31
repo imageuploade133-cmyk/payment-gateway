@@ -26,6 +26,7 @@ jest.mock("../services/firestoreIdempotency", () => ({
 describe("Webhook Deposit & Virtual Account Tests", () => {
   let req: any;
   let res: any;
+  let next: any;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -43,13 +44,14 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
           amount: 100,
           currency: "NGN",
           status: "successful",
+          originatorname: "John Sender",
+          originatorbankname: "GTBank",
+          originatoraccountnumber: "0123456789",
+          account_number: "9921473281",
+          bank_name: "Wema Bank",
           customer: {
             email: "test@example.com",
             name: "John Sender",
-          },
-          meta: {
-            sender_account_number: "0123456789",
-            sender_bank_name: "GTBank",
           },
         },
       },
@@ -59,15 +61,13 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),
     };
+
+    next = jest.fn();
   });
 
   it("A. Should classify virtual account deposit as type VIRTUAL_ACCOUNT_DEPOSIT and category DEPOSIT", async () => {
     const mockUserDoc = { exists: true, data: () => ({ balance: 500 }) };
     const mockWalletDoc = { exists: true, data: () => ({ balance: 500 }) };
-    const mockVirtualAccDoc = {
-      exists: true,
-      data: () => ({ accountNumber: "9921473281", bankName: "Wema Bank" }),
-    };
 
     const mockUserRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2" };
     const mockWalletRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2_NGN" };
@@ -77,7 +77,6 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
       if (collName === "users") return { doc: () => mockUserRef };
       if (collName === "wallets") return { doc: () => mockWalletRef };
       if (collName === "transactions") return { doc: () => mockLedgerRef };
-      if (collName === "wallet_accounts") return { doc: () => ({ get: jest.fn().mockResolvedValue(mockVirtualAccDoc) }) };
       return { doc: () => ({}) };
     });
 
@@ -99,7 +98,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
       return await callback(mockTransaction);
     });
 
-    await handleWebhook(req, res);
+    await handleWebhook(req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(setRecord).not.toBeNull();
@@ -118,7 +117,9 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
 
   it("B. Should safely exclude sender fields when metadata is absent without inventing values", async () => {
     delete req.body.data.customer.name;
-    delete req.body.data.meta;
+    delete req.body.data.originatorname;
+    delete req.body.data.originatorbankname;
+    delete req.body.data.originatoraccountnumber;
 
     const mockUserDoc = { exists: true, data: () => ({ balance: 500 }) };
     const mockWalletDoc = { exists: true, data: () => ({ balance: 500 }) };
@@ -131,7 +132,6 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
       if (collName === "users") return { doc: () => mockUserRef };
       if (collName === "wallets") return { doc: () => mockWalletRef };
       if (collName === "transactions") return { doc: () => mockLedgerRef };
-      if (collName === "wallet_accounts") return { doc: () => ({ get: jest.fn().mockResolvedValue({ exists: false }) }) };
       return { doc: () => ({}) };
     });
 
@@ -153,7 +153,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
       return await callback(mockTransaction);
     });
 
-    await handleWebhook(req, res);
+    await handleWebhook(req, res, next);
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(setRecord).not.toBeNull();

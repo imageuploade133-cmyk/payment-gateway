@@ -921,6 +921,11 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                   });
                 }
 
+                // Extract sender details from verify result if present
+                const senderName = (result as any).sender_name || (result as any).senderName || (result as any).customer?.name || undefined;
+                const senderBankName = (result as any).sender_bank || (result as any).senderBankName || undefined;
+                const senderAccountNumber = (result as any).sender_account || (result as any).senderAccountNumber || undefined;
+
                 // Create General Ledger transaction record for history
                 transaction.set(ledgerRef, {
                   userId,
@@ -928,9 +933,15 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                   currency: result.currency || "NGN",
                   reference: txRef || `DEP-${flwId}`,
                   flwId: flwId,
-                  type: "DEPOSIT",
-                  description: "Virtual Account Funding via Bank Transfer (Verified-Backup)",
+                  type: "VIRTUAL_ACCOUNT_DEPOSIT",
+                  category: "DEPOSIT",
+                  direction: "CREDIT",
+                  description: senderName ? `Transfer From ${senderName}` : "Transfer From Virtual Account",
                   recipientName: "Self",
+                  fundingMethod: "Virtual Account",
+                  senderName,
+                  senderBankName,
+                  senderAccountNumber,
                   status: "SUCCESS",
                   date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
                   time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
@@ -993,7 +1004,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
   const timestamp = new Date().toISOString();
   const method = req.method;
   const url = req.originalUrl || req.url;
-  const ip = req.ip || req.headers["x-forwarded-for"] || req.socket.remoteAddress || "UNKNOWN";
+  const ip = req.ip || req.headers["x-forwarded-for"] || (req.socket && req.socket.remoteAddress) || "UNKNOWN";
   const signature = req.headers["verif-hash"] as string || "";
   const rawBodyString = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
 
@@ -1217,7 +1228,16 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         const txRef = payload.data?.tx_ref || "";
         const email = payload.data?.customer?.email || "";
 
-        logger.info(`[Webhook charge.completed] Extracting User ID... txRef=${txRef} | email=${email} | amount=${amount} | reqId=${reqId}`);
+        // Extract real sender details from Flutterwave webhook payload
+        const data = payload.data || {};
+        const senderName = data.originatorname || data.originator_name || data.sender_name || data.customer?.name || data.meta?.senderName || data.meta?.sender_name || undefined;
+        const senderBankName = data.originatorbankname || data.originator_bank || data.sender_bank || data.meta?.senderBankName || data.meta?.sender_bank || undefined;
+        const senderAccountNumber = data.originatoraccountnumber || data.originator_account || data.sender_account || data.meta?.senderAccountNumber || data.meta?.sender_account || undefined;
+
+        const virtualAccountNumber = data.account_number || data.virtual_account_number || undefined;
+        const virtualAccountBankName = data.bank_name || data.virtual_account_bank || undefined;
+
+        logger.info(`[Webhook charge.completed] Extracting User ID... txRef=${txRef} | email=${email} | amount=${amount} | senderName=${senderName || "N/A"} | reqId=${reqId}`);
 
         let userId = "";
 
@@ -1300,22 +1320,39 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 });
               }
 
-              // 3. Create General Ledger transaction record for history
-              transaction.set(ledgerRef, {
+              // Build clean ledger record
+              const ledgerPayload: Record<string, any> = {
                 userId,
                 amount,
                 currency: payload.data?.currency || "NGN",
                 reference: txRef || `DEP-${transactionId}`,
                 flwId: flwId || transactionId,
-                type: "DEPOSIT",
-                description: "Virtual Account Funding via Bank Transfer",
+                providerTransactionId: flwId || transactionId,
+                providerReference: txRef || `DEP-${transactionId}`,
+                type: "VIRTUAL_ACCOUNT_DEPOSIT",
+                category: "DEPOSIT",
+                direction: "CREDIT",
+                description: senderName ? `Transfer From ${senderName}` : "Transfer From Virtual Account",
                 recipientName: "Self",
+                fundingMethod: "Virtual Account",
+                senderName: senderName || undefined,
+                senderBankName: senderBankName || undefined,
+                senderAccountNumber: senderAccountNumber || undefined,
+                virtualAccountNumber: virtualAccountNumber || undefined,
+                virtualAccountBankName: virtualAccountBankName || undefined,
+                provider: "Flutterwave",
                 status: "SUCCESS",
                 date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
                 time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
                 fee: 0,
                 createdAt: new Date().toISOString(),
-              });
+              };
+
+              // Clean undefined values
+              Object.keys(ledgerPayload).forEach(k => ledgerPayload[k] === undefined && delete ledgerPayload[k]);
+
+              // 3. Create General Ledger transaction record for history
+              transaction.set(ledgerRef, ledgerPayload);
             });
 
             logger.info(`[Webhook charge.completed] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
