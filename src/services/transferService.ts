@@ -51,6 +51,9 @@ export interface InitiateTransferParams {
   requestId: string;
   userId?: string;
   fee?: number;
+  vat?: number;
+  markup?: number;
+  bank_name?: string;
 }
 
 export interface TransferResult {
@@ -74,7 +77,7 @@ export class TransferService {
    * Executes a transfer to a bank account using Flutterwave.
    */
   public async executeTransfer(params: InitiateTransferParams): Promise<TransferResult> {
-    const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId, userId } = params;
+    const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId, userId, fee = 0, vat = 0, markup = 0, bank_name } = params;
 
     logger.info(
       `[TransferService] Starting transfer process | reference=${reference} | amount=${amount} | account=${account_number} | reqId=${requestId}`
@@ -93,8 +96,6 @@ export class TransferService {
         message: "Duplicate transfer reference. This transaction has already been initiated.",
       };
     }
-
-
 
     try {
       const client = getFlutterwaveClient();
@@ -136,6 +137,8 @@ export class TransferService {
           await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", dbStatus, flwId);
         }
 
+        const totalDebited = amount + fee + vat;
+
         // Save immediately to Firestore transfers collection
         if (adminDb) {
           try {
@@ -143,25 +146,55 @@ export class TransferService {
               transferReference: reference,
               flutterwaveTransferId: flwId || null,
               providerTransferId: flwId || null,
+              providerReference: flwId || null,
               reference: reference,
               userId: userId || "N/A",
               amount: amount,
-              fee: params.fee || 10.00,
+              currency: currency || "NGN",
+              fee: fee,
+              vat: vat,
+              markup: markup,
+              totalDebited: totalDebited,
               bankCode: bank_code,
+              bankName: bank_name || null,
               accountNumber: account_number,
               recipientName: account_name,
+              beneficiaryName: account_name,
+              beneficiaryAccountNumber: account_number,
+              beneficiaryBankCode: bank_code,
+              beneficiaryBankName: bank_name || null,
+              narration: narration || null,
               recipient: {
                 account_number,
                 bank_code,
                 account_name,
               },
-              status: "PENDING",
+              provider: "Flutterwave",
+              status: dbStatus === "success" ? "SUCCESS" : dbStatus === "failed" ? "FAILED" : "PENDING",
               flutterwaveStatus: flwStatus,
               createdAt: new Date().toISOString(),
-            });
-            logger.info(`[TransferService] Firestore save successful for transfer collection reference: ${reference}`);
+            }, { merge: true });
+
+            // Also update unified transactions ledger if transaction doc exists
+            const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
+            await unifiedTxRef.set({
+              providerReference: flwId || null,
+              providerTransactionId: flwId || null,
+              provider: "Flutterwave",
+              status: dbStatus === "success" ? "SUCCESS" : dbStatus === "failed" ? "FAILED" : "PENDING",
+              beneficiaryName: account_name,
+              beneficiaryAccountNumber: account_number,
+              beneficiaryBankCode: bank_code,
+              beneficiaryBankName: bank_name || null,
+              fee,
+              vat,
+              markup,
+              totalDebited,
+            }, { merge: true });
+
+            logger.info(`[TransferService] Firestore save successful for transfer & unified transactions reference: ${reference}`);
           } catch (fsError: any) {
-            logger.error(`[TransferService] Firestore save failed for transfers collection reference: ${reference} | error=${fsError.message}`);
+            logger.error(`[TransferService] Firestore save failed for reference: ${reference} | error=${fsError.message}`);
           }
         }
 
