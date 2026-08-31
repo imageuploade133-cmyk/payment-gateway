@@ -40,6 +40,13 @@ export interface VerificationResult {
     email: string;
     phone?: string;
   };
+  sender_name?: string;
+  sender_bank?: string;
+  sender_account?: string;
+  account_number?: string;
+  bank_name?: string;
+  created_at?: string;
+  payment_type?: string;
   message?: string;
 }
 
@@ -171,6 +178,10 @@ export class PaymentVerificationService {
           `[PaymentVerificationService] Transaction status checked | flw_id=${transaction_id} | status=${flwStatus} | reqId=${requestId}`
         );
 
+        const sender_name = txData.originatorname || txData.originator_name || txData.sender_name || txData.meta?.senderName || txData.meta?.sender_name || txData.customer?.name || undefined;
+        const sender_bank = txData.originatorbankname || txData.originator_bank_name || txData.originator_bank || txData.sender_bank || txData.meta?.senderBankName || txData.meta?.sender_bank_name || txData.meta?.sender_bank || undefined;
+        const sender_account = txData.originatoraccountnumber || txData.originator_account_number || txData.originator_account || txData.sender_account || txData.meta?.senderAccountNumber || txData.meta?.sender_account_number || txData.meta?.sender_account || undefined;
+
         return {
           success: flwStatus === "successful",
           status: flwStatus === "successful" ? "successful" : flwStatus === "failed" ? "failed" : "pending",
@@ -183,6 +194,13 @@ export class PaymentVerificationService {
             email: txData.customer?.email || "customer@e-tech-hub.com",
             phone: txData.customer?.phone_number || undefined,
           },
+          sender_name,
+          sender_bank,
+          sender_account,
+          account_number: txData.account_number || txData.virtual_account_number || undefined,
+          bank_name: txData.bank_name || txData.virtual_account_bank || undefined,
+          created_at: txData.created_at || undefined,
+          payment_type: txData.payment_type || undefined,
         };
       }
 
@@ -259,6 +277,10 @@ export class PaymentVerificationService {
           `[PaymentVerificationService] Transaction reference checked | tx_ref=${tx_ref} | status=${flwStatus} | reqId=${requestId}`
         );
 
+        const sender_name = txData.originatorname || txData.originator_name || txData.sender_name || txData.meta?.senderName || txData.meta?.sender_name || txData.customer?.name || undefined;
+        const sender_bank = txData.originatorbankname || txData.originator_bank_name || txData.originator_bank || txData.sender_bank || txData.meta?.senderBankName || txData.meta?.sender_bank_name || txData.meta?.sender_bank || undefined;
+        const sender_account = txData.originatoraccountnumber || txData.originator_account_number || txData.originator_account || txData.sender_account || txData.meta?.senderAccountNumber || txData.meta?.sender_account_number || txData.meta?.sender_account || undefined;
+
         return {
           success: flwStatus === "successful",
           status: flwStatus === "successful" ? "successful" : flwStatus === "failed" ? "failed" : "pending",
@@ -271,6 +293,13 @@ export class PaymentVerificationService {
             email: txData.customer?.email || "customer@e-tech-hub.com",
             phone: txData.customer?.phone_number || undefined,
           },
+          sender_name,
+          sender_bank,
+          sender_account,
+          account_number: txData.account_number || txData.virtual_account_number || undefined,
+          bank_name: txData.bank_name || txData.virtual_account_bank || undefined,
+          created_at: txData.created_at || undefined,
+          payment_type: txData.payment_type || undefined,
         };
       }
 

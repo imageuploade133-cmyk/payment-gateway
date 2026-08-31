@@ -187,11 +187,13 @@ export class TransferService {
             await unifiedTxRef.set({
               providerReference: flwId || null,
               providerTransactionId: flwId || null,
+              transactionNumber: reference,
               provider: "Flutterwave",
               status: dbStatus === "success" ? "SUCCESS" : dbStatus === "failed" ? "FAILED" : "PENDING",
               type: "TRANSFER",
-              category: "TRANSFER",
-              direction: "DEBIT",
+              category: "transfer",
+              direction: "outgoing",
+              title: "Transfer To",
               description: `Transfer to ${account_name}`,
               recipientName: account_name,
               recipientBankName: bank_name || null,
@@ -205,6 +207,7 @@ export class TransferService {
               vat,
               markup,
               totalDebited,
+              transactionDate: new Date().toISOString(),
             }, { merge: true });
 
             logger.info(`[TransferService] Firestore save successful for transfer & unified transactions reference: ${reference}`);

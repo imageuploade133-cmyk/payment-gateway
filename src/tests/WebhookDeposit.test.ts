@@ -44,6 +44,8 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
           amount: 100,
           currency: "NGN",
           status: "successful",
+          payment_type: "bank_transfer",
+          created_at: "2026-08-31T12:00:00.000Z",
           originatorname: "John Sender",
           originatorbankname: "GTBank",
           originatoraccountnumber: "0123456789",
@@ -65,7 +67,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     next = jest.fn();
   });
 
-  it("A. Should classify virtual account deposit as type TRANSFER, category TRANSFER, and direction CREDIT", async () => {
+  it("A. Should classify virtual account deposit as type VIRTUAL_ACCOUNT_DEPOSIT, category deposit, direction incoming, and title Transfer From", async () => {
     const mockUserDoc = { exists: true, data: () => ({ balance: 500 }) };
     const mockWalletDoc = { exists: true, data: () => ({ balance: 500 }) };
 
@@ -102,9 +104,10 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(setRecord).not.toBeNull();
-    expect(setRecord.type).toBe("TRANSFER");
-    expect(setRecord.category).toBe("TRANSFER");
-    expect(setRecord.direction).toBe("CREDIT");
+    expect(setRecord.type).toBe("VIRTUAL_ACCOUNT_DEPOSIT");
+    expect(setRecord.category).toBe("deposit");
+    expect(setRecord.direction).toBe("incoming");
+    expect(setRecord.title).toBe("Transfer From");
     expect(setRecord.creditedTo).toBe("Available Balance");
     expect(setRecord.fundingMethod).toBe("Virtual Account");
     expect(setRecord.provider).toBe("Flutterwave");
@@ -114,9 +117,11 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     expect(setRecord.senderBankName).toBe("GTBank");
     expect(setRecord.virtualAccountNumber).toBe("9921473281");
     expect(setRecord.virtualAccountBankName).toBe("Wema Bank");
+    expect(setRecord.transactionNumber).toBe("user-wallet-C1vJGqceoGO57mVFYNM40URxCUL2");
+    expect(setRecord.transactionDate).toBe("2026-08-31T12:00:00.000Z");
   });
 
-  it("B. Should safely exclude sender fields when metadata is absent without inventing values", async () => {
+  it("B. Should safely set null for missing sender fields when metadata is absent without inventing fake values", async () => {
     delete req.body.data.customer.name;
     delete req.body.data.originatorname;
     delete req.body.data.originatorbankname;
@@ -158,18 +163,19 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(setRecord).not.toBeNull();
-    expect(setRecord.senderName).toBeUndefined();
-    expect(setRecord.senderAccountNumber).toBeUndefined();
+    expect(setRecord.senderName).toBeNull();
+    expect(setRecord.senderAccountNumber).toBeNull();
     expect(setRecord.beneficiaryName).toBeUndefined();
-    expect(setRecord.type).toBe("TRANSFER");
-    expect(setRecord.category).toBe("TRANSFER");
+    expect(setRecord.type).toBe("VIRTUAL_ACCOUNT_DEPOSIT");
+    expect(setRecord.category).toBe("deposit");
   });
 
-  it("G. Regression Test: Proves Incoming Transfer != Outward Bank Transfer", () => {
+  it("G. Regression Test: Proves Virtual Account Deposit != Outward Bank Transfer", () => {
     const depositRecord = {
-      type: "TRANSFER",
-      category: "TRANSFER",
-      direction: "CREDIT",
+      type: "VIRTUAL_ACCOUNT_DEPOSIT",
+      category: "deposit",
+      direction: "incoming",
+      title: "Transfer From",
       fundingMethod: "Virtual Account",
       creditedTo: "Available Balance",
       provider: "Flutterwave",
@@ -178,16 +184,19 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
 
     const transferRecord = {
       type: "TRANSFER",
-      category: "TRANSFER",
-      direction: "DEBIT",
-      beneficiaryName: "Jane Recipient",
-      beneficiaryBankName: "Access Bank",
-      beneficiaryAccountNumber: "0011223344",
+      category: "transfer",
+      direction: "outgoing",
+      title: "Transfer To",
+      recipientName: "Jane Recipient",
+      recipientBankName: "Access Bank",
+      recipientAccountNumber: "0011223344",
       amount: 5000,
-      fee: 10,
+      transferFee: 10,
+      totalDebited: 5010,
     };
 
+    expect(depositRecord.category).not.toBe(transferRecord.category);
     expect(depositRecord.direction).not.toBe(transferRecord.direction);
-    expect(depositRecord.creditedTo).toBe("Available Balance");
+    expect(depositRecord.title).not.toBe(transferRecord.title);
   });
 });
