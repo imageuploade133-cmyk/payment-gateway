@@ -1083,13 +1083,42 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     logger.info(`[Webhook] Querying Firestore for duplicate webhook check | transactionId=${transactionId}`);
     const isDuplicate = await idempotency.isWebhookDuplicate(transactionId);
     if (isDuplicate) {
-      logger.warn(`[Flutterwave Controller] Duplicate detection flagged: Webhook already processed | transactionId=${transactionId} | reqId=${reqId}`);
-      logger.info("[Webhook] Exiting: duplicate webhook ignored (200 Duplicate)");
-      res.status(200).json({
-        success: true,
-        message: "Webhook already processed successfully.",
-      });
-      return;
+      if (eventType === "transfer.completed") {
+        const reference = payload.data?.reference || payload.data?.tx_ref;
+        if (reference && adminDb) {
+          try {
+            const transferDoc = await adminDb.collection("transfers").doc(reference).get();
+            const unifiedTxDoc = await adminDb.collection("transactions").doc(`tx-${reference}`).get();
+
+            const transferStatus = transferDoc.exists ? (transferDoc.data()?.status || "PENDING") : "PENDING";
+            const unifiedStatus = unifiedTxDoc.exists ? (unifiedTxDoc.data()?.status || "PENDING") : "PENDING";
+
+            const isTransferTerminal = transferStatus === "SUCCESS" || transferStatus === "FAILED" || transferStatus === "REVERSED";
+            const isUnifiedTerminal = unifiedStatus === "SUCCESS" || unifiedStatus === "FAILED" || unifiedStatus === "REVERSED";
+
+            if (!isTransferTerminal || !isUnifiedTerminal || !unifiedTxDoc.exists) {
+              logger.info(`[Webhook Duplicate Override] Webhook ${transactionId} was marked duplicate, but records need reconciliation (transfer: ${transferStatus}, unified: ${unifiedStatus}). Proceeding to reconcile.`);
+            } else {
+              logger.warn(`[Flutterwave Controller] Duplicate detection flagged & both records terminal | transactionId=${transactionId} | reqId=${reqId}`);
+              res.status(200).json({
+                success: true,
+                message: "Webhook already processed successfully.",
+              });
+              return;
+            }
+          } catch (err: any) {
+            logger.error(`[Webhook Duplicate Check Error] Failed to check status on duplicate webhook: ${err.message}`);
+          }
+        }
+      } else {
+        logger.warn(`[Flutterwave Controller] Duplicate detection flagged: Webhook already processed | transactionId=${transactionId} | reqId=${reqId}`);
+        logger.info("[Webhook] Exiting: duplicate webhook ignored (200 Duplicate)");
+        res.status(200).json({
+          success: true,
+          message: "Webhook already processed successfully.",
+        });
+        return;
+      }
     }
 
     // Mark as processed in Firestore and memory immediately to prevent race conditions
