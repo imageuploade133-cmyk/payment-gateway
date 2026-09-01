@@ -25,12 +25,25 @@ function validateEnv() {
         throw new Error(errorMsg);
     }
     // Load API Keys for rotation
-    const rawApiKeys = process.env.GATEWAY_API_KEY || process.env.GATEWAY_API_KEYS || "default_gateway_secure_key_12345";
-    const GATEWAY_API_KEYS = rawApiKeys.split(",").map(k => k.trim()).filter(Boolean);
-    if (!GATEWAY_API_KEYS.includes("default_gateway_secure_key_12345")) {
-        GATEWAY_API_KEYS.push("default_gateway_secure_key_12345");
+    const rawApiKeys = process.env.GATEWAY_API_KEY || process.env.GATEWAY_API_KEYS;
+    if (NODE_ENV === "production" && !rawApiKeys) {
+        const errorMsg = "Configuration Error: Missing required GATEWAY_API_KEY in production mode.";
+        logger_1.default.error(errorMsg);
+        throw new Error(errorMsg);
     }
-    const JWT_SECRET = process.env.JWT_SECRET || "default_secure_jwt_secret_998877";
+    const GATEWAY_API_KEYS = (rawApiKeys || "default_gateway_secure_key_12345")
+        .split(",")
+        .map(k => k.trim())
+        .filter(Boolean);
+    let JWT_SECRET = process.env.JWT_SECRET;
+    if (NODE_ENV === "production" && !JWT_SECRET) {
+        const errorMsg = "Configuration Error: Missing required JWT_SECRET in production mode.";
+        logger_1.default.error(errorMsg);
+        throw new Error(errorMsg);
+    }
+    if (!JWT_SECRET) {
+        JWT_SECRET = "default_secure_jwt_secret_998877";
+    }
     // Load CORS Allowed Origins
     const rawAllowedOrigins = process.env.CORS_ALLOWED_ORIGINS || "";
     const CORS_ALLOWED_ORIGINS = rawAllowedOrigins

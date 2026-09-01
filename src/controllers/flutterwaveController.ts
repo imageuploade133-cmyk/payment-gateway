@@ -1208,6 +1208,8 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 providerStatus: flwStatus || null,
                 providerReference: payload.data?.reference || null,
                 providerTransactionId: flwId || null,
+                recipientBankName: transferData.recipientBankName || transferData.bankName || undefined,
+                beneficiaryBankName: transferData.beneficiaryBankName || transferData.bankName || undefined,
                 webhookReceivedAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString()
               };
