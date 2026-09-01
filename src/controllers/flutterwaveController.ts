@@ -1030,7 +1030,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     const client = getFlutterwaveClient();
 
     // 1. Signature validation
-    logger.info(`[Webhook] Performing signature verification... | signature=${signature} | reqId=${reqId}`);
+    logger.info(`[Webhook] Performing signature verification... | signature header present=${!!signature} | reqId=${reqId}`);
     const verified = client.verifyWebhookSignature(signature, rawBodyString);
     logger.info(`[Webhook] Signature Verification result: ${verified} | reqId=${reqId}`);
 
