@@ -294,7 +294,7 @@ describe("Webhook Transfer Synchronization & Reconciliation Tests", () => {
     expect(unifiedUpdate?.data.status).toBe("FAILED");
 
     expect(refundRecord).toBeDefined();
-    expect(refundRecord?.data.amount).toBe(10100); // 10000 + 100 fee
+    expect(refundRecord?.data.totalCredited).toBe(10100);
   });
 
   it("should update BOTH records to REVERSED and execute refund when REVERSED webhook is received", async () => {
@@ -380,7 +380,7 @@ describe("Webhook Transfer Synchronization & Reconciliation Tests", () => {
     expect(unifiedUpdate?.data.status).toBe("REVERSED");
 
     expect(refundRecord).toBeDefined();
-    expect(refundRecord?.data.amount).toBe(2050); // 2000 + 50 fee
+    expect(refundRecord?.data.totalCredited).toBe(2050);
   });
 
   it("should create missing transactions/tx-{reference} with full transfer metadata when missing", async () => {
@@ -455,6 +455,147 @@ describe("Webhook Transfer Synchronization & Reconciliation Tests", () => {
     expect(createdUnifiedTx?.data.beneficiaryBankName).toBe("First Bank");
     expect(createdUnifiedTx?.data.totalDebited).toBe(15265);
     expect(createdUnifiedTx?.data.transactionNumber).toBe(reference);
+  });
+
+
+  it("should refund totalDebited including markup when totalDebited exists (e.g. 5000 + 10 fee + 6 markup = 5016)", async () => {
+    const reference = "trf-[#5016]-markup";
+    req.body.data.reference = reference;
+    req.body.data.status = "FAILED";
+
+    const transferDocData = {
+      reference,
+      userId: "user-5016",
+      amount: 5000,
+      fee: 10,
+      markup: 6,
+      vat: 0,
+      totalDebited: 5016,
+      recipientName: "Test User",
+      status: "PENDING",
+      refunded: false,
+    };
+
+    const unifiedTxData = {
+      transactionNumber: reference,
+      userId: "user-5016",
+      amount: 5000,
+      totalDebited: 5016,
+      status: "PENDING",
+      type: "TRANSFER",
+    };
+
+    const userDocData = { userId: "user-5016", balance: 1000 };
+
+    const mockTransferDoc = { exists: true, data: () => transferDocData };
+    const mockUnifiedDoc = { exists: true, data: () => unifiedTxData };
+    const mockUserDoc = { exists: true, data: () => userDocData };
+
+    const mockTransferRef = { id: reference };
+    const mockUnifiedRef = { id: `tx-${reference}` };
+    const mockUserRef = { id: "user-5016" };
+    const mockRefundRef = { id: `tx-REFUND-${reference}` };
+
+    (adminDb!.collection as jest.Mock).mockImplementation((colName: string) => {
+      if (colName === "transfers") return { doc: jest.fn().mockReturnValue(mockTransferRef) };
+      if (colName === "transactions") return { doc: jest.fn().mockImplementation((docId: string) => {
+        if (docId === `tx-${reference}`) return mockUnifiedRef;
+        if (docId === `tx-REFUND-${reference}`) return mockRefundRef;
+        return { id: docId };
+      })};
+      if (colName === "users") return { doc: jest.fn().mockReturnValue(mockUserRef) };
+      return { doc: jest.fn().mockReturnValue({ id: "mock-doc" }) };
+    });
+
+    const transactionSets: Array<{ ref: any; data: any }> = [];
+
+    (adminDb!.runTransaction as jest.Mock).mockImplementation(async (cb: any) => {
+      const mockTx = {
+        get: jest.fn().mockImplementation((ref: any) => {
+          if (ref === mockTransferRef) return Promise.resolve(mockTransferDoc);
+          if (ref === mockUnifiedRef) return Promise.resolve(mockUnifiedDoc);
+          if (ref === mockUserRef) return Promise.resolve(mockUserDoc);
+          return Promise.resolve({ exists: false, data: () => ({}) });
+        }),
+        update: jest.fn(),
+        set: jest.fn().mockImplementation((ref: any, data: any) => {
+          transactionSets.push({ ref, data });
+        }),
+      };
+      return await cb(mockTx);
+    });
+
+    await handleWebhook(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const refundRecord = transactionSets.find((s) => s.ref === mockRefundRef);
+    expect(refundRecord).toBeDefined();
+    expect(refundRecord?.data.totalCredited).toBe(5016);
+    expect(refundRecord?.data.markup).toBe(6);
+  });
+
+  it("should ensure duplicate webhook does not trigger a second refund when already refunded", async () => {
+    const reference = "trf-duplicate-refund-check";
+    req.body.data.reference = reference;
+    req.body.data.status = "FAILED";
+
+    const transferDocData = {
+      reference,
+      userId: "user-dup-check",
+      amount: 5000,
+      fee: 10,
+      markup: 6,
+      totalDebited: 5016,
+      recipientName: "Test User",
+      status: "FAILED",
+      refunded: true,
+    };
+
+    const unifiedTxData = {
+      transactionNumber: reference,
+      userId: "user-dup-check",
+      amount: 5000,
+      status: "FAILED",
+      type: "TRANSFER",
+    };
+
+    const mockTransferDoc = { exists: true, data: () => transferDocData };
+    const mockUnifiedDoc = { exists: true, data: () => unifiedTxData };
+
+    const mockTransferRef = { id: reference };
+    const mockUnifiedRef = { id: `tx-${reference}` };
+
+    (adminDb!.collection as jest.Mock).mockImplementation((colName: string) => {
+      if (colName === "transfers") return { doc: jest.fn().mockReturnValue(mockTransferRef) };
+      if (colName === "transactions") return { doc: jest.fn().mockReturnValue(mockUnifiedRef) };
+      return { doc: jest.fn().mockReturnValue({ id: "mock-doc" }) };
+    });
+
+    const transactionUpdates: Array<{ ref: any; data: any }> = [];
+    const transactionSets: Array<{ ref: any; data: any }> = [];
+
+    (adminDb!.runTransaction as jest.Mock).mockImplementation(async (cb: any) => {
+      const mockTx = {
+        get: jest.fn().mockImplementation((ref: any) => {
+          if (ref === mockTransferRef) return Promise.resolve(mockTransferDoc);
+          if (ref === mockUnifiedRef) return Promise.resolve(mockUnifiedDoc);
+          return Promise.resolve({ exists: false, data: () => ({}) });
+        }),
+        update: jest.fn().mockImplementation((ref: any, data: any) => {
+          transactionUpdates.push({ ref, data });
+        }),
+        set: jest.fn().mockImplementation((ref: any, data: any) => {
+          transactionSets.push({ ref, data });
+        }),
+      };
+      return await cb(mockTx);
+    });
+
+    await handleWebhook(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    // Verified terminal state check skips transaction and writes no refund set records
+    expect(transactionSets.length).toBe(0);
   });
 
   it("should verify frontend history model mapping returns Successful for status SUCCESS", () => {
