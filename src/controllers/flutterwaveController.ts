@@ -141,6 +141,25 @@ const initializePaymentSchema = z.object({
   phone: z.string().optional(),
 });
 
+const createCardSchema = z.object({
+  currency: z.enum(["USD", "NGN"]),
+  amount: z.number().nonnegative("Amount must be zero or positive"),
+  billing_name: z.string().min(2, "Billing name is required"),
+  billing_address: z.string().min(2, "Billing address is required"),
+  billing_city: z.string().min(2, "Billing city is required"),
+  billing_state: z.string().min(2, "Billing state is required"),
+  billing_postal_code: z.string().min(2, "Billing postal code is required"),
+  billing_country: z.string().min(2, "Billing country is required"),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+  email: z.string().email().optional(),
+  phone: z.string().optional(),
+  date_of_birth: z.string().optional(),
+  title: z.string().optional(),
+  gender: z.string().optional(),
+  callback_url: z.string().optional(),
+});
+
 const transferService = new TransferService();
 
 export const resolveAccount = async (req: Request, res: Response, next: NextFunction) => {
@@ -1883,6 +1902,251 @@ export const getTransferStatus = async (req: Request, res: Response, next: NextF
   }
 };
 
+
+export const createVirtualCard = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  logger.info(`[Flutterwave Controller] Received createVirtualCard request | reqId=${reqId}`, req.body);
+
+  try {
+    const validationResult = createCardSchema.safeParse(req.body);
+    if (!validationResult.success) {
+      const errorMsg = validationResult.error.issues.map((e: z.ZodIssue) => `${e.path.join(".")}: ${e.message}`).join(", ");
+      logger.warn(`[Flutterwave Controller] Virtual Card validation failed | errors=${errorMsg} | reqId=${reqId}`);
+      res.status(400).json({
+        status: "error",
+        code: "VALIDATION_ERROR",
+        message: `Validation Error: ${errorMsg}`,
+      });
+      return;
+    }
+
+    const payload = validationResult.data;
+    const client = getFlutterwaveClient();
+
+    logger.info(`[Flutterwave Controller] Sending request to Flutterwave POST /virtual-cards | reqId=${reqId}`);
+    const response = await client.request("post", "/virtual-cards", payload);
+
+    logger.info(`[Flutterwave Controller] Flutterwave virtual-cards response | reqId=${reqId}:`, response);
+
+    if (response && response.status === "success" && response.data) {
+      res.status(200).json({
+        status: "success",
+        message: response.message || "Virtual Card created successfully.",
+        data: response.data,
+      });
+    } else {
+      const msg = response?.message || "Virtual card creation rejected by provider.";
+      let errorCode = "CARD_CREATION_FAILED";
+
+      if (msg.toLowerCase().includes("disabled") || msg.toLowerCase().includes("not available")) {
+        errorCode = "VIRTUAL_CARDS_NOT_ENABLED";
+      }
+
+      res.status(400).json({
+        status: "error",
+        code: errorCode,
+        message: msg,
+        providerResponse: response,
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] createVirtualCard exception | error=${error.message || error} | reqId=${reqId}`);
+
+    const errorMsg = error.message || "An internal error occurred while creating virtual card.";
+    let errorCode = "PROVIDER_ERROR";
+
+    if (errorMsg.toLowerCase().includes("disabled") || errorMsg.toLowerCase().includes("not available")) {
+      errorCode = "VIRTUAL_CARDS_NOT_ENABLED";
+    }
+
+    res.status(400).json({
+      status: "error",
+      code: errorCode,
+      message: errorMsg,
+    });
+  }
+};
+
+export const getVirtualCard = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { id } = req.params;
+  logger.info(`[Flutterwave Controller] Received getVirtualCard request | id=${id} | reqId=${reqId}`);
+
+  try {
+    const client = getFlutterwaveClient();
+    const response = await client.request("get", `/virtual-cards/${id}`);
+
+    if (response && response.status === "success" && response.data) {
+      res.status(200).json(response);
+    } else {
+      res.status(400).json({
+        status: "error",
+        message: response?.message || "Virtual card details not found.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getVirtualCard exception | error=${error.message} | reqId=${reqId}`);
+    res.status(400).json({
+      status: "error",
+      message: error.message || "Failed to retrieve virtual card details.",
+    });
+  }
+};
+
+export const fundVirtualCard = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { id } = req.params;
+  const { amount, debit_currency } = req.body;
+  logger.info(`[Flutterwave Controller] Received fundVirtualCard request | id=${id} | amount=${amount} | reqId=${reqId}`);
+
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    res.status(400).json({
+      status: "error",
+      message: "Valid positive numeric amount is required.",
+    });
+    return;
+  }
+
+  try {
+    const client = getFlutterwaveClient();
+    const response = await client.request("post", `/virtual-cards/${id}/fund`, {
+      amount: Number(amount),
+      debit_currency: debit_currency || "NGN",
+    });
+
+    if (response && response.status === "success") {
+      res.status(200).json(response);
+    } else {
+      res.status(400).json({
+        status: "error",
+        message: response?.message || "Card funding rejected by provider.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] fundVirtualCard exception | error=${error.message} | reqId=${reqId}`);
+    res.status(400).json({
+      status: "error",
+      message: error.message || "Failed to fund virtual card.",
+    });
+  }
+};
+
+export const withdrawVirtualCard = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { id } = req.params;
+  const { amount } = req.body;
+  logger.info(`[Flutterwave Controller] Received withdrawVirtualCard request | id=${id} | amount=${amount} | reqId=${reqId}`);
+
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    res.status(400).json({
+      status: "error",
+      message: "Valid positive numeric amount is required.",
+    });
+    return;
+  }
+
+  try {
+    const client = getFlutterwaveClient();
+    const response = await client.request("post", `/virtual-cards/${id}/withdraw`, {
+      amount: Number(amount),
+    });
+
+    if (response && response.status === "success") {
+      res.status(200).json(response);
+    } else {
+      res.status(400).json({
+        status: "error",
+        message: response?.message || "Card withdrawal rejected by provider.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] withdrawVirtualCard exception | error=${error.message} | reqId=${reqId}`);
+    res.status(400).json({
+      status: "error",
+      message: error.message || "Failed to withdraw from virtual card.",
+    });
+  }
+};
+
+export const updateCardStatus = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { id } = req.params;
+  const action = req.body.status_action || req.body.action || "block";
+  logger.info(`[Flutterwave Controller] Received updateCardStatus request | id=${id} | action=${action} | reqId=${reqId}`);
+
+  try {
+    const client = getFlutterwaveClient();
+    const targetAction = action === "unblock" ? "unblock" : "block";
+    const response = await client.request("put", `/virtual-cards/${id}/status/${targetAction}`);
+
+    if (response && response.status === "success") {
+      res.status(200).json(response);
+    } else {
+      res.status(400).json({
+        status: "error",
+        message: response?.message || "Failed to update card status.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] updateCardStatus exception | error=${error.message} | reqId=${reqId}`);
+    res.status(400).json({
+      status: "error",
+      message: error.message || "Failed to update virtual card status.",
+    });
+  }
+};
+
+export const terminateVirtualCard = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { id } = req.params;
+  logger.info(`[Flutterwave Controller] Received terminateVirtualCard request | id=${id} | reqId=${reqId}`);
+
+  try {
+    const client = getFlutterwaveClient();
+    const response = await client.request("put", `/virtual-cards/${id}/terminate`);
+
+    if (response && response.status === "success") {
+      res.status(200).json(response);
+    } else {
+      res.status(400).json({
+        status: "error",
+        message: response?.message || "Failed to terminate card.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] terminateVirtualCard exception | error=${error.message} | reqId=${reqId}`);
+    res.status(400).json({
+      status: "error",
+      message: error.message || "Failed to terminate virtual card.",
+    });
+  }
+};
+
+export const getCardTransactions = async (req: Request, res: Response, next: NextFunction) => {
+  const reqId = req.requestId;
+  const { id } = req.params;
+  logger.info(`[Flutterwave Controller] Received getCardTransactions request | id=${id} | reqId=${reqId}`);
+
+  try {
+    const client = getFlutterwaveClient();
+    const response = await client.request("get", `/virtual-cards/${id}/transactions`);
+
+    if (response && response.status === "success") {
+      res.status(200).json(response);
+    } else {
+      res.status(400).json({
+        status: "error",
+        message: response?.message || "Failed to fetch card transactions.",
+      });
+    }
+  } catch (error: any) {
+    logger.error(`[Flutterwave Controller] getCardTransactions exception | error=${error.message} | reqId=${reqId}`);
+    res.status(400).json({
+      status: "error",
+      message: error.message || "Failed to fetch card transactions.",
+    });
+  }
+};
 
 export const reconcileTransfer = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;

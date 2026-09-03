@@ -25,6 +25,15 @@ router.get("/transfer/status/:reference", gatewayAuthMiddleware, flwController.g
 router.post("/reconcile/:reference", gatewayAuthMiddleware, flwController.reconcileTransfer);
 router.post("/verify", gatewayAuthMiddleware, flwController.verifyPayment);
 
+// Protected Virtual Cards S2S Endpoints
+router.post("/cards", gatewayAuthMiddleware, flwController.createVirtualCard);
+router.get("/cards/:id", gatewayAuthMiddleware, flwController.getVirtualCard);
+router.post("/cards/:id/fund", gatewayAuthMiddleware, flwController.fundVirtualCard);
+router.post("/cards/:id/withdraw", gatewayAuthMiddleware, flwController.withdrawVirtualCard);
+router.put("/cards/:id/status", gatewayAuthMiddleware, flwController.updateCardStatus);
+router.put("/cards/:id/terminate", gatewayAuthMiddleware, flwController.terminateVirtualCard);
+router.get("/cards/:id/transactions", gatewayAuthMiddleware, flwController.getCardTransactions);
+
 // Public Webhook endpoint (secured via provider cryptographic signature hash validation)
 router.post("/webhook", flwController.handleWebhook);
 
