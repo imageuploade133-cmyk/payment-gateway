@@ -145,8 +145,12 @@ export class ReconciliationService {
 
           const userId = freshData.userId;
           const amount = Number(freshData.amount) || 0;
-          const fee = Number(freshData.fee) || 0;
-          const totalRefund = amount + fee;
+          const providerFee = Number(freshData.providerFee ?? freshData.fee) || 0;
+          const platformMarkup = Number(freshData.markup) || 0;
+          const vat = Number(freshData.vat) || 0;
+          const totalRefund = (freshData.totalDebited !== undefined && freshData.totalDebited !== null && Number(freshData.totalDebited) > 0)
+            ? Number(freshData.totalDebited)
+            : (amount + providerFee + platformMarkup + vat);
 
           const updatePayload: Record<string, any> = {
             status: mappedStatus,
@@ -172,29 +176,54 @@ export class ReconciliationService {
             logger.info(`[Refund] Current wallet balance: ₦${currentBalance}`);
             logger.info(`[Refund] Refund amount: ₦${totalRefund}`);
 
-            const updatedBalance = currentBalance + totalRefund;
+            const walletRef = adminDb!.collection("wallets").doc(`${userId}_NGN`);
+            const walletDoc = await transaction.get(walletRef);
 
-            // Increment wallet balance
+            // Increment both user profile balance and NGN wallet balance atomically
             transaction.update(userRef, {
-              balance: updatedBalance
+              balance: FieldValue.increment(totalRefund)
             });
-            logger.info(`[Refund] Updated wallet balance: ₦${updatedBalance}`);
-            logger.info(`[Refund] Wallet document updated successfully`);
+
+            if (walletDoc.exists) {
+              transaction.update(walletRef, {
+                balance: FieldValue.increment(totalRefund),
+                updatedAt: new Date().toISOString()
+              });
+            } else {
+              transaction.set(walletRef, {
+                userId,
+                currency: "NGN",
+                balance: totalRefund,
+                updatedAt: new Date().toISOString()
+              }, { merge: true });
+            }
+
+            logger.info(`[Refund] Atomically incremented user & wallet balances by: ₦${totalRefund}`);
 
             // Write refund ledger transaction record
             const ledgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
             transaction.set(ledgerRef, {
               userId,
-              amount: totalRefund,
+              amount,
+              providerFee,
+              markup: platformMarkup,
+              vat,
+              fee: providerFee + platformMarkup,
+              totalCredited: totalRefund,
               currency: "NGN",
               reference: `REFUND-${reference}`,
-              type: "DEPOSIT",
-              description: `Reconciliation Refund for failed transfer: ${freshData.description || `Transfer to ${freshData.recipientName}`}`,
+              originalTransferReference: reference,
+              originalTransactionReference: `tx-${reference}`,
+              providerReference: freshData.providerReference || freshData.providerTransferId || freshData.flutterwaveTransferId || null,
+              type: "REFUND",
+              category: "REFUND",
+              direction: "CREDIT",
+              description: `Reconciliation Refund for failed transfer: ${freshData.description || `Transfer to ${freshData.recipientName || "Recipient"}`}`,
+              reason: failureReason || freshData.failureReason || "Transfer failed or reversed on payment rails",
               recipientName: freshData.recipientName || "Self",
               status: "SUCCESS",
               date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
               time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-              fee: 0,
               createdAt: new Date().toISOString(),
             });
             logger.info(`[Refund] Transaction history created`);
@@ -209,6 +238,17 @@ export class ReconciliationService {
           }
 
           transaction.update(transferRef, updatePayload);
+          const unifiedTxRef = adminDb!.collection("transactions").doc(`tx-${reference}`);
+          const unifiedTxDoc = await transaction.get(unifiedTxRef);
+          if (unifiedTxDoc.exists) {
+            transaction.update(unifiedTxRef, {
+              status: mappedStatus,
+              providerStatus: flwStatus || null,
+              providerReference: freshData.providerReference || null,
+              failureReason: failureReason || null,
+              updatedAt: new Date().toISOString()
+            });
+          }
         });
 
         if (refundTransactionCommitted) {

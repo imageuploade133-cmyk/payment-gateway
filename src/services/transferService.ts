@@ -137,7 +137,7 @@ export class TransferService {
           await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", dbStatus, flwId);
         }
 
-        const totalDebited = amount + fee + vat;
+        const totalDebited = amount + fee + markup + vat;
 
         // Save immediately to Firestore transfers collection
         if (adminDb) {

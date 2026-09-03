@@ -1190,8 +1190,13 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
               const userId = transferData.userId || unifiedData.userId;
               const amount = Number(transferData.amount ?? unifiedData.amount ?? 0);
-              const fee = Number(transferData.fee ?? unifiedData.fee ?? transferData.transferFee ?? unifiedData.transferFee ?? 0);
-              const totalRefund = amount + fee;
+              const providerFee = Number(transferData.providerFee ?? transferData.fee ?? unifiedData.fee ?? 0);
+              const platformMarkup = Number(transferData.markup ?? unifiedData.markup ?? 0);
+              const vat = Number(transferData.vat ?? unifiedData.vat ?? 0);
+              const storedTotalDebited = transferData.totalDebited ?? unifiedData.totalDebited;
+              const totalRefund = (storedTotalDebited !== undefined && storedTotalDebited !== null && Number(storedTotalDebited) > 0)
+                ? Number(storedTotalDebited)
+                : (amount + providerFee + platformMarkup + vat);
 
               const updatePayload: Record<string, any> = {
                 status: mappedStatus,
@@ -1227,26 +1232,53 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
                   if (userDoc.exists) {
                     logger.info(`[Webhook Transaction] Refunding wallet by totalRefund: ${totalRefund}`);
-                    // Increment user wallet balance
+                    const walletRef = adminDb!.collection("wallets").doc(`${userId}_NGN`);
+                    const walletDoc = await transaction.get(walletRef);
+
+                    // Increment both user profile balance and NGN wallet balance atomically
                     transaction.update(userRef, {
                       balance: FieldValue.increment(totalRefund)
                     });
+
+                    if (walletDoc.exists) {
+                      transaction.update(walletRef, {
+                        balance: FieldValue.increment(totalRefund),
+                        updatedAt: new Date().toISOString()
+                      });
+                    } else {
+                      transaction.set(walletRef, {
+                        userId,
+                        currency: "NGN",
+                        balance: totalRefund,
+                        updatedAt: new Date().toISOString()
+                      }, { merge: true });
+                    }
 
                     // Write refund ledger transaction record
                     const ledgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
                     logger.info(`[Webhook Transaction] Writing refund ledger record to Firestore... | tx-REFUND-${reference}`);
                     transaction.set(ledgerRef, {
                       userId,
-                      amount: totalRefund,
+                      amount,
+                      providerFee,
+                      markup: platformMarkup,
+                      vat,
+                      fee: providerFee + platformMarkup,
+                      totalCredited: totalRefund,
                       currency: "NGN",
                       reference: `REFUND-${reference}`,
-                      type: "DEPOSIT",
+                      originalTransferReference: reference,
+                      originalTransactionReference: `tx-${reference}`,
+                      providerReference: payload.data?.reference || flwId || null,
+                      type: "REFUND",
+                      category: "REFUND",
+                      direction: "CREDIT",
                       description: `Refund for failed transfer: ${transferData.description || unifiedData.description || `Transfer to ${transferData.recipientName || unifiedData.recipientName || "Recipient"}`}`,
+                      reason: payload.data?.complete_message || payload.data?.reason || "Transfer failed or reversed on payment rails",
                       recipientName: transferData.recipientName || unifiedData.recipientName || "Self",
                       status: "SUCCESS",
                       date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
                       time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-                      fee: 0,
                       createdAt: new Date().toISOString(),
                     });
 
@@ -1298,7 +1330,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                   transferFee: transferData.transferFee || transferData.fee || 0,
                   vat: transferData.vat || 0,
                   markup: transferData.markup || 0,
-                  totalDebited: transferData.totalDebited || (Number(transferData.amount || 0) + Number(transferData.fee || 0)),
+                  totalDebited: (transferData.totalDebited !== undefined && transferData.totalDebited !== null && Number(transferData.totalDebited) > 0) ? Number(transferData.totalDebited) : (Number(transferData.amount || 0) + Number(transferData.providerFee || transferData.fee || 0) + Number(transferData.markup || 0) + Number(transferData.vat || 0)),
                   transactionDate: transferData.createdAt || new Date().toISOString(),
                   webhookReceivedAt: new Date().toISOString(),
                   updatedAt: new Date().toISOString()
