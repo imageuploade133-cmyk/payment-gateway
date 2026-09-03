@@ -951,10 +951,42 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                   });
                 }
 
-                // Extract sender details from verify result if present
+                // Extract payment details from verify result
+                const paymentType = ((result as any).payment_type || (result as any).paymentType || "").toLowerCase();
+                const cardData = (result as any).card || {};
+                let resolvedFundingMethod = "VIRTUAL_ACCOUNT";
+                let cardBrand = null;
+                let cardLast4 = null;
+                let maskedCardNumber = null;
+                let ussdBankName = null;
+
+                if (paymentType.includes("card") || cardData.last_4digits || cardData.last4) {
+                  resolvedFundingMethod = "CARD";
+                  cardBrand = (cardData.issuer || cardData.type || cardData.brand || "Card").toUpperCase();
+                  cardLast4 = cardData.last_4digits || cardData.last4 || cardData.last4digits || "••••";
+                  maskedCardNumber = `${cardBrand} •••• ${cardLast4}`;
+                } else if (paymentType.includes("ussd")) {
+                  resolvedFundingMethod = "USSD";
+                  ussdBankName = (result as any).bank_name || (result as any).account_bank || (result as any).bankName || "Bank";
+                }
+
                 const senderName = (result as any).sender_name || (result as any).senderName || (result as any).originatorname || (result as any).originator_name || (result as any).customer?.name || undefined;
                 const senderBankName = (result as any).sender_bank || (result as any).senderBankName || (result as any).originatorbankname || (result as any).originator_bank || undefined;
                 const senderAccountNumber = (result as any).sender_account || (result as any).senderAccountNumber || (result as any).originatoraccountnumber || (result as any).originator_account || undefined;
+
+                const virtualAccountNumber = (result as any).account_number || (result as any).virtual_account_number || undefined;
+                const virtualAccountBankName = (result as any).bank_name || (result as any).virtual_account_bank || undefined;
+
+                let titleStr = "Wallet Funding";
+                let descStr = "Wallet Funding";
+                if (resolvedFundingMethod === "CARD") {
+                  descStr = `Card Payment (${maskedCardNumber || "Card"})`;
+                } else if (resolvedFundingMethod === "USSD") {
+                  descStr = `USSD • ${ussdBankName || "Bank"}`;
+                } else {
+                  titleStr = "Wallet Funding";
+                  descStr = senderName ? `Bank Transfer • From ${senderName}` : "Bank Transfer";
+                }
 
                 // Create General Ledger transaction record for history
                 transaction.set(ledgerRef, {
@@ -966,21 +998,29 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                   flwId: flwId,
                   providerTransactionId: flwId,
                   providerReference: txRef || `DEP-${flwId}`,
-                  type: "VIRTUAL_ACCOUNT_DEPOSIT",
+                  type: "WALLET_FUNDING",
                   category: "deposit",
                   direction: "CREDIT",
-                  description: senderName ? `Transfer From ${senderName}` : "Transfer From Virtual Account",
+                  title: titleStr,
+                  description: descStr,
                   recipientName: "Self",
                   creditedTo: "Available Balance",
-                  fundingMethod: "Virtual Account",
+                  fundingMethod: resolvedFundingMethod,
+                  cardBrand,
+                  cardLast4,
+                  maskedCardNumber,
+                  ussdBankName,
                   senderName: senderName || null,
                   senderBankName: senderBankName || null,
                   senderAccountNumber: senderAccountNumber || null,
+                  virtualAccountNumber: virtualAccountNumber || null,
+                  virtualAccountBankName: virtualAccountBankName || null,
                   status: "SUCCESS",
                   date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
                   time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
                   transactionDate: new Date().toISOString(),
                   fee: 0,
+                  totalCredited: amount,
                   createdAt: new Date().toISOString(),
                 });
               });
@@ -1480,6 +1520,36 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 });
               }
 
+              // Extract payment details from charge.completed payload
+              const paymentType = (payload.data?.payment_type || payload.data?.type || "").toLowerCase();
+              const cardData = payload.data?.card || {};
+              let resolvedFundingMethod = "VIRTUAL_ACCOUNT";
+              let cardBrand = null;
+              let cardLast4 = null;
+              let maskedCardNumber = null;
+              let ussdBankName = null;
+
+              if (paymentType.includes("card") || cardData.last_4digits || cardData.last4) {
+                resolvedFundingMethod = "CARD";
+                cardBrand = (cardData.issuer || cardData.type || cardData.brand || "Card").toUpperCase();
+                cardLast4 = cardData.last_4digits || cardData.last4 || cardData.last4digits || "••••";
+                maskedCardNumber = `${cardBrand} •••• ${cardLast4}`;
+              } else if (paymentType.includes("ussd")) {
+                resolvedFundingMethod = "USSD";
+                ussdBankName = payload.data?.bank_name || payload.data?.account_bank || payload.data?.bankName || "Bank";
+              }
+
+              let titleStr = "Wallet Funding";
+              let descStr = "Wallet Funding";
+              if (resolvedFundingMethod === "CARD") {
+                descStr = `Card Payment (${maskedCardNumber || "Card"})`;
+              } else if (resolvedFundingMethod === "USSD") {
+                descStr = `USSD • ${ussdBankName || "Bank"}`;
+              } else {
+                titleStr = "Wallet Funding";
+                descStr = senderName ? `Bank Transfer • From ${senderName}` : "Bank Transfer";
+              }
+
               // Build clean ledger record
               const ledgerPayload: Record<string, any> = {
                 userId,
@@ -1490,14 +1560,18 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 flwId: flwId || transactionId,
                 providerTransactionId: flwId || transactionId,
                 providerReference: txRef || `DEP-${transactionId}`,
-                type: "VIRTUAL_ACCOUNT_DEPOSIT",
+                type: "WALLET_FUNDING",
                 category: "deposit",
-                direction: "incoming",
-                title: "Transfer From",
-                description: senderName ? `Transfer From ${senderName}` : "Transfer From Virtual Account",
+                direction: "CREDIT",
+                title: titleStr,
+                description: descStr,
                 recipientName: "Self",
                 creditedTo: "Available Balance",
-                fundingMethod: "Virtual Account",
+                fundingMethod: resolvedFundingMethod,
+                cardBrand,
+                cardLast4,
+                maskedCardNumber,
+                ussdBankName,
                 senderName: senderName || null,
                 senderBankName: senderBankName || null,
                 senderAccountNumber: senderAccountNumber || null,
@@ -1510,6 +1584,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
                 transactionDate: payload.data?.created_at || new Date().toISOString(),
                 fee: 0,
+                totalCredited: amount,
                 createdAt: new Date().toISOString(),
               };
 
