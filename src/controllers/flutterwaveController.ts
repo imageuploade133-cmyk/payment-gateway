@@ -420,7 +420,18 @@ Received: ${issue.received || "undefined"}`);
       reference: payload.reference,
       requestId: reqId,
       userId: req.body.userId || "N/A",
-      fee: typeof req.body.fee === "number" ? req.body.fee : (req.body.fee ? Number(req.body.fee) : undefined),
+
+      fee: typeof req.body.fee === "number"
+        ? req.body.fee
+        : (req.body.fee ? Number(req.body.fee) : undefined),
+
+      markup: typeof req.body.markup === "number"
+        ? req.body.markup
+        : (req.body.markup ? Number(req.body.markup) : 0),
+
+      vat: typeof req.body.vat === "number"
+        ? req.body.vat
+        : (req.body.vat ? Number(req.body.vat) : 0),
     });
 
     logger.info("Flutterwave transfer response:", result);
