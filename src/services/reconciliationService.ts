@@ -17,19 +17,24 @@ export class ReconciliationService {
 
       let expiredCount = 0;
       for (const doc of snapshot.docs) {
-        const data = doc.data();
-        const expiresAt = data.expiresAt;
-        if (expiresAt && nowIso > expiresAt) {
-          await doc.ref.update({
-            status: "EXPIRED",
-            totalCredited: 0,
-            credited: false,
-            expiredAt: nowIso,
-            updatedAt: nowIso,
-            reason: "Funding expired",
-          });
-          expiredCount++;
-        }
+        await adminDb.runTransaction(async (transaction) => {
+          const freshSnap = await transaction.get(doc.ref);
+          if (!freshSnap.exists) return;
+          const data = freshSnap.data() || {};
+          
+          // STRICT RACE-SAFE GUARD: Only transition if STILL PENDING and past expiresAt
+          if (data.status === "PENDING" && data.expiresAt && nowIso >= data.expiresAt) {
+            transaction.set(doc.ref, {
+              status: "EXPIRED",
+              totalCredited: 0,
+              credited: false,
+              expiredAt: nowIso,
+              updatedAt: nowIso,
+              reason: "Funding expired",
+            }, { merge: true });
+            expiredCount++;
+          }
+        });
       }
       return expiredCount;
     } catch (err: any) {
@@ -564,6 +569,7 @@ export class ReconciliationService {
 
         // Reconcile pending VTU transactions
         await this.reconcilePendingVtuTransactions();
+        await this.expireStalePendingFundings();
 
       } catch (err: any) {
         logger.error(`[Reconciliation Service] Background loop failed: ${err.message}`);
