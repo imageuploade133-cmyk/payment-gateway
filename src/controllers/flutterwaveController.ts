@@ -984,8 +984,24 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
 
             await adminDb.runTransaction(async (transaction) => {
               const ledgerSnap = await transaction.get(ledgerRef);
-              if (ledgerSnap.exists && (ledgerSnap.data()?.status === "SUCCESS" || ledgerSnap.data()?.credited === true)) {
+              const ledgerData = (ledgerSnap.exists ? ledgerSnap.data() : {}) || {};
+
+              if (ledgerSnap.exists && (ledgerData.status === "SUCCESS" || ledgerData.credited === true)) {
                 logger.info(`[verifyPayment] Transaction ${ledgerDocId} already marked SUCCESS. Skipping credit.`);
+                return;
+              }
+
+              if (ledgerSnap.exists && ledgerData.status === "EXPIRED") {
+                logger.warn(`[verifyPayment] Late payment verified for EXPIRED transaction ${ledgerDocId}. Flagging for manual reconciliation.`);
+                transaction.set(ledgerRef, {
+                  unmatched: true,
+                  reconciliationRequired: true,
+                  latePaymentReceived: true,
+                  latePaymentAmount: amount,
+                  latePaymentAt: new Date().toISOString(),
+                  reason: "Late payment verified after dynamic funding expired",
+                  updatedAt: new Date().toISOString(),
+                }, { merge: true });
                 return;
               }
 
@@ -1282,8 +1298,24 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
             await adminDb.runTransaction(async (transaction) => {
               const ledgerSnap = await transaction.get(ledgerRef);
-              if (ledgerSnap.exists && (ledgerSnap.data()?.status === "SUCCESS" || ledgerSnap.data()?.credited === true)) {
+              const ledgerData = (ledgerSnap.exists ? ledgerSnap.data() : {}) || {};
+
+              if (ledgerSnap.exists && (ledgerData.status === "SUCCESS" || ledgerData.credited === true)) {
                 logger.info(`[Webhook charge.completed] Transaction ${ledgerDocId} already SUCCESS. Skipping credit.`);
+                return;
+              }
+
+              if (ledgerSnap.exists && ledgerData.status === "EXPIRED") {
+                logger.warn(`[Webhook charge.completed] Late payment received for EXPIRED transaction ${ledgerDocId}. Flagging for manual reconciliation.`);
+                transaction.set(ledgerRef, {
+                  unmatched: true,
+                  reconciliationRequired: true,
+                  latePaymentReceived: true,
+                  latePaymentAmount: amount,
+                  latePaymentAt: new Date().toISOString(),
+                  reason: "Late payment received after dynamic funding expired",
+                  updatedAt: new Date().toISOString(),
+                }, { merge: true });
                 return;
               }
 
