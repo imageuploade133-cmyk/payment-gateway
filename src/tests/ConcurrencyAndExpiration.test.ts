@@ -51,7 +51,7 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
     next = jest.fn();
   });
 
-  it("should never credit an EXPIRED funding transaction when verifyPayment is called", async () => {
+  it("1. should never credit an EXPIRED funding transaction when verifyPayment is called", async () => {
     const mockUserDoc = { exists: true, data: () => ({ balance: 1000 }) };
     const mockWalletDoc = { exists: true, data: () => ({ balance: 1000 }) };
     const mockExpiredLedgerDoc = {
@@ -113,11 +113,78 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
     expect(transactionSetCalled).toBe(true);
   });
 
-  it("should enforce single credit during concurrent verifyPayment and handleWebhook calls", async () => {
+  it("2. should never credit an EXPIRED funding transaction when handleWebhook is called 1 second after expiry", async () => {
+    const mockUserDoc = { exists: true, data: () => ({ balance: 1000 }) };
+    const mockWalletDoc = { exists: true, data: () => ({ balance: 1000 }) };
+    const mockExpiredLedgerDoc = {
+      exists: true,
+      data: () => ({
+        status: "PENDING",
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+        createdAt: new Date(Date.now() - 11 * 60 * 1000 - 1000).toISOString(),
+      }),
+    };
+
+    const mockUserRef = { id: "user-conc" };
+    const mockWalletRef = { id: "user-conc_NGN" };
+    const mockLedgerRef = { id: "tx-FUNDING-flw-tx-user-conc-100" };
+
+    (adminDb!.collection as jest.Mock).mockImplementation((coll: string) => {
+      if (coll === "users") return { doc: () => mockUserRef };
+      if (coll === "wallets") return { doc: () => mockWalletRef };
+      if (coll === "transactions") return { doc: () => mockLedgerRef };
+      return { doc: () => ({}) };
+    });
+
+    let creditUpdated = false;
+    let latePaymentFlagged = false;
+
+    (adminDb!.runTransaction as jest.Mock).mockImplementation(async (cb: any) => {
+      const mockT = {
+        get: jest.fn().mockImplementation((ref: any) => {
+          if (ref === mockUserRef) return Promise.resolve(mockUserDoc);
+          if (ref === mockWalletRef) return Promise.resolve(mockWalletDoc);
+          if (ref === mockLedgerRef) return Promise.resolve(mockExpiredLedgerDoc);
+          return Promise.resolve({ exists: false });
+        }),
+        update: jest.fn().mockImplementation(() => {
+          creditUpdated = true;
+        }),
+        set: jest.fn().mockImplementation((ref: any, data: any) => {
+          if (ref === mockLedgerRef && data.status === "EXPIRED") {
+            latePaymentFlagged = true;
+          }
+        }),
+      };
+      return await cb(mockT);
+    });
+
+    const webhookReq = {
+      requestId: "test-expired-webhook",
+      headers: { "verif-hash": "valid-hash" },
+      query: {},
+      body: {
+        event: "charge.completed",
+        data: {
+          id: 999888,
+          tx_ref: "flw-tx-user-conc-100",
+          amount: 2500,
+          status: "successful",
+          customer: { email: "user@example.com" },
+        },
+      },
+    };
+
+    await handleWebhook(webhookReq as any, res, next);
+
+    expect(creditUpdated).toBe(false);
+    expect(latePaymentFlagged).toBe(true);
+  });
+
+  it("3. should enforce single credit during concurrent verifyPayment and handleWebhook calls", async () => {
     const mockUserDoc = { exists: true, data: () => ({ balance: 1000 }) };
     const mockWalletDoc = { exists: true, data: () => ({ balance: 1000 }) };
     
-    // Shared in-memory ledger state across concurrent requests
     let sharedLedgerState: any = {
       status: "PENDING",
       credited: false,
@@ -190,15 +257,89 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
       },
     };
 
-    // Execute concurrently
     await Promise.all([
       verifyPayment(verifyReq as any, res, next),
       handleWebhook(webhookReq as any, res, next),
     ]);
 
-    // Exactly 2 update calls (1 for user doc, 1 for wallet doc) rather than 4
     expect(creditIncrementCount).toBe(2);
     expect(sharedLedgerState.status).toBe("SUCCESS");
     expect(sharedLedgerState.credited).toBe(true);
+  });
+
+  it("4. should allow webhook retry when initial Firestore transaction fails transiently", async () => {
+    const mockUserDoc = { exists: true, data: () => ({ balance: 1000 }) };
+    const mockWalletDoc = { exists: true, data: () => ({ balance: 1000 }) };
+    
+    let sharedLedgerState: any = {
+      status: "PENDING",
+      credited: false,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    };
+
+    const mockUserRef = { id: "user-conc" };
+    const mockWalletRef = { id: "user-conc_NGN" };
+    const mockLedgerRef = { id: "tx-FUNDING-flw-tx-user-retry-100" };
+
+    (adminDb!.collection as jest.Mock).mockImplementation((coll: string) => {
+      if (coll === "users") return { doc: () => mockUserRef };
+      if (coll === "wallets") return { doc: () => mockWalletRef };
+      if (coll === "transactions") return { doc: () => mockLedgerRef };
+      return { doc: () => ({}) };
+    });
+
+    let attemptCount = 0;
+
+    (adminDb!.runTransaction as jest.Mock).mockImplementation(async (cb: any) => {
+      attemptCount++;
+      if (attemptCount === 1) {
+        throw new Error("Transient Firestore connection timeout");
+      }
+      const mockT = {
+        get: jest.fn().mockImplementation((ref: any) => {
+          if (ref === mockUserRef) return Promise.resolve(mockUserDoc);
+          if (ref === mockWalletRef) return Promise.resolve(mockWalletDoc);
+          if (ref === mockLedgerRef) {
+            return Promise.resolve({
+              exists: true,
+              data: () => sharedLedgerState,
+            });
+          }
+          return Promise.resolve({ exists: false });
+        }),
+        update: jest.fn(),
+        set: jest.fn().mockImplementation((ref: any, data: any) => {
+          if (ref === mockLedgerRef) {
+            sharedLedgerState = { ...sharedLedgerState, ...data };
+          }
+        }),
+      };
+      return await cb(mockT);
+    });
+
+    const webhookReq = {
+      requestId: "test-retry-webhook",
+      headers: { "verif-hash": "valid-hash" },
+      query: {},
+      body: {
+        event: "charge.completed",
+        data: {
+          id: "flw-retry-id-100",
+          tx_ref: "flw-tx-user-retry-100",
+          amount: 5000,
+          status: "successful",
+          customer: { email: "user@example.com" },
+        },
+      },
+    };
+
+    // First attempt fails transiently
+    await handleWebhook(webhookReq as any, res, next);
+    expect(sharedLedgerState.credited).toBe(false);
+
+    // Provider retries webhook
+    await handleWebhook(webhookReq as any, res, next);
+    expect(sharedLedgerState.credited).toBe(true);
+    expect(sharedLedgerState.status).toBe("SUCCESS");
   });
 });
