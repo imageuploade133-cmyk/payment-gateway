@@ -17,11 +17,11 @@ export class ReconciliationService {
 
       let expiredCount = 0;
       for (const doc of snapshot.docs) {
-        await adminDb.runTransaction(async (transaction) => {
+        const transitioned = await adminDb.runTransaction(async (transaction) => {
           const freshSnap = await transaction.get(doc.ref);
-          if (!freshSnap.exists) return;
+          if (!freshSnap.exists) return false;
           const data = freshSnap.data() || {};
-          
+
           // STRICT RACE-SAFE GUARD: Only transition if STILL PENDING and past expiresAt
           if (data.status === "PENDING" && data.expiresAt && nowIso >= data.expiresAt) {
             transaction.set(doc.ref, {
@@ -32,9 +32,14 @@ export class ReconciliationService {
               updatedAt: nowIso,
               reason: "Funding expired",
             }, { merge: true });
-            expiredCount++;
+            return true;
           }
+          return false;
         });
+
+        if (transitioned) {
+          expiredCount++;
+        }
       }
       return expiredCount;
     } catch (err: any) {
