@@ -161,23 +161,16 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
   });
 
   describe("POST /api/flutterwave/webhook - Webhook Processing", () => {
-    const validWebhookBody = {
-      event: "charge.completed",
-      data: {
-        id: 112233,
-        tx_ref: "flw-tx-888-777",
-        amount: 1000,
-        currency: "NGN",
-      },
-    };
-
     it("should reject with HTTP 401 if signature validation fails", async () => {
       mockFlwClient.verifyWebhookSignature.mockReturnValue(false);
 
       const res = await request(app)
         .post("/api/flutterwave/webhook")
         .set("verif-hash", "invalid-hash-here")
-        .send(validWebhookBody);
+        .send({
+          event: "charge.completed",
+          data: { id: 112233, tx_ref: "flw-tx-888-777", amount: 1000, currency: "NGN" },
+        });
 
       expect(res.status).toBe(401);
       expect(res.body.success).toBe(false);
@@ -190,7 +183,10 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
       const res = await request(app)
         .post("/api/flutterwave/webhook")
         .set("verif-hash", "valid-signature-hash")
-        .send(validWebhookBody);
+        .send({
+          event: "charge.completed",
+          data: { id: 11223311, tx_ref: "flw-tx-888-777-single", amount: 1000, currency: "NGN" },
+        });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
@@ -200,18 +196,23 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
     it("should implement duplicate transaction defense and avoid processing same transaction twice", async () => {
       mockFlwClient.verifyWebhookSignature.mockReturnValue(true);
 
+      const duplicatePayload = {
+        event: "charge.completed",
+        data: { id: 99887766, tx_ref: "flw-tx-dup-test-1", amount: 1000, currency: "NGN" },
+      };
+
       // First webhook
       const res1 = await request(app)
         .post("/api/flutterwave/webhook")
         .set("verif-hash", "valid-signature-hash")
-        .send(validWebhookBody);
+        .send(duplicatePayload);
       expect(res1.status).toBe(200);
 
       // Replayed webhook with identical transaction ID
       const res2 = await request(app)
         .post("/api/flutterwave/webhook")
         .set("verif-hash", "valid-signature-hash")
-        .send(validWebhookBody);
+        .send(duplicatePayload);
 
       expect(res2.status).toBe(200);
       expect(res2.body.message).toContain("Webhook already processed successfully");

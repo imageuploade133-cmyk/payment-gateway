@@ -1,6 +1,7 @@
 import request from "supertest";
 import app from "../app";
 import { getFlutterwaveClient } from "../providers/flutterwave";
+import { env } from "../config/env";
 
 jest.mock("../providers/flutterwave");
 const mockedGetClient = getFlutterwaveClient as jest.MockedFunction<typeof getFlutterwaveClient>;
@@ -16,9 +17,24 @@ describe("GET /api/flutterwave/rates VM Endpoint & Bid/Ask FX Model Tests", () =
     mockedGetClient.mockReturnValue(mockClient);
   });
 
+  const validApiKey = env.GATEWAY_API_KEYS[0] || "default_gateway_secure_key_12345";
   const S2S_HEADERS = {
-    "x-api-key": process.env.PAYMENT_GATEWAY_API_KEY || "default_gateway_secure_key_12345",
+    "x-api-key": validApiKey,
   };
+
+  it("should return HTTP 401 if authentication header is missing", async () => {
+    const res = await request(app).get("/api/flutterwave/rates?sourceCurrency=USD&destinationCurrency=NGN&amount=1");
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+  });
+
+  it("should return HTTP 401 if invalid API key is provided", async () => {
+    const res = await request(app)
+      .get("/api/flutterwave/rates?sourceCurrency=USD&destinationCurrency=NGN&amount=1")
+      .set("x-api-key", "invalid_key_xyz");
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+  });
 
   it("should return normalized live rates for USD -> NGN", async () => {
     mockClient.request.mockResolvedValueOnce({

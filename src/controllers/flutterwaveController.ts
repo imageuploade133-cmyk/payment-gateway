@@ -1276,6 +1276,10 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         }
       }
 
+      if (flwId) {
+        await idempotency.saveWebhookProcessed(flwId);
+      }
+
       res.status(200).json({ success: true, message: "Webhook payload verified" });
       return;
     }
@@ -1468,6 +1472,10 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
             logger.warn(`[Webhook charge.completed] Failed to update pending funding doc: ${uErr.message}`);
           }
         }
+      }
+
+      if (flwId) {
+        await idempotency.saveWebhookProcessed(flwId);
       }
 
       res.status(200).json({ success: true, message: "Webhook payload verified" });

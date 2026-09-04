@@ -18,21 +18,24 @@ const mockFlwClient = getFlutterwaveClient() as jest.Mocked<any>;
 const testApiKey = env.GATEWAY_API_KEYS[0];
 
 describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
-  const validPayload = {
-    amount: 5000,
-    account_number: "0123456789",
-    bank_code: "044",
-    account_name: "SARAH SMITH CONNOR",
-    currency: "NGN",
-    narration: "E-Tech Salary Payout",
-    reference: "salary-999-2026-07",
-  };
+  let validPayload: any;
 
   beforeEach(() => {
     jest.clearAllMocks();
     // Clear in-memory idempotency cache for test isolation
     const idempotency = InMemoryIdempotency.getInstance();
     (idempotency as any).cache.clear();
+
+    const uniqueRef = `trf-test-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    validPayload = {
+      amount: 5000,
+      account_number: "0123456789",
+      bank_code: "044",
+      account_name: "SARAH SMITH CONNOR",
+      currency: "NGN",
+      narration: "E-Tech Salary Payout",
+      reference: uniqueRef,
+    };
   });
 
   describe("POST /api/flutterwave/transfer - Request Validation (Zod)", () => {
