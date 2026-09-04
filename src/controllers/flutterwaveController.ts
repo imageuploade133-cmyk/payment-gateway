@@ -1060,6 +1060,24 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
           : "Payment verified successfully."
       });
     } else {
+      if (referenceToUse && adminDb) {
+        try {
+          const flwStatus = (result.status || "").toUpperCase();
+          const mappedStatus = flwStatus.includes("CANCEL") ? "CANCELED" : flwStatus.includes("EXPI") ? "EXPIRED" : "FAILED";
+          const fundingDocRef = adminDb.collection("transactions").doc(`tx-FUNDING-${referenceToUse}`);
+          const docSnap = await fundingDocRef.get();
+          if (docSnap.exists) {
+            await fundingDocRef.update({
+              status: mappedStatus,
+              totalCredited: 0,
+              reason: result.message || "Payment declined or canceled",
+              updatedAt: new Date().toISOString()
+            });
+          }
+        } catch (uErr: any) {
+          logger.warn(`[verifyPayment] Failed to update pending doc status: ${uErr.message}`);
+        }
+      }
       res.status(400).json(result);
     }
 
@@ -1420,12 +1438,12 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     // If it's virtual account/bank transfer deposit funding
     if (eventType === "charge.completed") {
       const flwStatus = payload.data?.status?.toUpperCase() || "SUCCESSFUL";
-      logger.info(`[Webhook charge.completed] Checking charge status. Status=${flwStatus} | reqId=${reqId}`);
+      const txRef = payload.data?.tx_ref || "";
+      logger.info(`[Webhook charge.completed] Checking charge status. Status=${flwStatus} | ref=${txRef} | reqId=${reqId}`);
 
       if (flwStatus === "SUCCESSFUL" || flwStatus === "SUCCESS") {
         const amount = Number(payload.data?.amount) || 0;
         const flwId = payload.data?.id?.toString();
-        const txRef = payload.data?.tx_ref || "";
         const email = payload.data?.customer?.email || "";
 
         // Extract real sender details from Flutterwave webhook payload
@@ -1603,7 +1621,24 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
           logger.error(`[Webhook charge.completed] FAILED to resolve user ID for webhook payment. Transaction ID: ${transactionId} | txRef: ${txRef}`);
         }
       } else {
-        logger.info(`[Webhook charge.completed] Ignored: status is not successful (${flwStatus})`);
+        logger.info(`[Webhook charge.completed] Charge status is ${flwStatus}. Updating pending transaction...`);
+        if (txRef && adminDb) {
+          try {
+            const mappedStatus = flwStatus.includes("CANCEL") ? "CANCELED" : flwStatus.includes("EXPI") ? "EXPIRED" : "FAILED";
+            const fundingDocRef = adminDb.collection("transactions").doc(`tx-FUNDING-${txRef}`);
+            const docSnap = await fundingDocRef.get();
+            if (docSnap.exists) {
+              await fundingDocRef.update({
+                status: mappedStatus,
+                totalCredited: 0,
+                reason: payload.data?.processor_response || payload.data?.narration || "Payment declined or canceled",
+                updatedAt: new Date().toISOString()
+              });
+            }
+          } catch (uErr: any) {
+            logger.warn(`[Webhook charge.completed] Failed to update pending funding doc: ${uErr.message}`);
+          }
+        }
       }
     }
 
