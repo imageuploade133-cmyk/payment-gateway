@@ -992,16 +992,22 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                 return;
               }
 
-              if (ledgerSnap.exists && ledgerData.status === "EXPIRED") {
+              const nowIso = new Date().toISOString();
+              const isExpiredByTime = ledgerData.expiresAt
+                ? (nowIso >= ledgerData.expiresAt)
+                : (ledgerData.createdAt ? (Date.now() - new Date(ledgerData.createdAt).getTime() >= 11 * 60 * 1000) : false);
+
+              if (ledgerSnap.exists && (ledgerData.status === "EXPIRED" || isExpiredByTime)) {
                 logger.warn(`[verifyPayment] Late payment verified for EXPIRED transaction ${ledgerDocId}. Flagging for manual reconciliation.`);
                 transaction.set(ledgerRef, {
+                  status: "EXPIRED",
                   unmatched: true,
                   reconciliationRequired: true,
                   latePaymentReceived: true,
                   latePaymentAmount: amount,
-                  latePaymentAt: new Date().toISOString(),
+                  latePaymentAt: nowIso,
                   reason: "Late payment verified after dynamic funding expired",
-                  updatedAt: new Date().toISOString(),
+                  updatedAt: nowIso,
                 }, { merge: true });
                 return;
               }
@@ -1306,16 +1312,22 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 return;
               }
 
-              if (ledgerSnap.exists && ledgerData.status === "EXPIRED") {
+              const nowIso = new Date().toISOString();
+              const isExpiredByTime = ledgerData.expiresAt
+                ? (nowIso >= ledgerData.expiresAt)
+                : (ledgerData.createdAt ? (Date.now() - new Date(ledgerData.createdAt).getTime() >= 11 * 60 * 1000) : false);
+
+              if (ledgerSnap.exists && (ledgerData.status === "EXPIRED" || isExpiredByTime)) {
                 logger.warn(`[Webhook charge.completed] Late payment received for EXPIRED transaction ${ledgerDocId}. Flagging for manual reconciliation.`);
                 transaction.set(ledgerRef, {
+                  status: "EXPIRED",
                   unmatched: true,
                   reconciliationRequired: true,
                   latePaymentReceived: true,
                   latePaymentAmount: amount,
-                  latePaymentAt: new Date().toISOString(),
+                  latePaymentAt: nowIso,
                   reason: "Late payment received after dynamic funding expired",
-                  updatedAt: new Date().toISOString(),
+                  updatedAt: nowIso,
                 }, { merge: true });
                 return;
               }
