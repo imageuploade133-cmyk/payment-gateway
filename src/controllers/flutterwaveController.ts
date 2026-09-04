@@ -1214,7 +1214,6 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         res.status(200).json({ success: true, message: "Webhook already processed successfully" });
         return;
       }
-      await idempotency.saveWebhookProcessed(flwId);
     }
 
     if (eventType === "transfer.completed") {
@@ -1268,6 +1267,10 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
             t.set(transferRef, { status: canonicalStatus, updatedAt: new Date().toISOString() }, { merge: true });
             t.set(unifiedRef, { status: canonicalStatus, updatedAt: new Date().toISOString() }, { merge: true });
           });
+
+          if (flwId) {
+            await idempotency.saveWebhookProcessed(flwId);
+          }
         } catch (trErr: any) {
           logger.error(`[Webhook transfer.completed] Error updating transfer record: ${trErr.message}`);
         }
@@ -1429,6 +1432,10 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 updatedAt: new Date().toISOString(),
               }, { merge: true });
             });
+
+            if (flwId) {
+              await idempotency.saveWebhookProcessed(flwId);
+            }
 
             logger.info(`[Webhook charge.completed] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
           } catch (txError: any) {
