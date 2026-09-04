@@ -5,6 +5,39 @@ import { FieldValue } from "firebase-admin/firestore";
 import { ClubkonnectService } from "./clubkonnect.service";
 
 export class ReconciliationService {
+
+  public async expireStalePendingFundings(): Promise<number> {
+    if (!adminDb) return 0;
+    try {
+      const nowIso = new Date().toISOString();
+      const snapshot = await adminDb.collection("transactions")
+        .where("type", "==", "WALLET_FUNDING")
+        .where("status", "==", "PENDING")
+        .get();
+
+      let expiredCount = 0;
+      for (const doc of snapshot.docs) {
+        const data = doc.data();
+        const expiresAt = data.expiresAt;
+        if (expiresAt && nowIso > expiresAt) {
+          await doc.ref.update({
+            status: "EXPIRED",
+            totalCredited: 0,
+            credited: false,
+            expiredAt: nowIso,
+            updatedAt: nowIso,
+            reason: "Funding expired",
+          });
+          expiredCount++;
+        }
+      }
+      return expiredCount;
+    } catch (err: any) {
+      logger.error(`[expireStalePendingFundings] Error expiring stale fundings: ${err.message}`);
+      return 0;
+    }
+  }
+
   private static instance: ReconciliationService;
 
   private constructor() {}

@@ -813,6 +813,7 @@ export const initializePayment = async (req: Request, res: Response, next: NextF
           fee: 0,
           totalCredited: 0,
           credited: false,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
           date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
           time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
           transactionDate: new Date().toISOString(),
