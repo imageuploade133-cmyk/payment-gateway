@@ -754,6 +754,37 @@ export const initializePayment = async (req: Request, res: Response, next: NextF
     const { amount, currency, email, name, userId, redirectUrl, phone } = validationResult.data;
     const tx_ref = `flw-tx-${userId}-${Date.now()}`;
 
+    // Persist pending funding transaction in transactions collection for activity history
+    if (adminDb) {
+      try {
+        await adminDb.collection("transactions").doc(`tx-FUNDING-${tx_ref}`).set({
+          userId,
+          amount,
+          currency: currency || "NGN",
+          reference: tx_ref,
+          transactionNumber: tx_ref,
+          providerReference: tx_ref,
+          type: "WALLET_FUNDING",
+          category: "deposit",
+          direction: "CREDIT",
+          title: "Wallet Funding",
+          description: "Card Payment",
+          recipientName: "Self",
+          creditedTo: "Available Balance",
+          fundingMethod: "CARD",
+          status: "PENDING",
+          fee: 0,
+          totalCredited: 0,
+          date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+          time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+          transactionDate: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        }, { merge: true });
+      } catch (fErr: any) {
+        logger.error(`[initializePayment] Pending ledger doc write warning: ${fErr.message}`);
+      }
+    }
+
     const client = getFlutterwaveClient();
     const response = await client.request("post", "/payments", {
       tx_ref,
@@ -915,7 +946,8 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
             if (userId) {
               const userRef = adminDb.collection("users").doc(userId);
               const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
-              const ledgerRef = adminDb.collection("transactions").doc(`tx-DEPOSIT-${flwId}`);
+              const ledgerDocId = txRef ? (txRef.startsWith("tx-") ? txRef : `tx-FUNDING-${txRef}`) : `tx-FUNDING-${flwId}`;
+              const ledgerRef = adminDb.collection("transactions").doc(ledgerDocId);
 
               await adminDb.runTransaction(async (transaction) => {
                 const userDoc = await transaction.get(userRef);
@@ -962,12 +994,15 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
 
                 if (paymentType.includes("card") || cardData.last_4digits || cardData.last4) {
                   resolvedFundingMethod = "CARD";
-                  cardBrand = (cardData.issuer || cardData.type || cardData.brand || "Card").toUpperCase();
-                  cardLast4 = cardData.last_4digits || cardData.last4 || cardData.last4digits || "••••";
-                  maskedCardNumber = `${cardBrand} •••• ${cardLast4}`;
+                  const brandRaw = cardData.issuer || cardData.type || cardData.brand;
+                  const last4Raw = cardData.last_4digits || cardData.last4 || cardData.last4digits;
+                  cardBrand = brandRaw ? String(brandRaw).toUpperCase() : null;
+                  cardLast4 = last4Raw ? String(last4Raw) : null;
+                  maskedCardNumber = cardBrand && cardLast4 ? `${cardBrand} •••• ${cardLast4}` : (cardLast4 ? `•••• ${cardLast4}` : null);
                 } else if (paymentType.includes("ussd")) {
                   resolvedFundingMethod = "USSD";
-                  ussdBankName = (result as any).bank_name || (result as any).account_bank || (result as any).bankName || "Bank";
+                  const ussdBankRaw = (result as any).bank_name || (result as any).account_bank || (result as any).bankName;
+                  ussdBankName = ussdBankRaw ? String(ussdBankRaw) : null;
                 }
 
                 const senderName = (result as any).sender_name || (result as any).senderName || (result as any).originatorname || (result as any).originator_name || (result as any).customer?.name || undefined;
@@ -980,9 +1015,9 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                 let titleStr = "Wallet Funding";
                 let descStr = "Wallet Funding";
                 if (resolvedFundingMethod === "CARD") {
-                  descStr = `Card Payment (${maskedCardNumber || "Card"})`;
+                  descStr = maskedCardNumber ? `Card Payment (${maskedCardNumber})` : "Card Payment";
                 } else if (resolvedFundingMethod === "USSD") {
-                  descStr = `USSD • ${ussdBankName || "Bank"}`;
+                  descStr = ussdBankName ? `USSD • ${ussdBankName}` : "USSD Payment";
                 } else {
                   titleStr = "Wallet Funding";
                   descStr = senderName ? `Bank Transfer • From ${senderName}` : "Bank Transfer";
@@ -1501,7 +1536,8 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
           try {
             const userRef = adminDb.collection("users").doc(userId);
             const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
-            const ledgerRef = adminDb.collection("transactions").doc(`tx-DEPOSIT-${transactionId}`);
+            const ledgerDocId = txRef ? (txRef.startsWith("tx-") ? txRef : `tx-FUNDING-${txRef}`) : `tx-FUNDING-${transactionId}`;
+            const ledgerRef = adminDb.collection("transactions").doc(ledgerDocId);
 
             await adminDb.runTransaction(async (transaction) => {
               logger.info(`[Webhook Transaction] Reading user profile document...`);
@@ -1549,20 +1585,23 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
               if (paymentType.includes("card") || cardData.last_4digits || cardData.last4) {
                 resolvedFundingMethod = "CARD";
-                cardBrand = (cardData.issuer || cardData.type || cardData.brand || "Card").toUpperCase();
-                cardLast4 = cardData.last_4digits || cardData.last4 || cardData.last4digits || "••••";
-                maskedCardNumber = `${cardBrand} •••• ${cardLast4}`;
+                const brandRaw = cardData.issuer || cardData.type || cardData.brand;
+                const last4Raw = cardData.last_4digits || cardData.last4 || cardData.last4digits;
+                cardBrand = brandRaw ? String(brandRaw).toUpperCase() : null;
+                cardLast4 = last4Raw ? String(last4Raw) : null;
+                maskedCardNumber = cardBrand && cardLast4 ? `${cardBrand} •••• ${cardLast4}` : (cardLast4 ? `•••• ${cardLast4}` : null);
               } else if (paymentType.includes("ussd")) {
                 resolvedFundingMethod = "USSD";
-                ussdBankName = payload.data?.bank_name || payload.data?.account_bank || payload.data?.bankName || "Bank";
+                const ussdBankRaw = payload.data?.bank_name || payload.data?.account_bank || payload.data?.bankName;
+                ussdBankName = ussdBankRaw ? String(ussdBankRaw) : null;
               }
 
               let titleStr = "Wallet Funding";
               let descStr = "Wallet Funding";
               if (resolvedFundingMethod === "CARD") {
-                descStr = `Card Payment (${maskedCardNumber || "Card"})`;
+                descStr = maskedCardNumber ? `Card Payment (${maskedCardNumber})` : "Card Payment";
               } else if (resolvedFundingMethod === "USSD") {
-                descStr = `USSD • ${ussdBankName || "Bank"}`;
+                descStr = ussdBankName ? `USSD • ${ussdBankName}` : "USSD Payment";
               } else {
                 titleStr = "Wallet Funding";
                 descStr = senderName ? `Bank Transfer • From ${senderName}` : "Bank Transfer";
