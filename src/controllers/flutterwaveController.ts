@@ -974,6 +974,20 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
       let credited = false;
       let newBalance = 0;
 
+      let txOutcome: {
+        credited: boolean;
+        alreadyCredited: boolean;
+        isExpired: boolean;
+        totalCredited: number;
+        newBalance: number;
+      } = {
+        credited: false,
+        alreadyCredited: false,
+        isExpired: false,
+        totalCredited: 0,
+        newBalance: 0,
+      };
+
       if (adminDb && flwId) {
         try {
           const userId = await resolveUserIdFromPayload(result, String(referenceToUse));
@@ -983,13 +997,21 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
             const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
             const ledgerRef = adminDb.collection("transactions").doc(ledgerDocId);
 
-            await adminDb.runTransaction(async (transaction) => {
+            txOutcome = await adminDb.runTransaction(async (transaction) => {
               const ledgerSnap = await transaction.get(ledgerRef);
               const ledgerData = (ledgerSnap.exists ? ledgerSnap.data() : {}) || {};
 
               if (ledgerSnap.exists && (ledgerData.status === "SUCCESS" || ledgerData.credited === true)) {
                 logger.info(`[verifyPayment] Transaction ${ledgerDocId} already marked SUCCESS. Skipping credit.`);
-                return;
+                const userDoc = await transaction.get(userRef);
+                const currentBal = Number(userDoc.data()?.balance) || 0;
+                return {
+                  credited: false,
+                  alreadyCredited: true,
+                  isExpired: false,
+                  totalCredited: Number(ledgerData.totalCredited || ledgerData.amount || amount),
+                  newBalance: currentBal,
+                };
               }
 
               const nowIso = new Date().toISOString();
@@ -1009,7 +1031,13 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                   reason: "Late payment verified after dynamic funding expired",
                   updatedAt: nowIso,
                 }, { merge: true });
-                return;
+                return {
+                  credited: false,
+                  alreadyCredited: false,
+                  isExpired: true,
+                  totalCredited: 0,
+                  newBalance: 0,
+                };
               }
 
               const userDoc = await transaction.get(userRef);
@@ -1021,7 +1049,7 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
               const walletExists = walletDoc.exists;
 
               const oldBalance = Number(userDoc.data()?.balance) || 0;
-              newBalance = oldBalance + amount;
+              const updatedBal = oldBalance + amount;
 
               logger.info(`[verifyPayment] Processing WALLET_FUNDING ledger and atomically crediting wallet...`);
 
@@ -1117,21 +1145,50 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                 completedAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
               }, { merge: true });
+
+              return {
+                credited: true,
+                alreadyCredited: false,
+                isExpired: false,
+                totalCredited: amount,
+                newBalance: updatedBal,
+              };
             });
 
-            credited = true;
-            logger.info(`[verifyPayment] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
+            if (txOutcome.credited) {
+              logger.info(`[verifyPayment] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
+            }
           }
         } catch (creditErr: any) {
           logger.error(`[verifyPayment] Credit Transaction FAILED for transaction_id=${flwId}: ${creditErr.message}`);
         }
       }
 
+      if (txOutcome.isExpired) {
+        res.status(200).json({
+          ...result,
+          success: false,
+          status: "EXPIRED",
+          credited: false,
+          alreadyCredited: false,
+          fundedAmount: 0,
+          totalCredited: 0,
+          reason: "Funding expired",
+          message: "Payment verified after dynamic funding expired. Flagged for manual reconciliation."
+        });
+        return;
+      }
+
       res.status(200).json({
         ...result,
-        credited,
-        newBalance,
-        message: credited
+        success: true,
+        status: "SUCCESS",
+        credited: txOutcome.credited,
+        alreadyCredited: txOutcome.alreadyCredited,
+        fundedAmount: txOutcome.totalCredited || amount,
+        totalCredited: txOutcome.totalCredited || amount,
+        newBalance: txOutcome.newBalance,
+        message: txOutcome.credited
           ? `Payment verified and wallet credited successfully with ₦${amount.toLocaleString()}.`
           : "Payment verified successfully."
       });
