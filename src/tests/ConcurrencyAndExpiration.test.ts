@@ -71,7 +71,12 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
       if (coll === "users") return { doc: () => mockUserRef };
       if (coll === "wallets") return { doc: () => mockWalletRef };
       if (coll === "transactions") return { doc: () => mockLedgerRef };
-      return { doc: () => ({}) };
+      return {
+        doc: () => ({
+          get: jest.fn().mockResolvedValue({ exists: false }),
+          set: jest.fn().mockResolvedValue({}),
+        }),
+      };
     });
 
     let transactionSetCalled = false;
@@ -281,11 +286,26 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
     const mockWalletRef = { id: "user-conc_NGN" };
     const mockLedgerRef = { id: "tx-FUNDING-flw-tx-user-retry-100" };
 
+    const processedWebhooksMap = new Set<string>();
+
     (adminDb!.collection as jest.Mock).mockImplementation((coll: string) => {
       if (coll === "users") return { doc: () => mockUserRef };
       if (coll === "wallets") return { doc: () => mockWalletRef };
       if (coll === "transactions") return { doc: () => mockLedgerRef };
-      return { doc: () => ({}) };
+      if (coll === "gateway_processed_webhooks" || coll === "gateway_idempotency_references") {
+        return {
+          doc: (docId: string) => ({
+            get: jest.fn().mockImplementation(() =>
+              Promise.resolve({ exists: processedWebhooksMap.has(docId) })
+            ),
+            set: jest.fn().mockImplementation(() => {
+              processedWebhooksMap.add(docId);
+              return Promise.resolve();
+            }),
+          }),
+        };
+      }
+      return { doc: () => ({ get: jest.fn().mockResolvedValue({ exists: false }), set: jest.fn().mockResolvedValue({}) }) };
     });
 
     let attemptCount = 0;

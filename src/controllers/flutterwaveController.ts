@@ -1276,10 +1276,6 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         }
       }
 
-      if (flwId) {
-        await idempotency.saveWebhookProcessed(flwId);
-      }
-
       res.status(200).json({ success: true, message: "Webhook payload verified" });
       return;
     }
@@ -1456,6 +1452,9 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
               reason: "Unmatched user for incoming virtual account transfer",
               updatedAt: new Date().toISOString(),
             }, { merge: true });
+            if (flwId) {
+              await idempotency.saveWebhookProcessed(flwId);
+            }
           }
         }
       } else {
@@ -1468,14 +1467,13 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
               reason: payload.data?.processor_response || payload.data?.narration || "Payment declined or canceled",
               updatedAt: new Date().toISOString(),
             }, { merge: true });
+            if (flwId) {
+              await idempotency.saveWebhookProcessed(flwId);
+            }
           } catch (uErr: any) {
             logger.warn(`[Webhook charge.completed] Failed to update pending funding doc: ${uErr.message}`);
           }
         }
-      }
-
-      if (flwId) {
-        await idempotency.saveWebhookProcessed(flwId);
       }
 
       res.status(200).json({ success: true, message: "Webhook payload verified" });
