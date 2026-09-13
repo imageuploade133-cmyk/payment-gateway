@@ -1049,27 +1049,73 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
               const walletExists = walletDoc.exists;
 
               const oldBalance = Number(userDoc.data()?.balance) || 0;
-              const updatedBal = oldBalance + amount;
+              const userData = userDoc.data() || {};
+              const currentDebt = Math.max(0, Number(userData.outstandingDebt) || 0);
 
-              logger.info(`[verifyPayment] Processing WALLET_FUNDING ledger and atomically crediting wallet...`);
+              // Integer minor units calculation to prevent floating point imprecision
+              const amountMinor = Math.round(amount * 100);
+              const debtMinor = Math.round(currentDebt * 100);
 
-              transaction.update(userRef, {
-                balance: FieldValue.increment(amount),
+              const debtRecoveredMinor = Math.min(amountMinor, debtMinor);
+              const netCreditMinor = amountMinor - debtRecoveredMinor;
+
+              const debtRecovered = debtRecoveredMinor / 100;
+              const netCredit = netCreditMinor / 100;
+
+              logger.info(`[verifyPayment] Processing WALLET_FUNDING ledger and atomically crediting wallet (Funding: ₦${amount}, Debt Recovered: ₦${debtRecovered}, Net Credit: ₦${netCredit})...`);
+
+              const userUpdates: Record<string, any> = {
+                balance: FieldValue.increment(netCredit),
                 updatedAt: new Date().toISOString(),
-              });
+              };
+
+              if (debtRecovered > 0) {
+                userUpdates.outstandingDebt = FieldValue.increment(-debtRecovered);
+              }
+
+              transaction.update(userRef, userUpdates);
 
               if (walletExists) {
                 transaction.update(walletRef, {
-                  balance: FieldValue.increment(amount),
+                  balance: FieldValue.increment(netCredit),
                   updatedAt: new Date().toISOString(),
                 });
               } else {
                 transaction.set(walletRef, {
                   userId,
                   currency: "NGN",
-                  balance: amount,
+                  balance: netCredit,
                   createdAt: new Date().toISOString(),
                   updatedAt: new Date().toISOString(),
+                });
+              }
+
+              if (debtRecovered > 0) {
+                const debtTxRef = `recovery-${referenceToUse}`;
+                const debtTxDocRef = adminDb.collection("transactions").doc(`tx-${debtTxRef}`);
+                transaction.set(debtTxDocRef, {
+                  userId,
+                  amount: debtRecovered,
+                  currency: "NGN",
+                  reference: debtTxRef,
+                  type: "DEBT_RECOVERY",
+                  category: "DEDUCTION",
+                  direction: "DEBIT",
+                  description: `Automatic Recovery for Outstanding Debt (₦${debtRecovered.toLocaleString()})`,
+                  recipientName: "System Recovery",
+                  status: "SUCCESS",
+                  date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
+                  time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+                  fee: 0,
+                  totalDebited: debtRecovered,
+                  totalCredited: 0,
+                  createdAt: new Date().toISOString(),
+                  completedAt: new Date().toISOString(),
+                  metadata: {
+                    fundingReference: referenceToUse,
+                    recoveredAmount: debtRecovered,
+                    originalAmount: amount,
+                  },
                 });
               }
 
