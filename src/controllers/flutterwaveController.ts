@@ -1327,11 +1327,12 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
       const canonicalStatus = mapProviderStatus(statusRaw);
 
       if (adminDb && ref) {
+        const db = adminDb;
         try {
-          const transferRef = adminDb.collection("transfers").doc(ref);
-          const unifiedRef = adminDb.collection("transactions").doc(`tx-${ref}`);
+          const transferRef = db.collection("transfers").doc(ref);
+          const unifiedRef = db.collection("transactions").doc(`tx-${ref}`);
 
-          await adminDb.runTransaction(async (t) => {
+          await db.runTransaction(async (t) => {
             const transferSnap = await t.get(transferRef);
             if (transferSnap.exists && (transferSnap.data()?.status === "SUCCESS" || transferSnap.data()?.status === "FAILED")) {
               return;
@@ -1343,14 +1344,14 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
               const userId = txData.userId || transferSnap.data()?.userId;
               const refundAmount = Number(txData.totalDebited) || Number(txData.amount) || 0;
 
-              if (userId && refundAmount > 0 && adminDb) {
-                const userRef = adminDb.collection("users").doc(userId);
-                const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
+              if (userId && refundAmount > 0) {
+                const userRef = db.collection("users").doc(userId);
+                const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
 
                 t.update(userRef, { balance: FieldValue.increment(refundAmount), updatedAt: new Date().toISOString() });
                 t.update(walletRef, { balance: FieldValue.increment(refundAmount), updatedAt: new Date().toISOString() });
 
-                const refundLedgerRef = adminDb.collection("transactions").doc(`tx-REFUND-${ref}`);
+                const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${ref}`);
                 t.set(refundLedgerRef, {
                   userId,
                   amount: refundAmount,
@@ -1406,12 +1407,13 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         const userId = await resolveUserIdFromPayload(payload.data, txRef);
 
         if (userId && adminDb) {
+          const db = adminDb;
           try {
-            const userRef = adminDb.collection("users").doc(userId);
-            const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
-            const ledgerRef = adminDb.collection("transactions").doc(ledgerDocId);
+            const userRef = db.collection("users").doc(userId);
+            const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
+            const ledgerRef = db.collection("transactions").doc(ledgerDocId);
 
-            await adminDb.runTransaction(async (transaction) => {
+            await db.runTransaction(async (transaction) => {
               const ledgerSnap = await transaction.get(ledgerRef);
               const ledgerData = (ledgerSnap.exists ? ledgerSnap.data() : {}) || {};
 
@@ -1491,7 +1493,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
               if (debtRecovered > 0) {
                 const debtTxRef = `recovery-${txRef || transactionId}`;
-                const debtTxDocRef = adminDb.collection("transactions").doc(`tx-${debtTxRef}`);
+                const debtTxDocRef = db.collection("transactions").doc(`tx-${debtTxRef}`);
                 transaction.set(debtTxDocRef, {
                   userId,
                   amount: debtRecovered,
