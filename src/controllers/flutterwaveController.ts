@@ -989,15 +989,16 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
       };
 
       if (adminDb && flwId) {
+        const db = adminDb;
         try {
           const userId = await resolveUserIdFromPayload(result, String(referenceToUse));
 
           if (userId) {
-            const userRef = adminDb.collection("users").doc(userId);
-            const walletRef = adminDb.collection("wallets").doc(`${userId}_NGN`);
-            const ledgerRef = adminDb.collection("transactions").doc(ledgerDocId);
+            const userRef = db.collection("users").doc(userId);
+            const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
+            const ledgerRef = db.collection("transactions").doc(ledgerDocId);
 
-            txOutcome = await adminDb.runTransaction(async (transaction) => {
+            txOutcome = await db.runTransaction(async (transaction) => {
               const ledgerSnap = await transaction.get(ledgerRef);
               const ledgerData = (ledgerSnap.exists ? ledgerSnap.data() : {}) || {};
 
@@ -1061,6 +1062,7 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
 
               const debtRecovered = debtRecoveredMinor / 100;
               const netCredit = netCreditMinor / 100;
+              const updatedBal = oldBalance + netCredit;
 
               logger.info(`[verifyPayment] Processing WALLET_FUNDING ledger and atomically crediting wallet (Funding: ₦${amount}, Debt Recovered: ₦${debtRecovered}, Net Credit: ₦${netCredit})...`);
 
@@ -1092,7 +1094,7 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
 
               if (debtRecovered > 0) {
                 const debtTxRef = `recovery-${referenceToUse}`;
-                const debtTxDocRef = adminDb.collection("transactions").doc(`tx-${debtTxRef}`);
+                const debtTxDocRef = db.collection("transactions").doc(`tx-${debtTxRef}`);
                 transaction.set(debtTxDocRef, {
                   userId,
                   amount: debtRecovered,
