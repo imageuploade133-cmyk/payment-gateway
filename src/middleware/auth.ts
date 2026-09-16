@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env";
 import logger from "../config/logger";
-import { firebase } from "../config/firebase";
+import { firebase, adminDb } from "../config/firebase";
 
 export interface AuthenticatedRequest extends Request {
   user?: any;
@@ -48,7 +48,30 @@ export async function gatewayAuthMiddleware(
         const decoded = await getAuth(firebase.app).verifyIdToken(providedToken);
         req.user = decoded;
         firebaseVerified = true;
-        logger.info(`[Auth] Firebase ID Token successfully verified | user=${decoded.uid} | reqId=${reqId}`);
+
+        // Server-authoritative session enforcement
+        const providedSessionId = (req.headers["x-session-id"] || req.headers["X-Session-ID"]) as string;
+        if (adminDb && decoded.uid) {
+          try {
+            const userDoc = await adminDb.collection("users").doc(decoded.uid).get();
+            if (userDoc.exists) {
+              const activeSessionId = userDoc.data()?.activeSessionId;
+              if (activeSessionId && providedSessionId !== activeSessionId) {
+                logger.warn(`[Auth] REVOKED_SESSION: Provided session '${providedSessionId}' does not match active session '${activeSessionId}' for user ${decoded.uid} | reqId=${reqId}`);
+                res.status(401).json({
+                  success: false,
+                  code: "REVOKED_SESSION",
+                  message: "Your account was signed in on another device. You have been logged out on this device.",
+                });
+                return;
+              }
+            }
+          } catch (sErr: any) {
+            logger.warn(`[Auth] Session check exception for user ${decoded.uid}: ${sErr.message}`);
+          }
+        }
+
+        logger.info(`[Auth] Firebase ID Token & Session successfully verified | user=${decoded.uid} | reqId=${reqId}`);
         return next();
       } catch (fbError: any) {
         logger.debug(`[Auth] Firebase token verification attempt failed or not a Firebase token | error=${fbError.message} | reqId=${reqId}`);
