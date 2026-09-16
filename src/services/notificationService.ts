@@ -32,10 +32,14 @@ export class NotificationService {
     const now = new Date().toISOString();
     let notificationId: string | undefined;
 
-    // 1. Save to Firestore under user's notification subcollection (Preserve notification history)
+    // 1. Save to Firestore under user's notification subcollection (Deterministic history ID prevents duplicate history on retry)
     if (adminDb) {
       try {
-        const notificationRef = adminDb.collection("users").doc(userId).collection("notifications").doc();
+        const histDocId = payload.reference ? `tx-notif-${payload.reference}` : undefined;
+        const notificationRef = histDocId
+          ? adminDb.collection("users").doc(userId).collection("notifications").doc(histDocId)
+          : adminDb.collection("users").doc(userId).collection("notifications").doc();
+
         await notificationRef.set({
           title: payload.title,
           body: payload.body,
@@ -50,7 +54,7 @@ export class NotificationService {
           recipientName: payload.recipientName || "",
           bankName: payload.bankName || "",
           channel: payload.channel || "",
-        });
+        }, { merge: true });
         notificationId = notificationRef.id;
         logger.info(`[NotificationService] Saved notification history for user=${userId} | docId=${notificationId}`);
       } catch (fsErr: any) {
