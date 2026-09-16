@@ -19,147 +19,163 @@ export interface NotificationPayload {
 
 export class NotificationService {
   /**
-   * Sends a push notification to all registered tokens for a user and saves the notification in history.
+   * Sends a push notification to all registered tokens for a user, saves notification history,
+   * and returns the number of successfully delivered FCM pushes.
    * @param userId The ID of the recipient user.
-   * @param payload The notification content (title, body, type, url, etc.).
+   * @param payload The notification content.
+   * @returns Object containing success count, total target tokens count, and notification history document ID.
    */
-  public static async sendPushNotification(userId: string, payload: NotificationPayload): Promise<void> {
-    try {
-      const now = new Date().toISOString();
+  public static async sendPushNotification(
+    userId: string,
+    payload: NotificationPayload
+  ): Promise<{ successCount: number; totalTokens: number; notificationId?: string }> {
+    const now = new Date().toISOString();
+    let notificationId: string | undefined;
 
-      // 1. Save to Firestore under user's notification subcollection
-      if (adminDb) {
-        try {
-          const notificationRef = adminDb.collection("users").doc(userId).collection("notifications").doc();
-          await notificationRef.set({
+    // 1. Save to Firestore under user's notification subcollection (Preserve notification history)
+    if (adminDb) {
+      try {
+        const notificationRef = adminDb.collection("users").doc(userId).collection("notifications").doc();
+        await notificationRef.set({
+          title: payload.title,
+          body: payload.body,
+          message: payload.body, // compatibility fallback
+          type: payload.type,
+          read: false,
+          createdAt: now,
+          url: payload.url || "",
+          amount: payload.amount !== undefined ? payload.amount : null,
+          currency: payload.currency || "NGN",
+          reference: payload.reference || "",
+          recipientName: payload.recipientName || "",
+          bankName: payload.bankName || "",
+          channel: payload.channel || "",
+        });
+        notificationId = notificationRef.id;
+        logger.info(`[NotificationService] Saved notification history for user=${userId} | docId=${notificationId}`);
+      } catch (fsErr: any) {
+        logger.error(`[NotificationService] Failed to save history for user=${userId} | error=${fsErr.message}`);
+      }
+    }
+
+    // 2. Fetch all registered tokens for this user
+    if (!adminDb) {
+      logger.warn(`[NotificationService] adminDb not initialized. Skipping FCM dispatch.`);
+      throw new Error("Database not initialized for FCM dispatch.");
+    }
+
+    const tokensSnapshot = await adminDb.collection("fcm_tokens").where("userId", "==", userId).get();
+    if (tokensSnapshot.empty) {
+      logger.info(`[NotificationService] No active FCM tokens registered for user=${userId}`);
+      throw new Error(`No active FCM tokens registered for user=${userId}`);
+    }
+
+    const tokensList: { id: string; token: string; platform: string }[] = [];
+    tokensSnapshot.forEach((docSnap) => {
+      const data = docSnap.data();
+      if (data.token) {
+        tokensList.push({
+          id: docSnap.id,
+          token: data.token,
+          platform: data.platform || "web",
+        });
+      }
+    });
+
+    logger.info(`[NotificationService] Found ${tokensList.length} FCM token(s) for user=${userId}`);
+
+    // 3. Send notifications via FCM
+    const messaging = getMessaging();
+    const tokensToDelete: string[] = [];
+    let successCount = 0;
+    let lastFcmError: string | null = null;
+
+    for (const t of tokensList) {
+      try {
+        const message = {
+          token: t.token,
+          notification: {
             title: payload.title,
             body: payload.body,
-            message: payload.body, // compatibility fallback
+          },
+          data: {
+            title: payload.title,
+            body: payload.body,
             type: payload.type,
-            read: false,
-            createdAt: now,
-            url: payload.url || "",
-            amount: payload.amount !== undefined ? payload.amount : null,
-            currency: payload.currency || "NGN",
+            url: payload.reference ? `/?txRef=${payload.reference}` : (payload.url || ""),
+            click_action: payload.reference ? `/?txRef=${payload.reference}` : (payload.url || ""),
             reference: payload.reference || "",
-            recipientName: payload.recipientName || "",
-            bankName: payload.bankName || "",
-            channel: payload.channel || "",
-          });
-          logger.info(`[NotificationService] Saved notification history for user=${userId} | docId=${notificationRef.id}`);
-        } catch (fsErr: any) {
-          logger.error(`[NotificationService] Failed to save history for user=${userId} | error=${fsErr.message}`);
-        }
-      }
-
-      // 2. Fetch all registered tokens for this user
-      if (!adminDb) {
-        logger.warn(`[NotificationService] adminDb not initialized. Skipping FCM dispatch.`);
-        return;
-      }
-
-      const tokensSnapshot = await adminDb.collection("fcm_tokens").where("userId", "==", userId).get();
-      if (tokensSnapshot.empty) {
-        logger.info(`[NotificationService] No active FCM tokens registered for user=${userId}`);
-        return;
-      }
-
-      const tokensList: { id: string; token: string; platform: string }[] = [];
-      tokensSnapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        if (data.token) {
-          tokensList.push({
-            id: docSnap.id,
-            token: data.token,
-            platform: data.platform || "web",
-          });
-        }
-      });
-
-      logger.info(`[NotificationService] Found ${tokensList.length} FCM token(s) for user=${userId}`);
-
-      // 3. Send notifications via FCM
-      const messaging = getMessaging();
-      const tokensToDelete: string[] = [];
-
-      for (const t of tokensList) {
-        try {
-          const message = {
-            token: t.token,
+            transactionReference: payload.reference || "",
+            txRef: payload.reference || "",
+          },
+          android: {
+            priority: "high" as const,
             notification: {
-              title: payload.title,
-              body: payload.body,
+              sound: "default",
+              clickAction: "FLUTTER_NOTIFICATION_CLICK",
             },
-            data: {
-              title: payload.title,
-              body: payload.body,
-              type: payload.type,
-              url: payload.reference ? `/?txRef=${payload.reference}` : (payload.url || ""),
-              click_action: payload.reference ? `/?txRef=${payload.reference}` : (payload.url || ""),
-              reference: payload.reference || "",
-              transactionReference: payload.reference || "",
-              txRef: payload.reference || "",
-            },
-            android: {
-              priority: "high" as const,
-              notification: {
+          },
+          apns: {
+            payload: {
+              aps: {
                 sound: "default",
-                clickAction: "FLUTTER_NOTIFICATION_CLICK",
+                badge: 1,
               },
             },
-            apns: {
-              payload: {
-                aps: {
-                  sound: "default",
-                  badge: 1,
-                },
-              },
+          },
+          webpush: {
+            headers: {
+              Urgency: "high",
             },
-            webpush: {
-              headers: {
-                Urgency: "high",
-              },
-              notification: {
-                icon: "https://i.ibb.co/WWjZrtC7/E-Tech.png",
-                badge: "https://i.ibb.co/WWjZrtC7/E-Tech.png",
-              },
+            notification: {
+              icon: "https://i.ibb.co/WWjZrtC7/E-Tech.png",
+              badge: "https://i.ibb.co/WWjZrtC7/E-Tech.png",
             },
-          };
+          },
+        };
 
-          const fcmResponse = await messaging.send(message);
-          logger.info(`[NotificationService] Push successfully dispatched to platform=${t.platform} | fcmId=${fcmResponse}`);
-        } catch (fcmErr: any) {
-          const errMsg = fcmErr.message || "";
-          logger.warn(`[NotificationService] Failed to send push to token=${t.id} | error=${errMsg}`);
+        const fcmResponse = await messaging.send(message);
+        successCount++;
+        logger.info(`[NotificationService] Push successfully dispatched to platform=${t.platform} | fcmId=${fcmResponse}`);
+      } catch (fcmErr: any) {
+        const errMsg = fcmErr.message || "";
+        lastFcmError = errMsg;
+        logger.warn(`[NotificationService] Failed to send push to token=${t.id} | error=${errMsg}`);
 
-          // Automatic Invalid/Expired Token Cleanup
-          const isInvalidToken = 
-            fcmErr.code === "messaging/invalid-registration-token" ||
-            fcmErr.code === "messaging/registration-token-not-registered" ||
-            errMsg.includes("registration-token-not-registered") ||
-            errMsg.includes("invalid-registration-token") ||
-            errMsg.includes("InvalidRegistration") ||
-            errMsg.includes("NotRegistered");
+        // Automatic Invalid/Expired Token Cleanup
+        const isInvalidToken =
+          fcmErr.code === "messaging/invalid-registration-token" ||
+          fcmErr.code === "messaging/registration-token-not-registered" ||
+          errMsg.includes("registration-token-not-registered") ||
+          errMsg.includes("invalid-registration-token") ||
+          errMsg.includes("InvalidRegistration") ||
+          errMsg.includes("NotRegistered");
 
-          if (isInvalidToken) {
-            tokensToDelete.push(t.id);
-          }
+        if (isInvalidToken) {
+          tokensToDelete.push(t.id);
         }
       }
-
-      // Perform cleanups asynchronously to avoid blocking
-      if (tokensToDelete.length > 0 && adminDb) {
-        const db = adminDb;
-        const batch = db.batch();
-        tokensToDelete.forEach((tokenId) => {
-          batch.delete(db.collection("fcm_tokens").doc(tokenId));
-        });
-        await batch.commit();
-        logger.info(`[NotificationService] Automatically deleted ${tokensToDelete.length} invalid/expired FCM token(s).`);
-      }
-
-    } catch (err: any) {
-      logger.error(`[NotificationService Exception] Failed to execute notification dispatch: ${err.message}`);
     }
+
+    // Perform cleanups asynchronously to avoid blocking
+    if (tokensToDelete.length > 0 && adminDb) {
+      const db = adminDb;
+      const batch = db.batch();
+      tokensToDelete.forEach((tokenId) => {
+        batch.delete(db.collection("fcm_tokens").doc(tokenId));
+      });
+      await batch.commit().catch((bErr) => logger.error(`[NotificationService] Token cleanup error: ${bErr.message}`));
+      logger.info(`[NotificationService] Automatically deleted ${tokensToDelete.length} invalid/expired FCM token(s).`);
+    }
+
+    if (successCount === 0) {
+      throw new Error(lastFcmError ? `FCM dispatch failed for all target tokens: ${lastFcmError}` : "FCM dispatch failed for all target tokens.");
+    }
+
+    return {
+      successCount,
+      totalTokens: tokensList.length,
+      notificationId,
+    };
   }
 }
