@@ -18,6 +18,89 @@ import { NotificationService } from "../services/notificationService";
 
 const idempotency = FirestoreIdempotency.getInstance();
 
+async function dispatchCreditNotification(
+  userId: string,
+  amount: number,
+  currency: string,
+  reference: string,
+  ledgerDocId: string
+): Promise<void> {
+  if (!adminDb) return;
+  const db = adminDb;
+  const txRef = db.collection("transactions").doc(ledgerDocId);
+
+  let shouldDispatch = false;
+  const now = Date.now();
+  const leaseTimeoutMs = 60 * 1000; // 60s processing lease
+
+  try {
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(txRef);
+      if (!snap.exists) return;
+
+      const data = snap.data() || {};
+
+      if (data.notificationStatus === "SENT" || data.creditedNotificationSent === true) {
+        return;
+      }
+
+      if (data.notificationStatus === "PROCESSING" && data.notificationLeaseExpiresAt) {
+        if (now < Number(data.notificationLeaseExpiresAt)) {
+          return;
+        }
+      }
+
+      t.set(txRef, {
+        notificationStatus: "PROCESSING",
+        notificationLeaseExpiresAt: now + leaseTimeoutMs,
+        notificationLastAttemptAt: new Date().toISOString()
+      }, { merge: true });
+
+      shouldDispatch = true;
+    });
+
+    if (!shouldDispatch) {
+      logger.info(`[dispatchCreditNotification] Notification already SENT or currently PROCESSING for tx=${ledgerDocId}. Skipping.`);
+      return;
+    }
+
+    const formattedAmt = amount.toLocaleString("en-NG", { minimumFractionDigits: 2 });
+    logger.info(`[dispatchCreditNotification] Dispatching FCM push notification to user=${userId} for ₦${formattedAmt} | ref=${reference}`);
+
+    await NotificationService.sendPushNotification(userId, {
+      title: "💰 Money Received",
+      body: `₦${formattedAmt} has been credited to your wallet.`,
+      type: "transaction",
+      reference,
+      amount,
+      currency: currency || "NGN"
+    });
+
+    await txRef.set({
+      notificationStatus: "SENT",
+      creditedNotificationSent: true,
+      creditedNotificationSentAt: new Date().toISOString(),
+      notificationLeaseExpiresAt: null
+    }, { merge: true });
+
+    logger.info(`[dispatchCreditNotification] SUCCESS: FCM push notification delivered and marked SENT for user=${userId} | tx=${ledgerDocId}`);
+
+  } catch (fcmErr: any) {
+    logger.error(`[dispatchCreditNotification Error] FCM dispatch failed for user=${userId} | tx=${ledgerDocId}: ${fcmErr.message}`);
+
+    try {
+      await txRef.set({
+        notificationStatus: "FAILED",
+        notificationLeaseExpiresAt: null,
+        notificationLastError: fcmErr.message || "FCM delivery failed"
+      }, { merge: true });
+    } catch (relErr: any) {
+      logger.error(`[dispatchCreditNotification Release Error] Failed releasing notification lease for tx=${ledgerDocId}: ${relErr.message}`);
+    }
+  }
+}
+
+
 
 function maskAccount(num?: string): string | null {
   if (!num) return null;
@@ -1204,54 +1287,12 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
               };
             });
 
-            if (txOutcome.credited) {
-              logger.info(`[verifyPayment] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
-
-              // Event-driven incoming wallet credit push notification (Failure-safe FCM delivery & atomic claim)
-              try {
-                const notifClaimRef = db.collection("transactions").doc(ledgerDocId);
-                let claimGranted = false;
-                await db.runTransaction(async (tNotif) => {
-                  const snap = await tNotif.get(notifClaimRef);
-                  if (snap.exists && snap.data()?.creditedNotificationSent === true) {
-                    return;
-                  }
-                  // Reserve claim temporarily during dispatch
-                  tNotif.set(notifClaimRef, {
-                    creditedNotificationPending: true,
-                    creditedNotificationAttemptAt: new Date().toISOString()
-                  }, { merge: true });
-                  claimGranted = true;
-                });
-
-                if (claimGranted) {
-                  const formattedAmt = amount.toLocaleString("en-NG", { minimumFractionDigits: 2 });
-                  logger.info(`[verifyPayment Notification] Dispatching FCM push notification to user=${userId} for ₦${formattedAmt}`);
-                  try {
-                    await NotificationService.sendPushNotification(userId, {
-                      title: "💰 Money Received",
-                      body: `₦${formattedAmt} has been credited to your wallet.`,
-                      type: "transaction",
-                      reference: String(referenceToUse),
-                      amount,
-                      currency: result.currency || "NGN"
-                    });
-                    // Mark as successfully sent ONLY after FCM dispatch succeeds
-                    await notifClaimRef.set({
-                      creditedNotificationSent: true,
-                      creditedNotificationSentAt: new Date().toISOString()
-                    }, { merge: true });
-                  } catch (fcmErr: any) {
-                    logger.error(`[verifyPayment Notification Error] FCM push notification failure for user=${userId}: ${fcmErr.message}`);
-                    // Release claim on failure so future retry/verification can re-attempt delivery
-                    await notifClaimRef.set({ creditedNotificationPending: false }, { merge: true });
-                  }
-                } else {
-                  logger.info(`[verifyPayment Notification] Notification event already claimed for tx=${ledgerDocId}. Skipping duplicate dispatch.`);
-                }
-              } catch (notifClaimErr: any) {
-                logger.error(`[verifyPayment Notification Claim Error] Failed claiming notification event: ${notifClaimErr.message}`);
+            if (txOutcome.credited || txOutcome.alreadyCredited) {
+              if (txOutcome.credited) {
+                logger.info(`[verifyPayment] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
               }
+              dispatchCreditNotification(userId, amount, result.currency || "NGN", String(referenceToUse), ledgerDocId)
+                .catch((err) => logger.error(`[verifyPayment] dispatchCreditNotification exception: ${err.message}`));
             }
           }
         } catch (creditErr: any) {
@@ -1640,52 +1681,8 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
             }
 
             logger.info(`[Webhook charge.completed] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
-
-            // Event-driven incoming wallet credit push notification (Failure-safe FCM delivery & atomic claim)
-            try {
-              const notifClaimRef = db.collection("transactions").doc(ledgerDocId);
-              let claimGranted = false;
-              await db.runTransaction(async (tNotif) => {
-                const snap = await tNotif.get(notifClaimRef);
-                if (snap.exists && snap.data()?.creditedNotificationSent === true) {
-                  return;
-                }
-                // Reserve claim temporarily during dispatch
-                tNotif.set(notifClaimRef, {
-                  creditedNotificationPending: true,
-                  creditedNotificationAttemptAt: new Date().toISOString()
-                }, { merge: true });
-                claimGranted = true;
-              });
-
-              if (claimGranted) {
-                const formattedAmt = amount.toLocaleString("en-NG", { minimumFractionDigits: 2 });
-                logger.info(`[Webhook Notification] Dispatching FCM push notification to user=${userId} for ₦${formattedAmt}`);
-                try {
-                  await NotificationService.sendPushNotification(userId, {
-                    title: "💰 Money Received",
-                    body: `₦${formattedAmt} has been credited to your wallet.`,
-                    type: "transaction",
-                    reference: txRef || `DEP-${transactionId}`,
-                    amount,
-                    currency: payload.data?.currency || "NGN"
-                  });
-                  // Mark as successfully sent ONLY after FCM dispatch succeeds
-                  await notifClaimRef.set({
-                    creditedNotificationSent: true,
-                    creditedNotificationSentAt: new Date().toISOString()
-                  }, { merge: true });
-                } catch (fcmErr: any) {
-                  logger.error(`[Webhook Notification Error] FCM push notification failure for user=${userId}: ${fcmErr.message}`);
-                  // Release claim on failure so future retry/verification can re-attempt delivery
-                  await notifClaimRef.set({ creditedNotificationPending: false }, { merge: true });
-                }
-              } else {
-                logger.info(`[Webhook Notification] Notification event already claimed for tx=${ledgerDocId}. Skipping duplicate dispatch.`);
-              }
-            } catch (notifClaimErr: any) {
-              logger.error(`[Webhook Notification Claim Error] Failed claiming notification event: ${notifClaimErr.message}`);
-            }
+            dispatchCreditNotification(userId, amount, payload.data?.currency || "NGN", txRef || `DEP-${transactionId}`, ledgerDocId)
+              .catch((err) => logger.error(`[Webhook charge.completed] dispatchCreditNotification exception: ${err.message}`));
           } catch (txError: any) {
             logger.error(`[Webhook charge.completed] Firestore Credit Transaction FAILED for User: ${userId} | Error: ${txError.message}`);
           }
