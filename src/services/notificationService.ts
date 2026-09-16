@@ -9,13 +9,19 @@ export interface NotificationPayload {
   body: string;
   type: NotificationType;
   url?: string;
+  amount?: number;
+  currency?: string;
+  reference?: string;
+  recipientName?: string;
+  bankName?: string;
+  channel?: string;
 }
 
 export class NotificationService {
   /**
    * Sends a push notification to all registered tokens for a user and saves the notification in history.
    * @param userId The ID of the recipient user.
-   * @param payload The notification content (title, body, type, url).
+   * @param payload The notification content (title, body, type, url, etc.).
    */
   public static async sendPushNotification(userId: string, payload: NotificationPayload): Promise<void> {
     try {
@@ -33,6 +39,12 @@ export class NotificationService {
             read: false,
             createdAt: now,
             url: payload.url || "",
+            amount: payload.amount !== undefined ? payload.amount : null,
+            currency: payload.currency || "NGN",
+            reference: payload.reference || "",
+            recipientName: payload.recipientName || "",
+            bankName: payload.bankName || "",
+            channel: payload.channel || "",
           });
           logger.info(`[NotificationService] Saved notification history for user=${userId} | docId=${notificationRef.id}`);
         } catch (fsErr: any) {
@@ -82,8 +94,11 @@ export class NotificationService {
               title: payload.title,
               body: payload.body,
               type: payload.type,
-              url: payload.url || "",
-              click_action: payload.url || "",
+              url: payload.reference ? `/?txRef=${payload.reference}` : (payload.url || ""),
+              click_action: payload.reference ? `/?txRef=${payload.reference}` : (payload.url || ""),
+              reference: payload.reference || "",
+              transactionReference: payload.reference || "",
+              txRef: payload.reference || "",
             },
             android: {
               priority: "high" as const,
