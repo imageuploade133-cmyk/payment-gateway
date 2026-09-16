@@ -40,58 +40,106 @@ export async function gatewayAuthMiddleware(
 
   // 2. JWT Authentication path (Can be enabled/toggled)
   if (providedToken) {
-    let firebaseVerified = false;
-
     if (firebase.app) {
       try {
         const { getAuth } = require("firebase-admin/auth");
         const decoded = await getAuth(firebase.app).verifyIdToken(providedToken);
+        const uid = decoded.uid;
+
+        if (!uid) {
+          logger.warn(`[Auth] Firebase token missing UID claim | reqId=${reqId}`);
+          res.status(401).json({
+            success: false,
+            code: "REVOKED_SESSION",
+            message: "Unauthorized: Invalid token claims.",
+          });
+          return;
+        }
+
         req.user = decoded;
-        firebaseVerified = true;
 
         // Server-authoritative session enforcement
         const providedSessionId = (req.headers["x-session-id"] || req.headers["X-Session-ID"]) as string;
-        if (adminDb && decoded.uid) {
-          try {
-            const userDoc = await adminDb.collection("users").doc(decoded.uid).get();
-            if (userDoc.exists) {
-              const activeSessionId = userDoc.data()?.activeSessionId;
-              if (activeSessionId && providedSessionId !== activeSessionId) {
-                logger.warn(`[Auth] REVOKED_SESSION: Provided session '${providedSessionId}' does not match active session '${activeSessionId}' for user ${decoded.uid} | reqId=${reqId}`);
-                res.status(401).json({
-                  success: false,
-                  code: "REVOKED_SESSION",
-                  message: "Your account was signed in on another device. You have been logged out on this device.",
-                });
-                return;
-              }
-            }
-          } catch (sErr: any) {
-            logger.warn(`[Auth] Session check exception for user ${decoded.uid}: ${sErr.message}`);
-          }
+
+        if (!providedSessionId) {
+          logger.warn(`[Auth] REVOKED_SESSION: Missing X-Session-ID header for user ${uid} | reqId=${reqId}`);
+          res.status(401).json({
+            success: false,
+            code: "REVOKED_SESSION",
+            message: "Missing session ID. You have been logged out on this device.",
+          });
+          return;
         }
 
-        logger.info(`[Auth] Firebase ID Token & Session successfully verified | user=${decoded.uid} | reqId=${reqId}`);
+        if (!adminDb) {
+          logger.error(`[Auth] REVOKED_SESSION: Firestore adminDb unavailable during session check for user ${uid} | reqId=${reqId}`);
+          res.status(401).json({
+            success: false,
+            code: "REVOKED_SESSION",
+            message: "Session validation failed. Please sign in again.",
+          });
+          return;
+        }
+
+        try {
+          const userDoc = await adminDb.collection("users").doc(uid).get();
+
+          if (!userDoc.exists) {
+            logger.warn(`[Auth] REVOKED_SESSION: User record not found for user ${uid} | reqId=${reqId}`);
+            res.status(401).json({
+              success: false,
+              code: "REVOKED_SESSION",
+              message: "Account record not found.",
+            });
+            return;
+          }
+
+          const activeSessionId = userDoc.data()?.activeSessionId;
+
+          if (!activeSessionId || providedSessionId !== activeSessionId) {
+            logger.warn(`[Auth] REVOKED_SESSION: Session mismatch for user ${uid}. Provided '${providedSessionId}', Active '${activeSessionId}' | reqId=${reqId}`);
+            res.status(401).json({
+              success: false,
+              code: "REVOKED_SESSION",
+              message: "Your account was signed in on another device. You have been logged out on this device.",
+            });
+            return;
+          }
+        } catch (sErr: any) {
+          logger.error(`[Auth] REVOKED_SESSION: Session check exception for user ${uid}: ${sErr.message} | reqId=${reqId}`);
+          res.status(401).json({
+            success: false,
+            code: "REVOKED_SESSION",
+            message: "Session validation failed.",
+          });
+          return;
+        }
+
+        logger.info(`[Auth] Firebase ID Token & Session successfully verified | user=${uid} | reqId=${reqId}`);
         return next();
       } catch (fbError: any) {
-        logger.debug(`[Auth] Firebase token verification attempt failed or not a Firebase token | error=${fbError.message} | reqId=${reqId}`);
-      }
-    }
-
-    if (!firebaseVerified) {
-      try {
-        const decoded = jwt.verify(providedToken, env.JWT_SECRET);
-        req.user = decoded;
-        logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).sub || "unknown"} | reqId=${reqId}`);
-        return next();
-      } catch (error: any) {
-        logger.warn(`[Auth] JWT verification failed | error=${error.message} | reqId=${reqId}`);
+        logger.warn(`[Auth] Firebase token verification failed | error=${fbError.message} | reqId=${reqId}`);
         res.status(401).json({
           success: false,
-          message: "Unauthorized: Invalid or expired authentication token.",
+          code: "REVOKED_SESSION",
+          message: "Unauthorized: Invalid or expired Firebase ID token.",
         });
         return;
       }
+    }
+
+    try {
+      const decoded = jwt.verify(providedToken, env.JWT_SECRET);
+      req.user = decoded;
+      logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).sub || "unknown"} | reqId=${reqId}`);
+      return next();
+    } catch (error: any) {
+      logger.warn(`[Auth] JWT verification failed | error=${error.message} | reqId=${reqId}`);
+      res.status(401).json({
+        success: false,
+        message: "Unauthorized: Invalid or expired authentication token.",
+      });
+      return;
     }
   }
 
