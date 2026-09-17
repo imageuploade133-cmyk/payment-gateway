@@ -43,6 +43,8 @@ app.use(
       "X-Requested-With",
       "X-Request-ID",
       "X-API-Key",
+      "X-Session-ID",
+      "x-session-id",
     ],
   })
 );
