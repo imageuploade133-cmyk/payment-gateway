@@ -58,61 +58,67 @@ export async function gatewayAuthMiddleware(
 
         req.user = decoded;
 
-        // Server-authoritative session enforcement
-        const providedSessionId = (req.headers["x-session-id"] || req.headers["X-Session-ID"]) as string;
+        // Check if route is an auth/recovery endpoint (PIN reset, OTP send/verify, session setup)
+        const path = req.originalUrl || req.path || req.url || "";
+        const isAuthExempt = path.includes("/auth/") || path.includes("pin-reset-otp") || path.includes("pin-verify-otp") || path.includes("send-otp") || path.includes("verify-otp");
 
-        if (!providedSessionId) {
-          logger.warn(`[Auth] REVOKED_SESSION: Missing X-Session-ID header for user ${uid} | reqId=${reqId}`);
-          res.status(401).json({
-            success: false,
-            code: "REVOKED_SESSION",
-            message: "Missing session ID. You have been logged out on this device.",
-          });
-          return;
-        }
+        if (!isAuthExempt) {
+          // Server-authoritative session enforcement
+          const providedSessionId = (req.headers["x-session-id"] || req.headers["X-Session-ID"]) as string;
 
-        if (!adminDb) {
-          logger.error(`[Auth] REVOKED_SESSION: Firestore adminDb unavailable during session check for user ${uid} | reqId=${reqId}`);
-          res.status(401).json({
-            success: false,
-            code: "REVOKED_SESSION",
-            message: "Session validation failed. Please sign in again.",
-          });
-          return;
-        }
-
-        try {
-          const userDoc = await adminDb.collection("users").doc(uid).get();
-
-          if (!userDoc.exists) {
-            logger.warn(`[Auth] REVOKED_SESSION: User record not found for user ${uid} | reqId=${reqId}`);
+          if (!providedSessionId) {
+            logger.warn(`[Auth] REVOKED_SESSION: Missing X-Session-ID header for user ${uid} | reqId=${reqId}`);
             res.status(401).json({
               success: false,
               code: "REVOKED_SESSION",
-              message: "Account record not found.",
+              message: "Missing session ID. You have been logged out on this device.",
             });
             return;
           }
 
-          const activeSessionId = userDoc.data()?.activeSessionId;
-
-          if (!activeSessionId || providedSessionId !== activeSessionId) {
-            logger.warn(`[Auth] REVOKED_SESSION: Session mismatch for user ${uid}. Provided '${providedSessionId}', Active '${activeSessionId}' | reqId=${reqId}`);
+          if (!adminDb) {
+            logger.error(`[Auth] REVOKED_SESSION: Firestore adminDb unavailable during session check for user ${uid} | reqId=${reqId}`);
             res.status(401).json({
               success: false,
               code: "REVOKED_SESSION",
-              message: "Your account was signed in on another device. You have been logged out on this device.",
+              message: "Session validation failed. Please sign in again.",
             });
             return;
           }
-        } catch (sErr: any) {
-          logger.error(`[Auth] REVOKED_SESSION: Session check exception for user ${uid}: ${sErr.message} | reqId=${reqId}`);
-          res.status(401).json({
-            success: false,
-            code: "REVOKED_SESSION",
-            message: "Session validation failed.",
-          });
-          return;
+
+          try {
+            const userDoc = await adminDb.collection("users").doc(uid).get();
+
+            if (!userDoc.exists) {
+              logger.warn(`[Auth] REVOKED_SESSION: User record not found for user ${uid} | reqId=${reqId}`);
+              res.status(401).json({
+                success: false,
+                code: "REVOKED_SESSION",
+                message: "Account record not found.",
+              });
+              return;
+            }
+
+            const activeSessionId = userDoc.data()?.activeSessionId;
+
+            if (activeSessionId && providedSessionId !== activeSessionId) {
+              logger.warn(`[Auth] REVOKED_SESSION: Session mismatch for user ${uid}. Provided '${providedSessionId}', Active '${activeSessionId}' | reqId=${reqId}`);
+              res.status(401).json({
+                success: false,
+                code: "REVOKED_SESSION",
+                message: "Your account was signed in on another device. You have been logged out on this device.",
+              });
+              return;
+            }
+          } catch (sErr: any) {
+            logger.error(`[Auth] REVOKED_SESSION: Session check exception for user ${uid}: ${sErr.message} | reqId=${reqId}`);
+            res.status(401).json({
+              success: false,
+              code: "REVOKED_SESSION",
+              message: "Session validation failed.",
+            });
+            return;
+          }
         }
 
         logger.info(`[Auth] Firebase ID Token & Session successfully verified | user=${uid} | reqId=${reqId}`);
