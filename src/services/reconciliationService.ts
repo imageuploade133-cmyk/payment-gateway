@@ -1,7 +1,7 @@
 import { adminDb } from "../config/firebase";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import logger from "../config/logger";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, DocumentReference } from "firebase-admin/firestore";
 import { ClubkonnectService } from "./clubkonnect.service";
 
 export class ReconciliationService {
@@ -51,6 +51,46 @@ export class ReconciliationService {
   private static instance: ReconciliationService;
 
   private constructor() {}
+
+  private async expireTransferIfStale(
+    reference: string,
+    transferRef: DocumentReference,
+    expiresAt: string
+  ): Promise<boolean> {
+    if (!adminDb) return false;
+
+    const nowIso = new Date().toISOString();
+    return adminDb.runTransaction(async (transaction) => {
+      const freshTransfer = await transaction.get(transferRef);
+      if (!freshTransfer.exists) return false;
+
+      const freshData = freshTransfer.data() || {};
+      if (freshData.status !== "PENDING") return false;
+
+      const effectiveExpiresAt = freshData.expiresAt || expiresAt;
+      if (!effectiveExpiresAt || nowIso < effectiveExpiresAt) return false;
+
+      transaction.set(transferRef, {
+        status: "EXPIRED",
+        expiredAt: nowIso,
+        updatedAt: nowIso,
+        reason: "Transfer remained pending beyond the maximum pending period.",
+      }, { merge: true });
+
+      const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
+      const unifiedTxDoc = await transaction.get(unifiedTxRef);
+      if (unifiedTxDoc.exists) {
+        transaction.set(unifiedTxRef, {
+          status: "EXPIRED",
+          expiredAt: nowIso,
+          updatedAt: nowIso,
+          reason: "Transfer remained pending beyond the maximum pending period.",
+        }, { merge: true });
+      }
+
+      return true;
+    });
+  }
 
   public static getInstance(): ReconciliationService {
     if (!ReconciliationService.instance) {
@@ -118,7 +158,7 @@ export class ReconciliationService {
         return { success: true, status: currentStatus, refunded: true, message: "Refund already processed. Skipping." };
       }
 
-      if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED") {
+      if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED" || currentStatus === "EXPIRED") {
         logger.info(`[Reconciliation Service] Transfer ${reference} is already in a terminal state: ${currentStatus}. Skipping.`);
         return { success: true, status: currentStatus, message: `Already in terminal state: ${currentStatus}` };
       }
@@ -145,6 +185,19 @@ export class ReconciliationService {
       }
 
       if (!flwStatus) {
+        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
+        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
+          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
+          : "";
+        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
+
+        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
+          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
+          if (expired) {
+            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
+          }
+        }
+
         return { success: true, status: "PENDING", message: "Status not found on Flutterwave rails yet." };
       }
 
@@ -161,6 +214,19 @@ export class ReconciliationService {
       logger.info(`[Reconciliation Service] Status mapped for ${reference}: ${currentStatus} -> ${mappedStatus}`);
 
       if (mappedStatus === "PENDING") {
+        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
+        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
+          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
+          : "";
+        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
+
+        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
+          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
+          if (expired) {
+            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
+          }
+        }
+
         return { success: true, status: "PENDING", message: "Transfer is still pending on Flutterwave rails." };
       }
 
