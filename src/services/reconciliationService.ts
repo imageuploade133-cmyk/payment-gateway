@@ -145,7 +145,6 @@ export class ReconciliationService {
       }
 
       if (!flwStatus) {
-        logger.warn(`[Reconciliation Service] Flutterwave status not found for reference: ${reference}. Keeping PENDING.`);
         return { success: true, status: "PENDING", message: "Status not found on Flutterwave rails yet." };
       }
 
