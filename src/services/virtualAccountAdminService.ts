@@ -273,6 +273,12 @@ export class VirtualAccountAdminService {
     const seen = new Set<string>();
     const add = (snap: FirebaseFirestore.QuerySnapshot) => snap.docs.forEach(d => { if (!seen.has(d.id)) { seen.add(d.id); refs.push(d); } });
 
+    // UID is a document identifier, so resolve it directly without a collection scan.
+    if (/^[A-Za-z0-9_-]{6,128}$/.test(term)) {
+      const uidSnap = await adminDb.collection("users").doc(term).get();
+      if (uidSnap.exists) refs.push(uidSnap);
+    }
+
     const normalizedEmail = term.toLowerCase();
     const queries = [
       adminDb.collection("users").where("email", "==", normalizedEmail).limit(10).get(),
