@@ -57,10 +57,11 @@ export class ReconciliationService {
     transferRef: DocumentReference,
     expiresAt: string
   ): Promise<boolean> {
-    if (!adminDb) return false;
+    const db = adminDb;
+    if (!db) return false;
 
     const nowIso = new Date().toISOString();
-    return adminDb.runTransaction(async (transaction) => {
+    return db.runTransaction(async (transaction) => {
       const freshTransfer = await transaction.get(transferRef);
       if (!freshTransfer.exists) return false;
 
@@ -77,7 +78,7 @@ export class ReconciliationService {
         reason: "Transfer remained pending beyond the maximum pending period.",
       }, { merge: true });
 
-      const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
+      const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
       const unifiedTxDoc = await transaction.get(unifiedTxRef);
       if (unifiedTxDoc.exists) {
         transaction.set(unifiedTxRef, {
