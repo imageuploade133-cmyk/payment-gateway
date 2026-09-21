@@ -257,6 +257,8 @@ export class ReconciliationService {
           // Read every Firestore document needed by this transaction before any writes.
           const unifiedTxRef = adminDb!.collection("transactions").doc(`tx-${reference}`);
           const unifiedTxDoc = await transaction.get(unifiedTxRef);
+          const refundLedgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
+          const refundLedgerDoc = await transaction.get(refundLedgerRef);
 
           const userId = freshData.userId;
           const amount = Number(freshData.amount) || 0;
@@ -277,7 +279,7 @@ export class ReconciliationService {
             updatedAt: new Date().toISOString()
           };
 
-          if (mappedStatus === "FAILED" && userId && userId !== "N/A") {
+          if (mappedStatus === "FAILED" && userId && userId !== "N/A" && !refundLedgerDoc.exists) {
             logger.info(`[Refund] User: ${userId}`);
             const userRef = adminDb!.collection("users").doc(userId);
             const userDoc = await transaction.get(userRef);
