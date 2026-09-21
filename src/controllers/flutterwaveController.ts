@@ -777,8 +777,9 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
           bankName: result.bank_name || "Wema Bank",
           accountName: result.account_name,
           currency: result.currency || "NGN",
-          flwRef: result.reference,
+          flwRef: result.flwRef || result.reference,
           txRef: payload.tx_ref,
+          orderRef: result.order_ref || "",
           isPermanent: true,
           status: "active",
           createdAt: new Date().toISOString(),
@@ -1428,33 +1429,39 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
             if (canonicalStatus === "FAILED" || canonicalStatus === "REVERSED") {
               const txSnap = await t.get(unifiedRef);
-              const txData = txSnap.data() || {};
-              const userId = txData.userId || transferSnap.data()?.userId;
-              const refundAmount = Number(txData.totalDebited) || Number(txData.amount) || 0;
+              const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${ref}`);
+              const refundSnap = await t.get(refundLedgerRef);
 
-              if (userId && refundAmount > 0) {
-                const userRef = db.collection("users").doc(userId);
-                const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
+              // The refund ledger itself is the shared atomic idempotency/claim record.
+              // If another refund path already created it, this transaction must not credit again.
+              if (!refundSnap.exists) {
+                const txData = txSnap.data() || {};
+                const userId = txData.userId || transferSnap.data()?.userId;
+                const refundAmount = Number(txData.totalDebited) || Number(txData.amount) || 0;
 
-                t.update(userRef, { balance: FieldValue.increment(refundAmount), updatedAt: new Date().toISOString() });
-                t.update(walletRef, { balance: FieldValue.increment(refundAmount), updatedAt: new Date().toISOString() });
+                if (userId && refundAmount > 0) {
+                  const userRef = db.collection("users").doc(userId);
+                  const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
 
-                const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${ref}`);
-                t.set(refundLedgerRef, {
-                  userId,
-                  amount: refundAmount,
-                  currency: "NGN",
-                  reference: `REFUND-${ref}`,
-                  originalReference: ref,
-                  type: "REFUND",
-                  category: "REFUND",
-                  direction: "CREDIT",
-                  title: `Reversal for Transfer to ${txData.recipientName || "Beneficiary"}`,
-                  description: `Refund for failed transfer (${ref})`,
-                  status: "SUCCESS",
-                  totalCredited: refundAmount,
-                  createdAt: new Date().toISOString(),
-                });
+                  t.update(userRef, { balance: FieldValue.increment(refundAmount), updatedAt: new Date().toISOString() });
+                  t.update(walletRef, { balance: FieldValue.increment(refundAmount), updatedAt: new Date().toISOString() });
+
+                  t.set(refundLedgerRef, {
+                    userId,
+                    amount: refundAmount,
+                    currency: "NGN",
+                    reference: `REFUND-${ref}`,
+                    originalReference: ref,
+                    type: "REFUND",
+                    category: "REFUND",
+                    direction: "CREDIT",
+                    title: `Reversal for Transfer to ${txData.recipientName || "Beneficiary"}`,
+                    description: `Refund for failed transfer (${ref})`,
+                    status: "SUCCESS",
+                    totalCredited: refundAmount,
+                    createdAt: new Date().toISOString(),
+                  });
+                }
               }
             }
 

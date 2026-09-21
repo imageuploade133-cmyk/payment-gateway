@@ -1,7 +1,7 @@
 import { adminDb } from "../config/firebase";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import logger from "../config/logger";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, DocumentReference } from "firebase-admin/firestore";
 import { ClubkonnectService } from "./clubkonnect.service";
 
 export class ReconciliationService {
@@ -51,6 +51,49 @@ export class ReconciliationService {
   private static instance: ReconciliationService;
 
   private constructor() {}
+
+  private async expireTransferIfStale(
+    reference: string,
+    transferRef: DocumentReference,
+    expiresAt: string
+  ): Promise<boolean> {
+    const db = adminDb;
+    if (!db) return false;
+
+    const nowIso = new Date().toISOString();
+    return db.runTransaction(async (transaction) => {
+      const freshTransfer = await transaction.get(transferRef);
+      if (!freshTransfer.exists) return false;
+
+      const freshData = freshTransfer.data() || {};
+      if (freshData.status !== "PENDING") return false;
+
+      const effectiveExpiresAt = freshData.expiresAt || expiresAt;
+      if (!effectiveExpiresAt || nowIso < effectiveExpiresAt) return false;
+
+      // Firestore requires all transaction reads to happen before any writes.
+      const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
+      const unifiedTxDoc = await transaction.get(unifiedTxRef);
+
+      transaction.set(transferRef, {
+        status: "EXPIRED",
+        expiredAt: nowIso,
+        updatedAt: nowIso,
+        reason: "Transfer remained pending beyond the maximum pending period.",
+      }, { merge: true });
+
+      if (unifiedTxDoc.exists) {
+        transaction.set(unifiedTxRef, {
+          status: "EXPIRED",
+          expiredAt: nowIso,
+          updatedAt: nowIso,
+          reason: "Transfer remained pending beyond the maximum pending period.",
+        }, { merge: true });
+      }
+
+      return true;
+    });
+  }
 
   public static getInstance(): ReconciliationService {
     if (!ReconciliationService.instance) {
@@ -118,7 +161,7 @@ export class ReconciliationService {
         return { success: true, status: currentStatus, refunded: true, message: "Refund already processed. Skipping." };
       }
 
-      if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED") {
+      if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED" || currentStatus === "EXPIRED") {
         logger.info(`[Reconciliation Service] Transfer ${reference} is already in a terminal state: ${currentStatus}. Skipping.`);
         return { success: true, status: currentStatus, message: `Already in terminal state: ${currentStatus}` };
       }
@@ -145,7 +188,19 @@ export class ReconciliationService {
       }
 
       if (!flwStatus) {
-        logger.warn(`[Reconciliation Service] Flutterwave status not found for reference: ${reference}. Keeping PENDING.`);
+        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
+        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
+          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
+          : "";
+        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
+
+        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
+          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
+          if (expired) {
+            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
+          }
+        }
+
         return { success: true, status: "PENDING", message: "Status not found on Flutterwave rails yet." };
       }
 
@@ -162,6 +217,19 @@ export class ReconciliationService {
       logger.info(`[Reconciliation Service] Status mapped for ${reference}: ${currentStatus} -> ${mappedStatus}`);
 
       if (mappedStatus === "PENDING") {
+        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
+        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
+          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
+          : "";
+        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
+
+        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
+          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
+          if (expired) {
+            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
+          }
+        }
+
         return { success: true, status: "PENDING", message: "Transfer is still pending on Flutterwave rails." };
       }
 
@@ -186,6 +254,12 @@ export class ReconciliationService {
             return;
           }
 
+          // Read every Firestore document needed by this transaction before any writes.
+          const unifiedTxRef = adminDb!.collection("transactions").doc(`tx-${reference}`);
+          const unifiedTxDoc = await transaction.get(unifiedTxRef);
+          const refundLedgerRef = adminDb!.collection("transactions").doc(`tx-REFUND-${reference}`);
+          const refundLedgerDoc = await transaction.get(refundLedgerRef);
+
           const userId = freshData.userId;
           const amount = Number(freshData.amount) || 0;
           const providerFee = Number(freshData.providerFee ?? freshData.fee) || 0;
@@ -205,7 +279,7 @@ export class ReconciliationService {
             updatedAt: new Date().toISOString()
           };
 
-          if (mappedStatus === "FAILED" && userId && userId !== "N/A") {
+          if (mappedStatus === "FAILED" && userId && userId !== "N/A" && !refundLedgerDoc.exists) {
             logger.info(`[Refund] User: ${userId}`);
             const userRef = adminDb!.collection("users").doc(userId);
             const userDoc = await transaction.get(userRef);
@@ -281,8 +355,7 @@ export class ReconciliationService {
           }
 
           transaction.update(transferRef, updatePayload);
-          const unifiedTxRef = adminDb!.collection("transactions").doc(`tx-${reference}`);
-          const unifiedTxDoc = await transaction.get(unifiedTxRef);
+
           if (unifiedTxDoc.exists) {
             transaction.update(unifiedTxRef, {
               status: mappedStatus,

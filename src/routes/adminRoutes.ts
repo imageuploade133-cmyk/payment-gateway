@@ -16,6 +16,10 @@ router.post("/metrics", gatewayAuthMiddleware, adminAuthMiddleware, AdminControl
 router.post("/reconciliation", gatewayAuthMiddleware, adminAuthMiddleware, AdminController.runReconciliation);
 router.post("/sync-banks", gatewayAuthMiddleware, adminAuthMiddleware, AdminController.syncBanks);
 
+router.get("/virtual-accounts/search", requireFirebaseAuth, requireAdmin, requirePermission("virtual_accounts.view"), AdminController.searchVirtualAccounts);
+router.get("/virtual-accounts/:userId", requireFirebaseAuth, requireAdmin, requirePermission("virtual_accounts.view"), AdminController.getVirtualAccountAdminDetails);
+router.post("/virtual-accounts/:userId/replace", requireFirebaseAuth, requireAdmin, requirePermission("virtual_accounts.manage"), AdminController.replaceVirtualAccount);
+
 // Secure human-only KYC administrative endpoints
 router.get("/kyc/pending", requireFirebaseAuth, requireAdmin, requirePermission("kyc.view"), AdminController.getPendingKycSubmissions);
 router.post("/kyc/:userId/approve", requireFirebaseAuth, requireAdmin, requirePermission("kyc.approve"), AdminController.approveKycSubmission);

@@ -2,6 +2,7 @@ import { getFlutterwaveClient } from "../providers/flutterwave";
 import logger from "../config/logger";
 import { FirestoreIdempotency } from "./firestoreIdempotency";
 import { adminDb } from "../config/firebase";
+import { NotificationService } from "./notificationService";
 
 export interface IdempotencyProvider {
   isDuplicate(reference: string): Promise<boolean>;
@@ -65,6 +66,8 @@ export interface TransferResult {
   message?: string;
   flutterwaveStatus?: string;
 }
+
+const TRANSFER_PENDING_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 export class TransferService {
   private idempotencyProvider: IdempotencyProvider;
@@ -138,6 +141,9 @@ export class TransferService {
         }
 
         const totalDebited = amount + fee + markup + vat;
+        const createdAt = new Date();
+        const createdAtIso = createdAt.toISOString();
+        const expiresAt = new Date(createdAt.getTime() + TRANSFER_PENDING_EXPIRY_MS).toISOString();
 
         // Save immediately to Firestore transfers collection
         if (adminDb) {
@@ -179,7 +185,8 @@ export class TransferService {
               category: "TRANSFER",
               direction: "DEBIT",
               description: `Transfer to ${account_name}`,
-              createdAt: new Date().toISOString(),
+              createdAt: createdAtIso,
+              expiresAt,
             }, { merge: true });
 
             // Also update unified transactions ledger if transaction doc exists
@@ -213,6 +220,26 @@ export class TransferService {
             logger.info(`[TransferService] Firestore save successful for transfer & unified transactions reference: ${reference}`);
           } catch (fsError: any) {
             logger.error(`[TransferService] Firestore save failed for reference: ${reference} | error=${fsError.message}`);
+          }
+        }
+
+        // Notify the sender only after the transfer ledger has been written.
+        // The notification contains the reference only; the receipt API remains server-authoritative.
+        if (userId && userId !== "N/A") {
+          try {
+            await NotificationService.sendPushNotification(userId, {
+              title: "Transfer To",
+              body: `Transfer of ${currency} ${amount.toLocaleString()} to ${account_name} was ${dbStatus === "success" ? "successful" : dbStatus === "failed" ? "failed" : "initiated"}.`,
+              type: "transaction",
+              reference,
+              amount,
+              currency,
+              recipientName: account_name,
+              bankName: bank_name || "",
+            });
+          } catch (notificationError: any) {
+            // Notification failure must never roll back or change the financial result.
+            logger.warn(`[TransferService] Transfer notification failed | reference=${reference} | error=${notificationError.message}`);
           }
         }
 
