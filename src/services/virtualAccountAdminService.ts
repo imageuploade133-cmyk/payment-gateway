@@ -1,6 +1,5 @@
 import crypto from "crypto";
 import adminDb from "../config/firebase";
-import { FieldValue } from "firebase-admin/firestore";
 import { PaymentVerificationService } from "./paymentVerificationService";
 import { logAdminAction } from "../middleware/adminAuth";
 
@@ -57,6 +56,8 @@ export class VirtualAccountAdminService {
       await lockRef.set({ status, operationId, expiresAt: 0, updatedAt: new Date().toISOString() }, { merge: true });
     };
 
+    let oldOrderRef = "";
+    let newOrderRef = "";
     try {
       const currentSnap = await accountRef.get();
       const current = currentSnap.exists ? currentSnap.data() || {} : null;
@@ -82,7 +83,7 @@ export class VirtualAccountAdminService {
       if (oldAccount.txRef) {
         oldProvider = await PaymentVerificationService.getVirtualAccountByRef(oldAccount.txRef, `va-replace-${operationId}`);
       }
-      const oldOrderRef = oldProvider?.order_ref || current.orderRef;
+      oldOrderRef = oldProvider?.order_ref || current.orderRef;
       if (!oldOrderRef) {
         throw new Error("The existing Flutterwave account reference could not be resolved safely; replacement was stopped.");
       }
@@ -115,6 +116,7 @@ export class VirtualAccountAdminService {
         throw new Error(created.message || "Flutterwave failed to generate the replacement account.");
       }
 
+      newOrderRef = created.order_ref || "";
       const createdAt = new Date().toISOString();
       const historyRef = adminDb.collection("wallet_account_history").doc();
       await adminDb.runTransaction(async t => {
@@ -197,6 +199,13 @@ export class VirtualAccountAdminService {
         },
       };
     } catch (error: any) {
+      // Best-effort provider rollback: never leave the old account disabled when replacement failed.
+      try {
+        if (newOrderRef) await PaymentVerificationService.setVirtualAccountStatus(newOrderRef, "inactive", `va-replace-rollback-new-${operationId}`);
+      } catch {}
+      try {
+        if (oldOrderRef) await PaymentVerificationService.setVirtualAccountStatus(oldOrderRef, "active", `va-replace-rollback-old-${operationId}`);
+      } catch {}
       await operationRef.set({ status: "FAILED", completedAt: new Date().toISOString(), error: error.message }, { merge: true }).catch(() => {});
       await releaseLock("FAILED").catch(() => {});
       await logAdminAction({
