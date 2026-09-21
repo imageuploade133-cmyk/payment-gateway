@@ -62,13 +62,27 @@ export class NotificationService {
       }
     }
 
-    // 2. Fetch all registered tokens for this user
+    // 2. Resolve the server-authoritative active session and fetch only its FCM tokens.
+    // This prevents old devices from receiving transaction/security pushes after a new-device login.
     if (!adminDb) {
       logger.warn(`[NotificationService] adminDb not initialized. Skipping FCM dispatch.`);
       throw new Error("Database not initialized for FCM dispatch.");
     }
 
-    const tokensSnapshot = await adminDb.collection("fcm_tokens").where("userId", "==", userId).get();
+    const userSnapshot = await adminDb.collection("users").doc(userId).get();
+    const activeSessionId = userSnapshot.exists
+      ? String(userSnapshot.data()?.activeSessionId || "")
+      : "";
+
+    if (!activeSessionId) {
+      logger.info(`[NotificationService] No active session for user=${userId}; skipping FCM dispatch.`);
+      throw new Error(`No active session for user=${userId}`);
+    }
+
+    const tokensSnapshot = await adminDb.collection("fcm_tokens")
+      .where("userId", "==", userId)
+      .where("sessionId", "==", activeSessionId)
+      .get();
     if (tokensSnapshot.empty) {
       logger.info(`[NotificationService] No active FCM tokens registered for user=${userId}`);
       throw new Error(`No active FCM tokens registered for user=${userId}`);
