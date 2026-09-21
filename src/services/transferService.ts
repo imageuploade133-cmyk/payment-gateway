@@ -67,6 +67,8 @@ export interface TransferResult {
   flutterwaveStatus?: string;
 }
 
+const TRANSFER_PENDING_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
 export class TransferService {
   private idempotencyProvider: IdempotencyProvider;
 
@@ -139,6 +141,9 @@ export class TransferService {
         }
 
         const totalDebited = amount + fee + markup + vat;
+        const createdAt = new Date();
+        const createdAtIso = createdAt.toISOString();
+        const expiresAt = new Date(createdAt.getTime() + TRANSFER_PENDING_EXPIRY_MS).toISOString();
 
         // Save immediately to Firestore transfers collection
         if (adminDb) {
@@ -180,7 +185,8 @@ export class TransferService {
               category: "TRANSFER",
               direction: "DEBIT",
               description: `Transfer to ${account_name}`,
-              createdAt: new Date().toISOString(),
+              createdAt: createdAtIso,
+              expiresAt,
             }, { merge: true });
 
             // Also update unified transactions ledger if transaction doc exists
