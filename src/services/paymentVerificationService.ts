@@ -168,7 +168,7 @@ export class PaymentVerificationService {
     if (!orderRef) return { success: false, message: "Virtual account order reference is required." };
     try {
       const client = getFlutterwaveClient();
-      const response = await client.request("put", `/virtual-account-numbers/${encodeURIComponent(orderRef)}`, { status });
+      const response = await client.request("post", `/virtual-account-numbers/${encodeURIComponent(orderRef)}`, { status });
       if (response?.status === "success") return { success: true, message: response.message };
       return { success: false, message: response?.message || `Provider rejected virtual account status update.` };
     } catch (error: any) {
