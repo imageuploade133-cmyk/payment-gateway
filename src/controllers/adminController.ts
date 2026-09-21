@@ -1,9 +1,11 @@
 import { Request, Response } from "express";
+import crypto from "crypto";
 import adminDb from "../config/firebase";
 import logger from "../config/logger";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { FieldValue } from "firebase-admin/firestore";
 import { KycService } from "../services/kycService";
+import { VirtualAccountAdminService } from "../services/virtualAccountAdminService";
 import { AuthenticatedRequest } from "../middleware/auth";
 import { logAdminAction } from "../middleware/adminAuth";
 import { firebase } from "../config/firebase";
@@ -504,6 +506,58 @@ export class AdminController {
         success: false,
         message: error.message || "Failed to retry provisioning."
       });
+    }
+  }
+
+  public static async searchVirtualAccounts(req: AuthenticatedRequest, res: Response): Promise<void> {
+    try {
+      const q = String(req.query.q || "").trim();
+      if (q.length < 2 || q.length > 100) {
+        res.status(400).json({ success: false, message: "Search must contain between 2 and 100 characters." });
+        return;
+      }
+      const users = await VirtualAccountAdminService.searchUsers(q);
+      res.status(200).json({ success: true, users });
+    } catch (error: any) {
+      logger.error(`[AdminController] searchVirtualAccounts error: ${error.message} | reqId=${req.requestId}`);
+      res.status(500).json({ success: false, message: "Failed to search users." });
+    }
+  }
+
+  public static async getVirtualAccountAdminDetails(req: AuthenticatedRequest, res: Response): Promise<void> {
+    try {
+      const userId = String(req.params.userId || "").trim();
+      if (!userId) {
+        res.status(400).json({ success: false, message: "User ID is required." });
+        return;
+      }
+      const data = await VirtualAccountAdminService.getUserAccount(userId);
+      res.status(200).json({ success: true, data });
+    } catch (error: any) {
+      logger.error(`[AdminController] getVirtualAccountAdminDetails error: ${error.message} | reqId=${req.requestId}`);
+      res.status(error.message === "User profile not found." ? 404 : 400).json({ success: false, message: error.message || "Failed to load virtual account details." });
+    }
+  }
+
+  public static async replaceVirtualAccount(req: AuthenticatedRequest, res: Response): Promise<void> {
+    try {
+      const userId = String(req.params.userId || "").trim();
+      const confirmation = String(req.body?.confirmation || "");
+      if (!userId) {
+        res.status(400).json({ success: false, message: "User ID is required." });
+        return;
+      }
+      if (confirmation !== "GENERATE") {
+        res.status(400).json({ success: false, message: "Confirmation text must be GENERATE." });
+        return;
+      }
+      const adminUid = req.adminUser?.uid || req.user?.uid || "unknown-admin";
+      const adminEmail = req.adminUser?.email || req.user?.email || "";
+      const data = await VirtualAccountAdminService.replaceAccount(userId, adminUid, adminEmail, String(req.requestId || crypto.randomUUID()));
+      res.status(200).json(data);
+    } catch (error: any) {
+      logger.error(`[AdminController] replaceVirtualAccount error: ${error.message} | reqId=${req.requestId}`);
+      res.status(400).json({ success: false, message: error.message || "Virtual account replacement failed." });
     }
   }
 

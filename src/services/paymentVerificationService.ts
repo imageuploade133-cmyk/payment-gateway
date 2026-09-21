@@ -5,6 +5,7 @@ export interface CreateVirtualAccountParams {
   email: string;
   is_permanent: boolean;
   bvn: string;
+  nin?: string;
   tx_ref: string;
   phonenumber: string;
   firstname: string;
@@ -20,6 +21,8 @@ export interface VirtualAccountDetails {
   account_name: string;
   currency: string;
   reference: string;
+  flwRef?: string;
+  order_ref?: string;
   message?: string;
 }
 
@@ -55,7 +58,7 @@ export class PaymentVerificationService {
    * Provision a virtual account (permanent or dynamic) using Flutterwave.
    */
   public static async createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountDetails> {
-    const { email, is_permanent, bvn, tx_ref, phonenumber, firstname, lastname, requestId, idempotencyKey } = params;
+    const { email, is_permanent, bvn, nin, tx_ref, phonenumber, firstname, lastname, requestId, idempotencyKey } = params;
 
     logger.info(
       `[PaymentVerificationService] Creating virtual account | tx_ref=${tx_ref} | email=${email} | idempotencyKey=${idempotencyKey} | reqId=${requestId}`
@@ -70,6 +73,7 @@ export class PaymentVerificationService {
         email,
         is_permanent,
         bvn,
+        ...(nin ? { nin } : {}),
         tx_ref,
         phonenumber,
         firstname,
@@ -88,6 +92,8 @@ export class PaymentVerificationService {
           account_name: response.data.account_name || `${firstname} ${lastname}`,
           currency: response.data.currency || "NGN",
           reference: tx_ref,
+          flwRef: response.data.flw_ref || "",
+          order_ref: response.data.order_ref || "",
         };
       }
 
@@ -144,6 +150,8 @@ export class PaymentVerificationService {
           account_number: response.data.account_number,
           account_name: response.data.account_name,
           currency: response.data.currency || "NGN",
+          flwRef: response.data.flw_ref || "",
+          order_ref: response.data.order_ref || "",
         };
       }
       return { success: false, message: "No virtual account found with this reference." };
@@ -152,6 +160,20 @@ export class PaymentVerificationService {
         `[PaymentVerificationService] getVirtualAccountByRef returned error: ${error.message}. Resolving as not found.`
       );
       return { success: false, error: error.message };
+    }
+  }
+
+
+  public static async setVirtualAccountStatus(orderRef: string, status: "active" | "inactive", requestId: string): Promise<{success:boolean; message?:string}> {
+    if (!orderRef) return { success: false, message: "Virtual account order reference is required." };
+    try {
+      const client = getFlutterwaveClient();
+      const response = await client.request("post", `/virtual-account-numbers/${encodeURIComponent(orderRef)}`, { status });
+      if (response?.status === "success") return { success: true, message: response.message };
+      return { success: false, message: response?.message || `Provider rejected virtual account status update.` };
+    } catch (error: any) {
+      logger.error(`[PaymentVerificationService] Virtual account status update failed | reqId=${requestId} | error=${error.message}`);
+      return { success: false, message: "Unable to update virtual account status with provider." };
     }
   }
 
