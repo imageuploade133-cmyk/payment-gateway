@@ -1462,6 +1462,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                   });
                 }
               }
+            }
 
             t.set(transferRef, { status: canonicalStatus, updatedAt: new Date().toISOString() }, { merge: true });
             t.set(unifiedRef, { status: canonicalStatus, updatedAt: new Date().toISOString() }, { merge: true });
