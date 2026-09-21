@@ -254,6 +254,10 @@ export class ReconciliationService {
             return;
           }
 
+          // Read every Firestore document needed by this transaction before any writes.
+          const unifiedTxRef = adminDb!.collection("transactions").doc(`tx-${reference}`);
+          const unifiedTxDoc = await transaction.get(unifiedTxRef);
+
           const userId = freshData.userId;
           const amount = Number(freshData.amount) || 0;
           const providerFee = Number(freshData.providerFee ?? freshData.fee) || 0;
@@ -347,10 +351,6 @@ export class ReconciliationService {
             refunded = true;
             refundTransactionCommitted = true;
           }
-
-          // Firestore requires all transaction reads to happen before any writes.
-          const unifiedTxRef = adminDb!.collection("transactions").doc(`tx-${reference}`);
-          const unifiedTxDoc = await transaction.get(unifiedTxRef);
 
           transaction.update(transferRef, updatePayload);
 
