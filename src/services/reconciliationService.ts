@@ -71,6 +71,10 @@ export class ReconciliationService {
       const effectiveExpiresAt = freshData.expiresAt || expiresAt;
       if (!effectiveExpiresAt || nowIso < effectiveExpiresAt) return false;
 
+      // Firestore requires all transaction reads to happen before any writes.
+      const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
+      const unifiedTxDoc = await transaction.get(unifiedTxRef);
+
       transaction.set(transferRef, {
         status: "EXPIRED",
         expiredAt: nowIso,
@@ -78,8 +82,6 @@ export class ReconciliationService {
         reason: "Transfer remained pending beyond the maximum pending period.",
       }, { merge: true });
 
-      const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
-      const unifiedTxDoc = await transaction.get(unifiedTxRef);
       if (unifiedTxDoc.exists) {
         transaction.set(unifiedTxRef, {
           status: "EXPIRED",
@@ -346,9 +348,12 @@ export class ReconciliationService {
             refundTransactionCommitted = true;
           }
 
-          transaction.update(transferRef, updatePayload);
+          // Firestore requires all transaction reads to happen before any writes.
           const unifiedTxRef = adminDb!.collection("transactions").doc(`tx-${reference}`);
           const unifiedTxDoc = await transaction.get(unifiedTxRef);
+
+          transaction.update(transferRef, updatePayload);
+
           if (unifiedTxDoc.exists) {
             transaction.update(unifiedTxRef, {
               status: mappedStatus,
