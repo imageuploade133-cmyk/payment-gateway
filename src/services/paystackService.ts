@@ -63,18 +63,15 @@ export class PaystackService {
     logger.info(`[PaystackService] Executing transfer | reference=${reference} | amount=${amount} | reqId=${requestId}`);
 
     const idempotency = FirestoreIdempotency.getInstance();
-    const isDup = await idempotency.isDuplicate(reference);
-    if (isDup) {
-      logger.warn(`[PaystackService] Duplicate reference detected: ${reference} | reqId=${requestId}`);
+    const claimed = await idempotency.claimReference(reference, "paystack");
+    if (!claimed) {
       return {
         success: false,
         reference,
         status: "failed",
-        message: "Duplicate transfer reference. This transaction has already been initiated.",
+        message: "Duplicate transfer reference or transaction reservation unavailable.",
       };
     }
-
-    await idempotency.saveReference(reference, "paystack");
 
     try {
       const client = getPaystackClient();
@@ -120,6 +117,7 @@ export class PaystackService {
         };
       }
 
+      await idempotency.saveReference(reference, "paystack", "failed");
       return {
         success: false,
         reference,
@@ -129,12 +127,11 @@ export class PaystackService {
 
     } catch (error: any) {
       logger.error(`[PaystackService] Transfer failed | reference=${reference} | error=${error.message} | reqId=${requestId}`);
-      await idempotency.saveReference(reference, "paystack", "failed");
       return {
         success: false,
         reference,
-        status: "failed",
-        message: "Transfer could not be processed. Please check details or try again later.",
+        status: "pending",
+        message: "Transfer status is being reconciled. Please do not retry with the same reference.",
       };
     }
   }
