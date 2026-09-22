@@ -7,13 +7,14 @@ import { NotificationService } from "./notificationService";
 export interface IdempotencyProvider {
   isDuplicate(reference: string): Promise<boolean>;
   saveReference(reference: string): Promise<void>;
+  claimReference?(reference: string, provider?: string): Promise<boolean>;
 }
 
 export class InMemoryIdempotency implements IdempotencyProvider {
   private static instance: InMemoryIdempotency;
   public cache = new Set<string>();
   private insertionOrder: string[] = [];
-  private maxKeys = 10000; // Strictly bound cache to 10k items to prevent boundless memory growth
+  private maxKeys = 10000;
 
   private constructor() {}
 
@@ -32,9 +33,7 @@ export class InMemoryIdempotency implements IdempotencyProvider {
     if (this.cache.has(reference)) return;
     if (this.cache.size >= this.maxKeys) {
       const oldest = this.insertionOrder.shift();
-      if (oldest) {
-        this.cache.delete(oldest);
-      }
+      if (oldest) this.cache.delete(oldest);
     }
     this.cache.add(reference);
     this.insertionOrder.push(reference);
@@ -76,9 +75,6 @@ export class TransferService {
     this.idempotencyProvider = idempotencyProvider;
   }
 
-  /**
-   * Executes a transfer to a bank account using Flutterwave.
-   */
   public async executeTransfer(params: InitiateTransferParams): Promise<TransferResult> {
     const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId, userId, fee = 0, vat = 0, markup = 0, bank_name } = params;
 
@@ -86,23 +82,32 @@ export class TransferService {
       `[TransferService] Starting transfer process | reference=${reference} | amount=${amount} | account=${account_number} | reqId=${requestId}`
     );
 
-    // 1. Idempotency Check
-    const isDuplicate = await this.idempotencyProvider.isDuplicate(reference);
-    if (isDuplicate) {
-      logger.warn(
-        `[TransferService] Duplicate transaction reference detected | reference=${reference} | reqId=${requestId}`
-      );
-      return {
-        success: false,
-        reference,
-        status: "failed",
-        message: "Duplicate transfer reference. This transaction has already been initiated.",
-      };
+    // Atomically reserve the reference before contacting Flutterwave.
+    if (typeof this.idempotencyProvider.claimReference === "function") {
+      const claimed = await this.idempotencyProvider.claimReference(reference, "flutterwave");
+      if (!claimed) {
+        return {
+          success: false,
+          reference,
+          status: "failed",
+          message: "Duplicate transfer reference or transaction reservation unavailable.",
+        };
+      }
+    } else {
+      const isDuplicate = await this.idempotencyProvider.isDuplicate(reference);
+      if (isDuplicate) {
+        return {
+          success: false,
+          reference,
+          status: "failed",
+          message: "Duplicate transfer reference. This transaction has already been initiated.",
+        };
+      }
+      await this.idempotencyProvider.saveReference(reference);
     }
 
     try {
       const client = getFlutterwaveClient();
-
       const payload = {
         account_bank: bank_code,
         account_number,
@@ -113,39 +118,22 @@ export class TransferService {
         callback_url: undefined,
       };
 
-      logger.info(
-        `[TransferService] Payload sent to Flutterwave | reference=${reference} | payload=${JSON.stringify(payload)} | reqId=${requestId}`
-      );
-
       const response = await client.request("post", "/transfers", payload);
-
-      logger.info(
-        `[TransferService] Flutterwave raw transfer response received | reference=${reference} | response=${JSON.stringify(response)} | reqId=${requestId}`
-      );
 
       if (response && response.status === "success" && response.data) {
         const flwId = response.data.id?.toString();
         const flwStatus = (response.data.status?.toLowerCase() || "new");
-
-        logger.info(
-          `[TransferService] Transfer successfully accepted by Flutterwave | reference=${reference} | flwId=${flwId} | status=${flwStatus} | reqId=${requestId}`
-        );
-
-        // Update status and provider reference in Firestore idempotency log
         const dbStatus = (flwStatus === "successful" || flwStatus === "success")
           ? "success"
           : (flwStatus === "failed" ? "failed" : "pending");
 
-        if (typeof (this.idempotencyProvider as any).saveReference === "function") {
-          await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", dbStatus, flwId);
-        }
+        await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", dbStatus, flwId);
 
         const totalDebited = amount + fee + markup + vat;
         const createdAt = new Date();
         const createdAtIso = createdAt.toISOString();
         const expiresAt = new Date(createdAt.getTime() + TRANSFER_PENDING_EXPIRY_MS).toISOString();
 
-        // Save immediately to Firestore transfers collection
         if (adminDb) {
           try {
             await adminDb.collection("transfers").doc(reference).set({
@@ -153,15 +141,15 @@ export class TransferService {
               flutterwaveTransferId: flwId || null,
               providerTransferId: flwId || null,
               providerReference: flwId || null,
-              reference: reference,
+              reference,
               userId: userId || "N/A",
-              amount: amount,
+              amount,
               currency: currency || "NGN",
-              fee: fee,
+              fee,
               transferFee: fee,
-              vat: vat,
-              markup: markup,
-              totalDebited: totalDebited,
+              vat,
+              markup,
+              totalDebited,
               bankCode: bank_code,
               bankName: bank_name || null,
               accountNumber: account_number,
@@ -173,11 +161,7 @@ export class TransferService {
               beneficiaryBankCode: bank_code,
               beneficiaryBankName: bank_name || null,
               narration: narration || null,
-              recipient: {
-                account_number,
-                bank_code,
-                account_name,
-              },
+              recipient: { account_number, bank_code, account_name },
               provider: "Flutterwave",
               status: dbStatus === "success" ? "SUCCESS" : dbStatus === "failed" ? "FAILED" : "PENDING",
               flutterwaveStatus: flwStatus,
@@ -189,7 +173,6 @@ export class TransferService {
               expiresAt,
             }, { merge: true });
 
-            // Also update unified transactions ledger if transaction doc exists
             const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
             await unifiedTxRef.set({
               providerReference: flwId || null,
@@ -216,15 +199,11 @@ export class TransferService {
               totalDebited,
               transactionDate: new Date().toISOString(),
             }, { merge: true });
-
-            logger.info(`[TransferService] Firestore save successful for transfer & unified transactions reference: ${reference}`);
           } catch (fsError: any) {
             logger.error(`[TransferService] Firestore save failed for reference: ${reference} | error=${fsError.message}`);
           }
         }
 
-        // Notify the sender only after the transfer ledger has been written.
-        // The notification contains the reference only; the receipt API remains server-authoritative.
         if (userId && userId !== "N/A") {
           try {
             await NotificationService.sendPushNotification(userId, {
@@ -238,13 +217,11 @@ export class TransferService {
               bankName: bank_name || "",
             });
           } catch (notificationError: any) {
-            // Notification failure must never roll back or change the financial result.
             logger.warn(`[TransferService] Transfer notification failed | reference=${reference} | error=${notificationError.message}`);
           }
         }
 
         const isProcessing = flwStatus === "new" || flwStatus === "pending";
-
         return {
           success: true,
           processing: isProcessing,
@@ -256,32 +233,26 @@ export class TransferService {
         };
       }
 
-      logger.error(
-        `[TransferService] Unexpected response structure from provider | reference=${reference} | reqId=${requestId}`
-      );
+      // The provider explicitly rejected the request. It is safe to finalize the reservation as failed.
+      await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", "failed");
       return {
         success: false,
         reference,
         status: "failed",
         message: "The payment provider returned an unexpected response.",
       };
-
     } catch (error: any) {
-      const errorMsg = error.message || "Unknown provider error";
+      // Keep the reference reserved on transport/unknown failures. This prevents a retry
+      // from creating a second provider transaction. Reconciliation can inspect the reference.
       logger.error(
-        `[TransferService] Transfer failed on provider rail | reference=${reference} | error=${errorMsg} | reqId=${requestId}`
+        `[TransferService] Provider/transport failure; keeping idempotency reservation | reference=${reference} | error=${error.message || "Unknown provider error"} | reqId=${requestId}`
       );
-
-      // Update status as failed inside Firestore
-      if (typeof (this.idempotencyProvider as any).saveReference === "function") {
-        await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", "failed");
-      }
 
       return {
         success: false,
         reference,
-        status: "failed",
-        message: "Transfer could not be processed. Please check account details or try again later.",
+        status: "pending",
+        message: "Transfer status is being reconciled. Please do not retry with the same reference.",
       };
     }
   }
