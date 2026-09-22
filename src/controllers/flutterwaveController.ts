@@ -506,7 +506,7 @@ export const getTransferFee = async (req: Request, res: Response, next: NextFunc
   }
 };
 
-export const initiateTransfer = async (req: Request, res: Response, next: NextFunction) => {
+export const initiateTransfer = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId} | body:`, req.body);
 
@@ -559,7 +559,7 @@ Received: ${issue.received || "undefined"}`);
       narration: payload.narration,
       reference: payload.reference,
       requestId: reqId,
-      userId: req.body.userId || "N/A",
+      userId: req.user?.uid || req.body.userId || "N/A",
 
       fee: typeof req.body.fee === "number"
         ? req.body.fee
@@ -610,7 +610,7 @@ export const getKycStatus = async (req: AuthenticatedRequest, res: Response, nex
   logger.info(`[Flutterwave Controller] Received getKycStatus request | reqId=${reqId}`);
 
   try {
-    const userId = (req.query.userId as string) || (req.body.userId as string) || req.user?.uid;
+    const userId = req.user?.uid || (req.query.userId as string) || (req.body.userId as string);
     if (!userId || typeof userId !== "string" || userId.trim() === "") {
       res.status(400).json({
         success: false,
@@ -664,7 +664,7 @@ export const createVirtualAccount = async (req: AuthenticatedRequest, res: Respo
   logger.info("Create Virtual Account incoming request body:", req.body);
 
   try {
-    const userId = req.body.userId ?? req.body.uid ?? req.user?.uid;
+    const userId = req.user?.uid || req.body.userId || req.body.uid;
 
     // 1. Guard: Check if the permanent virtual account already exists in Firebase
     if (userId && adminDb) {
