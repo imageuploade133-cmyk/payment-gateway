@@ -276,17 +276,14 @@ export class WhatsAppOtpService {
         const payload = {
           number: cleanPhone,
           message: messageText,
-          instanceId: whatsappInstanceId,
         };
 
         const dispatchReq = async (apiKeyToUse: string, cookieToUse?: string) => {
+          // Strictly send single Header keys to avoid Header duplication merging in fetch
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
-            "X-API-Key": apiKeyToUse,
-            "x-api-key": apiKeyToUse,
-            "apikey": apiKeyToUse,
-            "X-Instance-ID": whatsappInstanceId,
-            "Authorization": `Bearer ${apiKeyToUse}`,
+            "X-API-Key": apiKeyToUse.trim(),
+            "X-Instance-ID": whatsappInstanceId.trim(),
           };
           if (cookieToUse) headers["Cookie"] = cookieToUse;
 
