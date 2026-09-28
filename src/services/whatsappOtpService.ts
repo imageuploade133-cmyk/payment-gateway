@@ -30,6 +30,97 @@ export class WhatsAppOtpService {
   }
 
   /**
+   * Auto-provisions / registers an API key on the WhatsAPI gateway database.
+   */
+  private static async ensureApiKeyOnGateway(
+    apiUrl: string,
+    apiKey: string,
+    instanceId: string,
+    adminUsername?: string,
+    adminPassword?: string
+  ): Promise<boolean> {
+    if (!apiUrl || !apiKey) return false;
+
+    try {
+      const urlObj = new URL(apiUrl);
+      const baseUrl = `${urlObj.protocol}//${urlObj.host}`;
+      const createApiKeyEndpoint = `${baseUrl}/api/email/apikeys`;
+
+      const createBody = {
+        name: "E-Global Pay Gateway Key",
+        customSecret: apiKey,
+        customId: instanceId || apiKey,
+        scopes: ["email.send", "email.otp", "email.templates", "email.logs", "whatsapp.send"],
+        daily_quota: 2000000,
+      };
+
+      const sendCreateReq = async (cookie?: string, token?: string) => {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (cookie) headers["Cookie"] = cookie;
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+
+        return await fetch(createApiKeyEndpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(createBody),
+        });
+      };
+
+      let res = await sendCreateReq();
+      if (res.ok) {
+        logger.info(`[WhatsAppOtpService] Successfully auto-registered API key on gateway.`);
+        return true;
+      }
+
+      if ((res.status === 401 || res.status === 403) && adminUsername && adminPassword) {
+        logger.info(`[WhatsAppOtpService] Auth required for key registration. Attempting admin login...`);
+        const loginEndpoints = [`${baseUrl}/api/auth/login`, `${baseUrl}/auth/login`, `${baseUrl}/api/login`, `${baseUrl}/login`];
+
+        let sessionCookie = "";
+        let acquiredToken = "";
+
+        for (const ep of loginEndpoints) {
+          try {
+            const loginRes = await fetch(ep, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                username: adminUsername,
+                email: adminUsername,
+                password: adminPassword,
+              }),
+            });
+
+            if (loginRes.ok) {
+              const setCookieHeader = loginRes.headers.get("set-cookie");
+              if (setCookieHeader) sessionCookie = setCookieHeader;
+
+              const loginData = await loginRes.json().catch(() => ({}));
+              acquiredToken = loginData.token || loginData.apiKey || loginData.key || loginData.accessToken || "";
+              break;
+            }
+          } catch {}
+        }
+
+        if (acquiredToken || sessionCookie) {
+          const retryRes = await sendCreateReq(sessionCookie, acquiredToken);
+          if (retryRes.ok) {
+            logger.info(`[WhatsAppOtpService] Successfully registered API key via admin session.`);
+            return true;
+          }
+        }
+      }
+
+      return false;
+    } catch (err: any) {
+      logger.warn(`[WhatsAppOtpService] Exception registering API key on gateway: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
    * Clean up expired OTP sessions from Firestore
    */
   public static async cleanupExpiredOtps(): Promise<void> {
@@ -59,9 +150,45 @@ export class WhatsAppOtpService {
    */
   public static async sendOtp(phoneNumber: string, type: string = "signup"): Promise<{ message: string; devOtp?: string }> {
     const isProd = env.NODE_ENV === "production";
-    const whatsappApiUrl = env.WHATSAPP_API_URL;
-    const whatsappApiKey = env.WHATSAPP_API_KEY;
-    const whatsappInstanceId = env.WHATSAPP_INSTANCE_ID;
+
+    let whatsappApiUrl = env.WHATSAPP_API_URL;
+    let whatsappApiKey = env.WHATSAPP_API_KEY;
+    let whatsappInstanceId = env.WHATSAPP_INSTANCE_ID;
+    let whatsappAdminUsername = env.WHATSAPP_ADMIN_USERNAME;
+    let whatsappAdminPassword = env.WHATSAPP_ADMIN_PASSWORD;
+
+    // Dynamically check Firestore config if available
+    try {
+      if (adminDb) {
+        const waDoc = await adminDb.collection("config").doc("whatsapp_api").get();
+        if (waDoc.exists) {
+          const waData = waDoc.data();
+          if (waData?.whatsappApiUrl) whatsappApiUrl = waData.whatsappApiUrl;
+          if (waData?.whatsappApiKey) whatsappApiKey = waData.whatsappApiKey;
+          if (waData?.whatsappInstanceId) whatsappInstanceId = waData.whatsappInstanceId;
+          if (waData?.whatsappAdminUsername) whatsappAdminUsername = waData.whatsappAdminUsername;
+          if (waData?.whatsappAdminPassword) whatsappAdminPassword = waData.whatsappAdminPassword;
+        } else {
+          const emailDoc = await adminDb.collection("config").doc("email_connect").get();
+          if (emailDoc.exists) {
+            const emailData = emailDoc.data();
+            if (emailData?.whatsappApiUrl || emailData?.emailApiUrl) {
+              whatsappApiUrl = emailData.whatsappApiUrl || emailData.emailApiUrl;
+            }
+            if (emailData?.whatsappApiKey || emailData?.emailApiKey) {
+              whatsappApiKey = emailData.whatsappApiKey || emailData.emailApiKey;
+            }
+            if (emailData?.whatsappInstanceId || emailData?.emailInstanceId) {
+              whatsappInstanceId = emailData.whatsappInstanceId || emailData.emailInstanceId;
+            }
+            if (emailData?.emailAdminUsername) whatsappAdminUsername = emailData.emailAdminUsername;
+            if (emailData?.emailAdminPassword) whatsappAdminPassword = emailData.emailAdminPassword;
+          }
+        }
+      }
+    } catch (dbErr: any) {
+      logger.warn(`[WhatsAppOtpService] Dynamic config fetch warning: ${dbErr.message}`);
+    }
 
     // Validate configuration
     if (!whatsappApiUrl || !whatsappApiKey || !whatsappInstanceId) {
@@ -137,26 +264,57 @@ export class WhatsAppOtpService {
 
         logger.info(`[WhatsAppOtpService] Dispatching OTP message to WhatsApp gateway endpoint: ${targetUrl} | phone=${cleanPhone}`);
 
-        const res = await fetch(targetUrl, {
-          method: "POST",
-          headers: {
+        const dispatchReq = async (apiKeyToUse: string, cookieToUse?: string, tokenToUse?: string) => {
+          const headers: Record<string, string> = {
             "Content-Type": "application/json",
-            "X-API-Key": whatsappApiKey,
-            "x-api-key": whatsappApiKey,
-            "apikey": whatsappApiKey,
+            "X-API-Key": apiKeyToUse,
+            "x-api-key": apiKeyToUse,
+            "apikey": apiKeyToUse,
             "X-Instance-ID": whatsappInstanceId,
-            "Authorization": `Bearer ${whatsappApiKey}`,
-          },
-          body: JSON.stringify(payload),
-        });
+            "Authorization": tokenToUse ? `Bearer ${tokenToUse}` : `Bearer ${apiKeyToUse}`,
+          };
+          if (cookieToUse) headers["Cookie"] = cookieToUse;
+
+          return await fetch(targetUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+          });
+        };
+
+        let res = await dispatchReq(whatsappApiKey);
 
         if (res.ok) {
           sendSuccess = true;
           logger.info(`[WhatsAppOtpService] OTP successfully sent via WhatsApp API.`);
         } else {
-          const textResponse = await res.text();
+          let textResponse = await res.text();
           apiErrorMsg = `Gateway responded with status ${res.status}: ${textResponse}`;
           logger.error(`[WhatsAppOtpService] WhatsApp API failed: ${apiErrorMsg}`);
+
+          // If 401 or 403 Forbidden / Invalid API Key occurs, attempt auto-registering the key on the gateway
+          if (res.status === 401 || res.status === 403 || textResponse.includes("Forbidden") || textResponse.includes("Invalid API Key")) {
+            logger.info(`[WhatsAppOtpService] 401/403 detected. Attempting to auto-provision API key on gateway...`);
+            const provisioned = await this.ensureApiKeyOnGateway(
+              whatsappApiUrl,
+              whatsappApiKey,
+              whatsappInstanceId,
+              whatsappAdminUsername,
+              whatsappAdminPassword
+            );
+
+            if (provisioned) {
+              logger.info(`[WhatsAppOtpService] Key provisioned successfully. Retrying WhatsApp dispatch...`);
+              const retryRes = await dispatchReq(whatsappApiKey);
+              if (retryRes.ok) {
+                sendSuccess = true;
+                logger.info(`[WhatsAppOtpService] OTP successfully sent after auto-provisioning API key.`);
+              } else {
+                const retryText = await retryRes.text();
+                logger.error(`[WhatsAppOtpService] Retry after provisioning failed: ${retryRes.status} ${retryText}`);
+              }
+            }
+          }
         }
       } catch (err: any) {
         apiErrorMsg = err.message;
