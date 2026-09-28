@@ -25,6 +25,21 @@ export async function registerToken(req: AuthenticatedRequest, res: Response): P
       return;
     }
 
+    // Resolve server-authoritative active session ID directly from Firestore users/{uid}
+    let authoritativeSessionId: string | null = null;
+    const providedSessionId = (req.headers["x-session-id"] as string) || req.body?.sessionId || "";
+
+    try {
+      const userDoc = await adminDb.collection("users").doc(uid).get();
+      if (userDoc.exists) {
+        authoritativeSessionId = userDoc.data()?.activeSessionId || null;
+      }
+    } catch (docErr: any) {
+      logger.error(`[FCM Backend API Error] Failed to fetch active session for user ${uid}: ${docErr.message}`);
+    }
+
+    const sessionIdToStore = authoritativeSessionId || providedSessionId || null;
+
     const cleanToken = token.trim();
     const tokenDocId = `${uid}_${Buffer.from(cleanToken).toString("base64").slice(0, 100)}`;
     const tokenRef = adminDb.collection("fcm_tokens").doc(tokenDocId);
@@ -35,11 +50,39 @@ export async function registerToken(req: AuthenticatedRequest, res: Response): P
       userId: uid,
       token: cleanToken,
       platform: platform || "web",
+      ...(sessionIdToStore ? { sessionId: sessionIdToStore } : {}),
       createdAt: now,
       updatedAt: now,
     }, { merge: true });
 
-    logger.info(`[FCM Backend API] Registered token for user ${uid} | reqId=${reqId}`);
+    // Check for pending new device push notification marker
+    const userRef = adminDb.collection("users").doc(uid);
+    const userSnap = await userRef.get();
+    const pendingSessionId = userSnap.exists ? userSnap.data()?.pendingNewDevicePushSessionId : null;
+    if (pendingSessionId && (pendingSessionId === sessionIdToStore || !sessionIdToStore)) {
+      try {
+        const { getMessaging } = require("firebase-admin/messaging");
+        await getMessaging().send({
+          token: cleanToken,
+          notification: {
+            title: "New Device Login",
+            body: "Your E-Global Pay account was successfully signed in on this device.",
+          },
+          data: {
+            type: "security",
+            event: "new_device_login",
+          },
+          android: { priority: "high", notification: { sound: "default" } },
+          apns: { payload: { aps: { sound: "default" } } },
+        });
+        await userRef.update({ pendingNewDevicePushSessionId: null });
+        logger.info(`[FCM Backend API] Successfully dispatched New Device Login push to token for user ${uid}`);
+      } catch (pushErr: any) {
+        logger.error(`[FCM Backend API] New-device push dispatch failed for user ${uid}: ${pushErr.message}`);
+      }
+    }
+
+    logger.info(`[FCM Backend API] Registered token for user ${uid} (sessionId=${sessionIdToStore}) | reqId=${reqId}`);
     res.status(200).json({ success: true, message: "FCM Token registered successfully." });
   } catch (err: any) {
     logger.error(`[FCM Backend API Exception] Register failed: ${err.message} | reqId=${reqId}`);

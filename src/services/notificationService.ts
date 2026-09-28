@@ -32,7 +32,7 @@ export class NotificationService {
     const now = new Date().toISOString();
     let notificationId: string | undefined;
 
-    // 1. Save to Firestore under user's notification subcollection (Deterministic history ID prevents duplicate history on retry)
+    // 1. Save to Firestore under user's notification subcollection
     if (adminDb) {
       try {
         const histDocId = payload.reference ? `tx-notif-${payload.reference}` : undefined;
@@ -62,30 +62,37 @@ export class NotificationService {
       }
     }
 
-    // 2. Resolve the server-authoritative active session and fetch only its FCM tokens.
-    // This prevents old devices from receiving transaction/security pushes after a new-device login.
     if (!adminDb) {
       logger.warn(`[NotificationService] adminDb not initialized. Skipping FCM dispatch.`);
-      throw new Error("Database not initialized for FCM dispatch.");
+      return { successCount: 0, totalTokens: 0, notificationId };
     }
 
+    // 2. Resolve active session ID and query target FCM tokens
     const userSnapshot = await adminDb.collection("users").doc(userId).get();
     const activeSessionId = userSnapshot.exists
       ? String(userSnapshot.data()?.activeSessionId || "")
       : "";
 
-    if (!activeSessionId) {
-      logger.info(`[NotificationService] No active session for user=${userId}; skipping FCM dispatch.`);
-      throw new Error(`No active session for user=${userId}`);
+    let tokensSnapshot = activeSessionId
+      ? await adminDb.collection("fcm_tokens")
+          .where("userId", "==", userId)
+          .where("sessionId", "==", activeSessionId)
+          .get()
+      : await adminDb.collection("fcm_tokens")
+          .where("userId", "==", userId)
+          .get();
+
+    // Fallback: If query by activeSessionId is empty, query all tokens for userId
+    if (tokensSnapshot.empty) {
+      logger.info(`[NotificationService] No tokens matched sessionId=${activeSessionId} for user=${userId}. Falling back to all tokens for user.`);
+      tokensSnapshot = await adminDb.collection("fcm_tokens")
+        .where("userId", "==", userId)
+        .get();
     }
 
-    const tokensSnapshot = await adminDb.collection("fcm_tokens")
-      .where("userId", "==", userId)
-      .where("sessionId", "==", activeSessionId)
-      .get();
     if (tokensSnapshot.empty) {
-      logger.info(`[NotificationService] No active FCM tokens registered for user=${userId}`);
-      throw new Error(`No active FCM tokens registered for user=${userId}`);
+      logger.info(`[NotificationService] No FCM tokens registered for user=${userId}`);
+      return { successCount: 0, totalTokens: 0, notificationId };
     }
 
     const tokensList: { id: string; token: string; platform: string }[] = [];
@@ -97,6 +104,11 @@ export class NotificationService {
           token: data.token,
           platform: data.platform || "web",
         });
+
+        // Auto-fix missing sessionId on document if activeSessionId is known
+        if (activeSessionId && !data.sessionId) {
+          docSnap.ref.update({ sessionId: activeSessionId }).catch(() => {});
+        }
       }
     });
 
@@ -175,7 +187,7 @@ export class NotificationService {
       }
     }
 
-    // Perform cleanups asynchronously to avoid blocking
+    // Perform cleanups asynchronously
     if (tokensToDelete.length > 0 && adminDb) {
       const db = adminDb;
       const batch = db.batch();
@@ -184,10 +196,6 @@ export class NotificationService {
       });
       await batch.commit().catch((bErr) => logger.error(`[NotificationService] Token cleanup error: ${bErr.message}`));
       logger.info(`[NotificationService] Automatically deleted ${tokensToDelete.length} invalid/expired FCM token(s).`);
-    }
-
-    if (successCount === 0) {
-      throw new Error(lastFcmError ? `FCM dispatch failed for all target tokens: ${lastFcmError}` : "FCM dispatch failed for all target tokens.");
     }
 
     return {
