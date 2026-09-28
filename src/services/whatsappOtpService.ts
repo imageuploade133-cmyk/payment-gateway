@@ -30,93 +30,110 @@ export class WhatsAppOtpService {
   }
 
   /**
-   * Auto-provisions / registers an API key on the WhatsAPI gateway database.
+   * Resolves the canonical API key for a WhatsApp instance by querying the WhatsAPI gateway
+   * using admin credentials if necessary.
    */
-  private static async ensureApiKeyOnGateway(
+  private static async resolveGatewayInstanceKey(
     apiUrl: string,
-    apiKey: string,
-    instanceId: string,
+    targetInstanceId: string,
+    fallbackApiKey: string,
     adminUsername?: string,
     adminPassword?: string
-  ): Promise<boolean> {
-    if (!apiUrl || !apiKey) return false;
+  ): Promise<{ resolvedApiKey: string; sessionCookie?: string }> {
+    if (!apiUrl) return { resolvedApiKey: fallbackApiKey };
 
     try {
       const urlObj = new URL(apiUrl);
       const baseUrl = `${urlObj.protocol}//${urlObj.host}`;
-      const createApiKeyEndpoint = `${baseUrl}/api/email/apikeys`;
 
-      const createBody = {
-        name: "E-Global Pay Gateway Key",
-        customSecret: apiKey,
-        customId: instanceId || apiKey,
-        scopes: ["email.send", "email.otp", "email.templates", "email.logs", "whatsapp.send"],
-        daily_quota: 2000000,
-      };
-
-      const sendCreateReq = async (cookie?: string, token?: string) => {
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-        };
-        if (cookie) headers["Cookie"] = cookie;
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-
-        return await fetch(createApiKeyEndpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(createBody),
-        });
-      };
-
-      let res = await sendCreateReq();
-      if (res.ok) {
-        logger.info(`[WhatsAppOtpService] Successfully auto-registered API key on gateway.`);
-        return true;
+      if (!adminUsername || !adminPassword) {
+        return { resolvedApiKey: fallbackApiKey };
       }
 
-      if ((res.status === 401 || res.status === 403) && adminUsername && adminPassword) {
-        logger.info(`[WhatsAppOtpService] Auth required for key registration. Attempting admin login...`);
-        const loginEndpoints = [`${baseUrl}/api/auth/login`, `${baseUrl}/auth/login`, `${baseUrl}/api/login`, `${baseUrl}/login`];
+      // 1. Authenticate with WhatsAPI Admin Session
+      const loginEndpoints = [`${baseUrl}/api/login`, `${baseUrl}/login`, `${baseUrl}/api/auth/login`];
+      let sessionCookie = "";
 
-        let sessionCookie = "";
-        let acquiredToken = "";
+      for (const ep of loginEndpoints) {
+        try {
+          const loginRes = await fetch(ep, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: adminUsername,
+              password: adminPassword,
+            }),
+          });
 
-        for (const ep of loginEndpoints) {
-          try {
-            const loginRes = await fetch(ep, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                username: adminUsername,
-                email: adminUsername,
-                password: adminPassword,
-              }),
-            });
-
-            if (loginRes.ok) {
-              const setCookieHeader = loginRes.headers.get("set-cookie");
-              if (setCookieHeader) sessionCookie = setCookieHeader;
-
-              const loginData: any = await loginRes.json().catch(() => ({}));
-              acquiredToken = loginData.token || loginData.apiKey || loginData.key || loginData.accessToken || "";
+          if (loginRes.ok) {
+            const setCookieHeader = loginRes.headers.get("set-cookie");
+            if (setCookieHeader) {
+              sessionCookie = setCookieHeader.split(";")[0];
+              logger.info(`[WhatsAppOtpService] Successfully logged in as admin to WhatsAPI gateway at ${ep}`);
               break;
             }
-          } catch {}
-        }
+          }
+        } catch {}
+      }
 
-        if (acquiredToken || sessionCookie) {
-          const retryRes = await sendCreateReq(sessionCookie, acquiredToken);
-          if (retryRes.ok) {
-            logger.info(`[WhatsAppOtpService] Successfully registered API key via admin session.`);
-            return true;
+      if (!sessionCookie) {
+        logger.warn(`[WhatsAppOtpService] Could not establish admin session on WhatsAPI gateway.`);
+        return { resolvedApiKey: fallbackApiKey };
+      }
+
+      // 2. Query list of WhatsApp instances to retrieve the matching instance's actual API key
+      const instRes = await fetch(`${baseUrl}/api/instances`, {
+        headers: { Cookie: sessionCookie },
+      });
+
+      if (instRes.ok) {
+        const instList: any = await instRes.json().catch(() => []);
+        if (Array.isArray(instList) && instList.length > 0) {
+          // Find matching instance by ID or name, or fallback to the first active connected instance
+          let matchedInst = instList.find(
+            (i: any) => i.id === targetInstanceId || i.name === targetInstanceId
+          );
+
+          if (!matchedInst) {
+            matchedInst = instList.find((i: any) => i.status === "connected") || instList[0];
+          }
+
+          if (matchedInst && matchedInst.apiKey) {
+            logger.info(`[WhatsAppOtpService] Resolved real gateway API key for instance '${matchedInst.id}': ${matchedInst.apiKey.slice(0, 8)}...`);
+            return { resolvedApiKey: matchedInst.apiKey, sessionCookie };
           }
         }
       }
 
-      return false;
+      // 3. If instance not found or needs registration with fallbackApiKey, start/create instance
+      try {
+        const startRes = await fetch(`${baseUrl}/api/instances`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: sessionCookie,
+          },
+          body: JSON.stringify({
+            id: targetInstanceId,
+            name: targetInstanceId,
+            apiKey: fallbackApiKey,
+          }),
+        });
+
+        if (startRes.ok) {
+          const startData: any = await startRes.json().catch(() => ({}));
+          const key = startData?.instance?.apiKey || fallbackApiKey;
+          logger.info(`[WhatsAppOtpService] Created/Started instance '${targetInstanceId}' on WhatsAPI gateway.`);
+          return { resolvedApiKey: key, sessionCookie };
+        }
+      } catch (startErr: any) {
+        logger.warn(`[WhatsAppOtpService] Could not auto-create instance on gateway: ${startErr.message}`);
+      }
+
+      return { resolvedApiKey: fallbackApiKey, sessionCookie };
     } catch (err: any) {
-      logger.warn(`[WhatsAppOtpService] Exception registering API key on gateway: ${err.message}`);
-      return false;
+      logger.warn(`[WhatsAppOtpService] Exception resolving instance key on gateway: ${err.message}`);
+      return { resolvedApiKey: fallbackApiKey };
     }
   }
 
@@ -191,8 +208,8 @@ export class WhatsAppOtpService {
     }
 
     // Validate configuration
-    if (!whatsappApiUrl || !whatsappApiKey || !whatsappInstanceId) {
-      const configError = "Configuration Error: Missing WHATSAPP_API_URL, WHATSAPP_API_KEY, or WHATSAPP_INSTANCE_ID.";
+    if (!whatsappApiUrl || !whatsappInstanceId) {
+      const configError = "Configuration Error: Missing WHATSAPP_API_URL or WHATSAPP_INSTANCE_ID.";
       if (!isProd) {
         logger.warn(`[WhatsAppOtpService] ${configError} (Development Mode fallback enabled)`);
       } else {
@@ -242,7 +259,7 @@ export class WhatsAppOtpService {
     let sendSuccess = false;
     let apiErrorMsg = "";
 
-    if (whatsappApiUrl && whatsappApiKey && whatsappInstanceId) {
+    if (whatsappApiUrl && whatsappInstanceId) {
       try {
         // Construct canonical target URL endpoint: ensure it points to /api/send/text
         let targetUrl = whatsappApiUrl.trim().replace(/\/+$/, "");
@@ -262,16 +279,14 @@ export class WhatsAppOtpService {
           instanceId: whatsappInstanceId,
         };
 
-        logger.info(`[WhatsAppOtpService] Dispatching OTP message to WhatsApp gateway endpoint: ${targetUrl} | phone=${cleanPhone}`);
-
-        const dispatchReq = async (apiKeyToUse: string, cookieToUse?: string, tokenToUse?: string) => {
+        const dispatchReq = async (apiKeyToUse: string, cookieToUse?: string) => {
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
             "X-API-Key": apiKeyToUse,
             "x-api-key": apiKeyToUse,
             "apikey": apiKeyToUse,
             "X-Instance-ID": whatsappInstanceId,
-            "Authorization": tokenToUse ? `Bearer ${tokenToUse}` : `Bearer ${apiKeyToUse}`,
+            "Authorization": `Bearer ${apiKeyToUse}`,
           };
           if (cookieToUse) headers["Cookie"] = cookieToUse;
 
@@ -282,6 +297,8 @@ export class WhatsAppOtpService {
           });
         };
 
+        logger.info(`[WhatsAppOtpService] Dispatching OTP message to WhatsApp gateway endpoint: ${targetUrl} | phone=${cleanPhone}`);
+
         let res = await dispatchReq(whatsappApiKey);
 
         if (res.ok) {
@@ -290,28 +307,40 @@ export class WhatsAppOtpService {
         } else {
           let textResponse = await res.text();
           apiErrorMsg = `Gateway responded with status ${res.status}: ${textResponse}`;
-          logger.error(`[WhatsAppOtpService] WhatsApp API failed: ${apiErrorMsg}`);
+          logger.error(`[WhatsAppOtpService] WhatsApp API initial attempt failed: ${apiErrorMsg}`);
 
-          // If 401 or 403 Forbidden / Invalid API Key occurs, attempt auto-registering the key on the gateway
-          if (res.status === 401 || res.status === 403 || textResponse.includes("Forbidden") || textResponse.includes("Invalid API Key")) {
-            logger.info(`[WhatsAppOtpService] 401/403 detected. Attempting to auto-provision API key on gateway...`);
-            const provisioned = await this.ensureApiKeyOnGateway(
+          // If 401 or 403 Forbidden / Invalid API Key occurs, query the gateway using admin login to resolve the real instance key
+          if (res.status === 401 || res.status === 403 || textResponse.includes("Forbidden") || textResponse.includes("Invalid API Key") || textResponse.includes("Unauthorized")) {
+            logger.info(`[WhatsAppOtpService] 401/403 detected. Resolving actual gateway instance key via admin session...`);
+            const { resolvedApiKey, sessionCookie } = await this.resolveGatewayInstanceKey(
               whatsappApiUrl,
-              whatsappApiKey,
               whatsappInstanceId,
+              whatsappApiKey,
               whatsappAdminUsername,
               whatsappAdminPassword
             );
 
-            if (provisioned) {
-              logger.info(`[WhatsAppOtpService] Key provisioned successfully. Retrying WhatsApp dispatch...`);
-              const retryRes = await dispatchReq(whatsappApiKey);
+            if (resolvedApiKey) {
+              logger.info(`[WhatsAppOtpService] Retrying WhatsApp dispatch with resolved API key...`);
+              const retryRes = await dispatchReq(resolvedApiKey, sessionCookie);
               if (retryRes.ok) {
                 sendSuccess = true;
-                logger.info(`[WhatsAppOtpService] OTP successfully sent after auto-provisioning API key.`);
+                logger.info(`[WhatsAppOtpService] OTP successfully sent after resolving real instance API key!`);
+
+                // Persist the resolved key to Firestore config so future dispatches succeed immediately
+                if (adminDb && resolvedApiKey !== whatsappApiKey) {
+                  try {
+                    await adminDb.collection("config").doc("whatsapp_api").set(
+                      { whatsappApiKey: resolvedApiKey, updatedAt: new Date().toISOString() },
+                      { merge: true }
+                    );
+                    logger.info(`[WhatsAppOtpService] Updated Firestore config/whatsapp_api with working API key.`);
+                  } catch {}
+                }
               } else {
                 const retryText = await retryRes.text();
-                logger.error(`[WhatsAppOtpService] Retry after provisioning failed: ${retryRes.status} ${retryText}`);
+                logger.error(`[WhatsAppOtpService] Retry with resolved API key failed: ${retryRes.status} ${retryText}`);
+                apiErrorMsg = `Gateway responded with status ${retryRes.status}: ${retryText}`;
               }
             }
           }
