@@ -117,19 +117,35 @@ export class WhatsAppOtpService {
 
     if (whatsappApiUrl && whatsappApiKey && whatsappInstanceId) {
       try {
+        // Construct canonical target URL endpoint: ensure it points to /api/send/text
+        let targetUrl = whatsappApiUrl.trim().replace(/\/+$/, "");
+        targetUrl = targetUrl.replace("whatsapp-5fda.onrender.com", "whatsapp-b5os.onrender.com");
+
+        if (!targetUrl.includes("/api/send/text") && !targetUrl.includes("/send/text")) {
+          if (targetUrl.endsWith("/api")) {
+            targetUrl = `${targetUrl}/send/text`;
+          } else {
+            targetUrl = `${targetUrl}/api/send/text`;
+          }
+        }
+
         const payload = {
           number: cleanPhone,
           message: messageText,
+          instanceId: whatsappInstanceId,
         };
 
-        logger.info(`[WhatsAppOtpService] Dispatching OTP message to WhatsApp gateway... | phone=${cleanPhone}`);
+        logger.info(`[WhatsAppOtpService] Dispatching OTP message to WhatsApp gateway endpoint: ${targetUrl} | phone=${cleanPhone}`);
 
-        const res = await fetch(whatsappApiUrl, {
+        const res = await fetch(targetUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-API-Key": whatsappApiKey,
+            "x-api-key": whatsappApiKey,
+            "apikey": whatsappApiKey,
             "X-Instance-ID": whatsappInstanceId,
+            "Authorization": `Bearer ${whatsappApiKey}`,
           },
           body: JSON.stringify(payload),
         });
