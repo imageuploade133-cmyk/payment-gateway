@@ -3,6 +3,7 @@ import logger from "../config/logger";
 import { FirestoreIdempotency } from "./firestoreIdempotency";
 import { adminDb } from "../config/firebase";
 import { NotificationService } from "./notificationService";
+import { FieldValue } from "firebase-admin/firestore";
 
 export interface IdempotencyProvider {
   isDuplicate(reference: string): Promise<boolean>;
@@ -76,10 +77,13 @@ export class TransferService {
   }
 
   public async executeTransfer(params: InitiateTransferParams): Promise<TransferResult> {
-    const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId, userId, fee = 0, vat = 0, markup = 0, bank_name } = params;
+    const { amount, account_number, bank_code, account_name, currency = "NGN", narration, reference, requestId, userId, fee = 0, vat = 0, markup = 0, bank_name } = params;
+
+    const totalDebited = amount + fee + markup + vat;
+    let localDebitPerformed = false;
 
     logger.info(
-      `[TransferService] Starting transfer process | reference=${reference} | amount=${amount} | account=${account_number} | reqId=${requestId}`
+      `[TransferService] Starting transfer process | reference=${reference} | amount=${amount} | fee=${fee} | markup=${markup} | totalDebited=${totalDebited} | account=${account_number} | reqId=${requestId}`
     );
 
     // Atomically reserve the reference before contacting Flutterwave.
@@ -106,6 +110,113 @@ export class TransferService {
       await this.idempotencyProvider.saveReference(reference);
     }
 
+    // 1. Atomically verify wallet balance and deduct totalDebited (amount + fee + markup + vat) if not already debited by caller
+    if (adminDb && userId && userId !== "N/A") {
+      const db = adminDb;
+      try {
+        const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
+        const userRef = db.collection("users").doc(userId);
+        const walletRef = db.collection("wallets").doc(`${userId}_${currency || "NGN"}`);
+
+        const debitResult = await db.runTransaction(async (t) => {
+          const txSnap = await t.get(unifiedTxRef);
+          if (txSnap.exists) {
+            const txData = txSnap.data() || {};
+            // If already debited by caller (e.g. Next.js WalletService.debitWallet), skip double debit
+            if (txData.direction === "DEBIT" || txData.type === "TRANSFER") {
+              logger.info(`[TransferService] Transaction tx-${reference} already debited by caller. Skipping double debit.`);
+              return { success: true, alreadyDebited: true };
+            }
+          }
+
+          const userSnap = await t.get(userRef);
+          if (!userSnap.exists) {
+            return { success: false, error: "User profile document not found." };
+          }
+
+          const walletSnap = await t.get(walletRef);
+          const currentWalletBal = walletSnap.exists ? Number(walletSnap.data()?.balance || 0) : 0;
+          const currentUserBal = Number(userSnap.data()?.balance || 0);
+          const availableBal = walletSnap.exists ? currentWalletBal : currentUserBal;
+
+          if (availableBal < totalDebited) {
+            return {
+              success: false,
+              error: `Insufficient wallet balance to complete transfer. Required: ₦${totalDebited.toLocaleString(undefined, { minimumFractionDigits: 2 })}, Available: ₦${availableBal.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+            };
+          }
+
+          t.update(userRef, {
+            balance: FieldValue.increment(-totalDebited),
+            updatedAt: new Date().toISOString(),
+          });
+
+          if (walletSnap.exists) {
+            t.update(walletRef, {
+              balance: FieldValue.increment(-totalDebited),
+              updatedAt: new Date().toISOString(),
+            });
+          }
+
+          const createdAtIso = new Date().toISOString();
+          t.set(unifiedTxRef, {
+            userId,
+            amount,
+            currency: currency || "NGN",
+            reference,
+            transactionNumber: reference,
+            type: "TRANSFER",
+            category: "transfer",
+            direction: "DEBIT",
+            title: "Transfer To",
+            description: narration || `Transfer to ${account_name}`,
+            recipientName: account_name,
+            recipientBankName: bank_name || null,
+            recipientAccountNumber: account_number,
+            beneficiaryName: account_name,
+            beneficiaryAccountNumber: account_number,
+            beneficiaryBankCode: bank_code,
+            beneficiaryBankName: bank_name || null,
+            fee,
+            transferFee: fee,
+            vat,
+            markup,
+            totalDebited,
+            status: "PENDING",
+            transactionDate: createdAtIso,
+            createdAt: createdAtIso,
+          }, { merge: true });
+
+          return { success: true, alreadyDebited: false };
+        });
+
+        if (!debitResult.success) {
+          logger.warn(`[TransferService] Wallet debit failed for reference=${reference}: ${debitResult.error}`);
+          return {
+            success: false,
+            reference,
+            status: "failed",
+            message: debitResult.error || "Insufficient wallet balance to execute transfer.",
+          };
+        }
+
+        if (!debitResult.alreadyDebited) {
+          localDebitPerformed = true;
+          logger.info(`[TransferService] Successfully debited ₦${totalDebited} from user=${userId} for ref=${reference}`);
+        }
+
+      } catch (debitErr: any) {
+        logger.error(`[TransferService] Wallet debit transaction exception for ref=${reference}: ${debitErr.message}`);
+        return {
+          success: false,
+          reference,
+          status: "failed",
+          message: "Failed to execute wallet balance deduction.",
+        };
+      }
+    }
+
+    // 2. Call Flutterwave transfer provider
     try {
       const client = getFlutterwaveClient();
       const payload = {
@@ -129,7 +240,6 @@ export class TransferService {
 
         await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", dbStatus, flwId);
 
-        const totalDebited = amount + fee + markup + vat;
         const createdAt = new Date();
         const createdAtIso = createdAt.toISOString();
         const expiresAt = new Date(createdAt.getTime() + TRANSFER_PENDING_EXPIRY_MS).toISOString();
@@ -208,7 +318,7 @@ export class TransferService {
           try {
             await NotificationService.sendPushNotification(userId, {
               title: "Transfer To",
-              body: `Transfer of ${currency} ${amount.toLocaleString()} to ${account_name} was ${dbStatus === "success" ? "successful" : dbStatus === "failed" ? "failed" : "initiated"}.`,
+              body: `Transfer of ${currency} ₦${amount.toLocaleString(undefined, { minimumFractionDigits: 2 })} to ${account_name} was ${dbStatus === "success" ? "successful" : dbStatus === "failed" ? "failed" : "initiated"}.`,
               type: "transaction",
               reference,
               amount,
@@ -233,17 +343,68 @@ export class TransferService {
         };
       }
 
-      // The provider explicitly rejected the request. It is safe to finalize the reservation as failed.
+      // Provider explicitly rejected the request -> Roll back local debit if executed in this method
+      if (localDebitPerformed && adminDb && userId && userId !== "N/A") {
+        const db = adminDb;
+        try {
+          const userRef = db.collection("users").doc(userId);
+          const walletRef = db.collection("wallets").doc(`${userId}_${currency || "NGN"}`);
+          await db.runTransaction(async (rollbackTx) => {
+            rollbackTx.update(userRef, {
+              balance: FieldValue.increment(totalDebited),
+              updatedAt: new Date().toISOString(),
+            });
+            const wSnap = await rollbackTx.get(walletRef);
+            if (wSnap.exists) {
+              rollbackTx.update(walletRef, {
+                balance: FieldValue.increment(totalDebited),
+                updatedAt: new Date().toISOString(),
+              });
+            }
+            const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
+            rollbackTx.update(unifiedTxRef, { status: "FAILED" });
+          });
+          logger.info(`[TransferService] Successfully rolled back local wallet debit of ₦${totalDebited} for ref=${reference}`);
+        } catch (rbErr: any) {
+          logger.error(`[TransferService] Failed rolling back local wallet debit for ref=${reference}: ${rbErr.message}`);
+        }
+      }
+
       await (this.idempotencyProvider as any).saveReference(reference, "flutterwave", "failed");
       return {
         success: false,
         reference,
         status: "failed",
-        message: "The payment provider returned an unexpected response.",
+        message: response?.message || "The payment provider rejected the transfer request.",
       };
     } catch (error: any) {
-      // Keep the reference reserved on transport/unknown failures. This prevents a retry
-      // from creating a second provider transaction. Reconciliation can inspect the reference.
+      // On provider transport exception, if local debit was performed, roll back if failure is immediate
+      if (localDebitPerformed && adminDb && userId && userId !== "N/A") {
+        const db = adminDb;
+        try {
+          const userRef = db.collection("users").doc(userId);
+          const walletRef = db.collection("wallets").doc(`${userId}_${currency || "NGN"}`);
+          await db.runTransaction(async (rollbackTx) => {
+            rollbackTx.update(userRef, {
+              balance: FieldValue.increment(totalDebited),
+              updatedAt: new Date().toISOString(),
+            });
+            const wSnap = await rollbackTx.get(walletRef);
+            if (wSnap.exists) {
+              rollbackTx.update(walletRef, {
+                balance: FieldValue.increment(totalDebited),
+                updatedAt: new Date().toISOString(),
+              });
+            }
+            const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
+            rollbackTx.update(unifiedTxRef, { status: "FAILED" });
+          });
+          logger.info(`[TransferService] Successfully rolled back local wallet debit on exception for ref=${reference}`);
+        } catch (rbErr: any) {
+          logger.error(`[TransferService] Failed rolling back local wallet debit on exception for ref=${reference}: ${rbErr.message}`);
+        }
+      }
+
       logger.error(
         `[TransferService] Provider/transport failure; keeping idempotency reservation | reference=${reference} | error=${error.message || "Unknown provider error"} | reqId=${requestId}`
       );
@@ -251,8 +412,8 @@ export class TransferService {
       return {
         success: false,
         reference,
-        status: "pending",
-        message: "Transfer status is being reconciled. Please do not retry with the same reference.",
+        status: "failed",
+        message: error.message || "Transfer failed. Please check your balance and try again.",
       };
     }
   }

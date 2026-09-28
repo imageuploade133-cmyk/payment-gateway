@@ -1436,8 +1436,9 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
               // If another refund path already created it, this transaction must not credit again.
               if (!refundSnap.exists) {
                 const txData = txSnap.data() || {};
-                const userId = txData.userId || transferSnap.data()?.userId;
-                const refundAmount = Number(txData.totalDebited) || Number(txData.amount) || 0;
+                const transferData = transferSnap.exists ? transferSnap.data() || {} : {};
+                const userId = txData.userId || transferData.userId;
+                const refundAmount = Number(txData.totalDebited) || Number(transferData.totalDebited) || (Number(txData.amount || transferData.amount || 0) + Number(txData.fee || transferData.fee || 0) + Number(txData.markup || transferData.markup || 0) + Number(txData.vat || transferData.vat || 0));
 
                 if (userId && refundAmount > 0) {
                   const userRef = db.collection("users").doc(userId);
