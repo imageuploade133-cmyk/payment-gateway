@@ -97,7 +97,7 @@ export class WhatsAppOtpService {
               const setCookieHeader = loginRes.headers.get("set-cookie");
               if (setCookieHeader) sessionCookie = setCookieHeader;
 
-              const loginData = await loginRes.json().catch(() => ({}));
+              const loginData: any = await loginRes.json().catch(() => ({}));
               acquiredToken = loginData.token || loginData.apiKey || loginData.key || loginData.accessToken || "";
               break;
             }
