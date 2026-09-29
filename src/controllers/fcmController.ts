@@ -55,6 +55,32 @@ export async function registerToken(req: AuthenticatedRequest, res: Response): P
       updatedAt: now,
     }, { merge: true });
 
+    // Purge any tokens belonging to old superseded sessions so old devices NEVER receive pushes
+    if (sessionIdToStore) {
+      try {
+        const oldTokensSnap = await adminDb.collection("fcm_tokens")
+          .where("userId", "==", uid)
+          .get();
+        if (!oldTokensSnap.empty) {
+          const batch = adminDb.batch();
+          let deletedCount = 0;
+          oldTokensSnap.docs.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (docSnap.id !== tokenDocId && data.sessionId && data.sessionId !== sessionIdToStore) {
+              batch.delete(docSnap.ref);
+              deletedCount++;
+            }
+          });
+          if (deletedCount > 0) {
+            await batch.commit().catch(() => {});
+            logger.info(`[FCM Backend API] Purged ${deletedCount} superseded token(s) for user ${uid}`);
+          }
+        }
+      } catch (purgeErr: any) {
+        logger.warn(`[FCM Backend API] Superseded token purge warning: ${purgeErr.message}`);
+      }
+    }
+
     // Check for pending new device push notification marker
     const userRef = adminDb.collection("users").doc(uid);
     const userSnap = await userRef.get();
@@ -69,11 +95,31 @@ export async function registerToken(req: AuthenticatedRequest, res: Response): P
             body: "Your E-Global Pay account was successfully signed in on this device.",
           },
           data: {
+            title: "New Device Login",
+            body: "Your E-Global Pay account was successfully signed in on this device.",
             type: "security",
             event: "new_device_login",
           },
-          android: { priority: "high", notification: { sound: "default" } },
-          apns: { payload: { aps: { sound: "default" } } },
+          android: {
+            priority: "high" as const,
+            notification: {
+              sound: "default",
+              channelId: "eglobal_wallet_high_channel",
+              clickAction: "FLUTTER_NOTIFICATION_CLICK",
+            },
+          },
+          apns: {
+            payload: {
+              aps: {
+                alert: {
+                  title: "New Device Login",
+                  body: "Your E-Global Pay account was successfully signed in on this device.",
+                },
+                sound: "default",
+                badge: 1,
+              },
+            },
+          },
         });
         await userRef.update({ pendingNewDevicePushSessionId: null });
         logger.info(`[FCM Backend API] Successfully dispatched New Device Login push to token for user ${uid}`);
