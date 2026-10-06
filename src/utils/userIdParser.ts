@@ -21,16 +21,20 @@ export function parseUserIdFromTxRef(txRef?: string | null): string | null {
 }
 
 export function resolveFundingLedgerDocId(txRef?: string | null, flwId?: string | null): string {
+  const cleanFlwId = (flwId || "").trim();
+  // Requirement 2: The real Flutterwave provider transaction ID (flwId) MUST be the canonical funding idempotency identity!
+  if (cleanFlwId && cleanFlwId !== "N/A" && cleanFlwId !== "undefined" && cleanFlwId !== "null") {
+    if (cleanFlwId.startsWith("tx-FUNDING-flw-")) return cleanFlwId;
+    if (cleanFlwId.startsWith("tx-FUNDING-")) return `tx-FUNDING-flw-${cleanFlwId.replace("tx-FUNDING-", "")}`;
+    return `tx-FUNDING-flw-${cleanFlwId}`;
+  }
+
   const ref = (txRef || "").trim();
   if (ref) {
     if (ref.startsWith("tx-FUNDING-")) return ref;
     if (ref.startsWith("tx-")) return `tx-FUNDING-${ref.substring(3)}`;
     return `tx-FUNDING-${ref}`;
   }
-  const id = (flwId || "").trim();
-  if (id) {
-    if (id.startsWith("tx-FUNDING-")) return id;
-    return `tx-FUNDING-${id}`;
-  }
+
   return "tx-FUNDING-UNKNOWN";
 }

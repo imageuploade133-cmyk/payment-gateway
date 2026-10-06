@@ -548,7 +548,7 @@ Received: ${issue.received || "undefined"}`);
 
     const payload = validationResult.data;
     const keyPrefix = env.FLW_SECRET_KEY ? env.FLW_SECRET_KEY.slice(0, 12) : "MISSING";
-    logger.info(`[Flutterwave Controller] Sending to Flutterwave (Transfer Payload). Key prefix: ${keyPrefix} | Payload:`, payload);
+    logger.info(`[Flutterwave Controller] Sending to Flutterwave (Transfer Payload). Payload:`, payload);
 
     const result = await transferService.executeTransfer({
       amount: payload.amount,

@@ -1,121 +1,90 @@
-import axios, { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from "axios";
-import crypto from "crypto";
-import { PaymentProvider } from "../PaymentProvider";
-import { FlutterwaveConfig } from "./FlutterwaveConfig";
-import { FlutterwaveError } from "./FlutterwaveError";
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from "axios";
 import logger from "../../config/logger";
+import { FlutterwaveError } from "./FlutterwaveError";
 
-export class FlutterwaveClient implements PaymentProvider {
-  public readonly name = "flutterwave";
-  private readonly client: AxiosInstance;
-  private readonly config: FlutterwaveConfig;
+export interface FlutterwaveClientConfig {
+  baseUrl: string;
+  secretKey: string;
+  publicKey?: string;
+  webhookSecret?: string;
+  timeoutMs?: number;
+  maxRetries?: number;
+}
 
-  constructor(config: FlutterwaveConfig) {
+export class FlutterwaveClient {
+  private axiosInstance: AxiosInstance;
+  private config: FlutterwaveClientConfig;
+
+  constructor(config: FlutterwaveClientConfig) {
     this.config = {
       timeoutMs: 15000,
-      maxRetries: 3,
+      maxRetries: 2,
       ...config,
     };
 
-    this.client = axios.create({
+    if (!this.config.secretKey) {
+      throw new Error("FlutterwaveClient initialization failed: secretKey is required.");
+    }
+
+    this.axiosInstance = axios.create({
       baseURL: this.config.baseUrl,
       timeout: this.config.timeoutMs,
       headers: {
         "Content-Type": "application/json",
+        Authorization: `Bearer ${this.config.secretKey}`,
       },
     });
-
-    this.setupInterceptors();
-  }
-
-  private setupInterceptors(): void {
-    this.client.interceptors.request.use(
-      (reqConfig: InternalAxiosRequestConfig) => {
-        reqConfig.headers.Authorization = `Bearer ${this.config.secretKey}`;
-        logger.debug(
-          `[FlutterwaveClient] Outgoing Request: ${reqConfig.method?.toUpperCase()} ${reqConfig.url}`
-        );
-        return reqConfig;
-      },
-      (error: any) => {
-        logger.error(`[FlutterwaveClient] Request Setup Error: ${error.message}`);
-        return Promise.reject(error);
-      }
-    );
-
-    this.client.interceptors.response.use(
-      (response: AxiosResponse) => {
-        logger.debug(
-          `[FlutterwaveClient] Response Success: ${response.config.method?.toUpperCase()} ${response.config.url} | Status: ${response.status}`
-        );
-        return response;
-      },
-      async (error: any) => {
-        const reqConfig = error.config;
-        const isTransient = this.isTransientFailure(error);
-        const retryCount = reqConfig ? (reqConfig.metadata?.retryCount || 0) : 0;
-
-        if (isTransient && reqConfig && retryCount < (this.config.maxRetries || 3)) {
-          reqConfig.metadata = reqConfig.metadata || {};
-          reqConfig.metadata.retryCount = retryCount + 1;
-
-          const backoffDelay = Math.pow(2, retryCount) * 1000;
-          logger.warn(
-            `[FlutterwaveClient] Transient failure detected (${error.message || "Network Error"}). Retrying request: ${reqConfig.method?.toUpperCase()} ${reqConfig.url}. Attempt ${reqConfig.metadata.retryCount} of ${this.config.maxRetries}. Delaying for ${backoffDelay}ms...`
-          );
-
-          await new Promise((resolve) => setTimeout(resolve, backoffDelay));
-          return this.client(reqConfig);
-        }
-
-        const flwError = FlutterwaveError.fromError(error);
-        logger.error(
-          `[FlutterwaveClient] Request Failed: ${reqConfig?.method?.toUpperCase()} ${reqConfig?.url} | Status: ${flwError.statusCode} | Error: ${flwError.message}`
-        );
-        return Promise.reject(flwError);
-      }
-    );
-  }
-
-  private isTransientFailure(error: any): boolean {
-    if (!error.response) {
-      return true;
-    }
-    const status = error.response.status;
-    return status === 429 || status === 502 || status === 503 || status === 504;
   }
 
   public async request<T = any>(
     method: "get" | "post" | "put" | "delete",
-    endpoint: string,
+    url: string,
     data?: any,
-    headers?: Record<string, string>
+    customHeaders?: Record<string, string>
   ): Promise<T> {
-    try {
-      const response = await this.client.request<T>({
-        method,
-        url: endpoint,
-        data,
-        headers,
-      });
-      return response.data;
-    } catch (error: any) {
-      throw error;
+    const maxRetries = this.config.maxRetries || 2;
+    let attempt = 0;
+
+    while (true) {
+      try {
+        const config: AxiosRequestConfig = {
+          method,
+          url,
+          data,
+          headers: customHeaders ? { ...customHeaders } : undefined,
+        };
+
+        const response: AxiosResponse<T> = await this.axiosInstance.request(config);
+        return response.data;
+      } catch (error: any) {
+        attempt++;
+
+        const isNetworkError = !error.response;
+        const statusCode = error.response?.status;
+        const isTransientStatus = statusCode === 429 || (statusCode >= 500 && statusCode < 600);
+
+        const errorMessage = error.response?.data?.message || error.message || "Unknown Flutterwave API Error";
+
+        logger.error(`[FlutterwaveClient] Request Failed: ${method.toUpperCase()} ${url} | Status: ${statusCode || "NETWORK_ERROR"} | Error: ${errorMessage}`);
+
+        if ((isNetworkError || isTransientStatus) && attempt <= maxRetries) {
+          const delayMs = Math.pow(2, attempt) * 500;
+          logger.warn(`[FlutterwaveClient] Transient failure detected (${isNetworkError ? "Network Error" : `HTTP ${statusCode}`}). Retrying request: ${method.toUpperCase()} ${url}. Attempt ${attempt} of ${maxRetries}. Delaying for ${delayMs}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+
+        throw new FlutterwaveError(
+          `Flutterwave API Request Failed: ${errorMessage}`,
+          statusCode,
+          error.response?.data
+        );
+      }
     }
   }
 
-  /**
-   * Verifies the authenticity of an incoming Flutterwave webhook signature header.
-   */
   public verifyWebhookSignature(signatureHeader: string | null, payloadString: string): boolean {
     const secret = this.config.webhookSecret;
-
-    logger.info("[Webhook] Signature verification initiated.");
-    logger.info(`[Webhook] Signature header exists: ${!!signatureHeader}`);
-    logger.info(`[Webhook] Signature length: ${signatureHeader?.length ?? 0}`);
-    logger.info(`[Webhook] Secret loaded: ${!!secret}`);
-    logger.info(`[Webhook] Secret length: ${secret?.length ?? 0}`);
-    logger.info("[Webhook] Verification method being used: Direct Secret Hash Comparison");
 
     if (!signatureHeader || !secret) {
       logger.warn("[Webhook] Verification failed: Missing signature header or loaded webhook secret.");
@@ -123,9 +92,8 @@ export class FlutterwaveClient implements PaymentProvider {
     }
 
     try {
-      // Direct string comparison as specified by Flutterwave Webhook Secret Hash documentation
       const isVerified = signatureHeader === secret;
-      logger.info(`[Webhook] Signature verification success: ${isVerified}`);
+      logger.info(`[Webhook] Signature verification status: ${isVerified}`);
       return isVerified;
     } catch (error: any) {
       logger.error(`[FlutterwaveClient] Signature validation exception: ${error.message}`);
@@ -146,4 +114,3 @@ export class FlutterwaveClient implements PaymentProvider {
     }
   }
 }
-export default FlutterwaveClient;
