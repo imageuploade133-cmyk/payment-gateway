@@ -13,7 +13,7 @@ const mockedAxios = axios as jest.Mocked<typeof axios>;
 // Mock adminDb
 jest.mock("../config/firebase", () => {
   const mDoc = {
-    get: jest.fn(),
+    get: jest.fn().mockResolvedValue({ exists: true, data: () => ({ balance: 1000 }) }),
     set: jest.fn(),
     update: jest.fn(),
   };
@@ -403,6 +403,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
@@ -419,6 +420,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
@@ -429,6 +431,44 @@ describe("Clubkonnect Provider Integration Tests", () => {
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
       expect(res.body.message).toContain("amount must be between ₦50 and ₦200,000");
+    });
+
+    it("should map AIRTIME_RECIPIENT_PURCHASE_LIMIT_REACHED to clear user-facing limit error message", async () => {
+      const mockUserDoc = {
+        exists: true,
+        data: () => ({ balance: 1000 }),
+      };
+
+      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
+        return callback({
+          get: jest.fn().mockResolvedValue(mockUserDoc),
+          set: jest.fn(),
+          update: jest.fn(),
+        });
+      });
+
+      mockedAxios.get.mockResolvedValueOnce({
+        status: 200,
+        data: {
+          status: "FAILED",
+          remark: "AIRTIME_RECIPIENT_PURCHASE_LIMIT_REACHED",
+        },
+      });
+
+      const res = await request(app)
+        .post("/api/vtu/airtime")
+        .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
+        .set("Authorization", `Bearer ${getTestAuthToken()}`)
+        .send({
+          network: "MTN",
+          phone: "08031234567",
+          amount: 100,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe("This recipient has reached the airtime purchase limit. Please try another phone number.");
     });
   });
 
@@ -459,6 +499,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/data")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
@@ -475,6 +516,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/data")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",

@@ -9,23 +9,51 @@ export interface ClubkonnectConfig {
   API_KEY: string;
 }
 
-function validateClubkonnectConfig(): ClubkonnectConfig {
-  const BASE_URL = process.env.CLUBKONNECT_BASE_URL || "https://www.nellobytesystems.com";
-  const USER_ID = process.env.CLUBKONNECT_USER_ID;
-  const API_KEY = process.env.CLUBKONNECT_API_KEY;
-
-  if (!USER_ID || !API_KEY) {
-    logger.warn(`[Clubkonnect Config] Configuration Warning: Missing CLUBKONNECT_USER_ID or CLUBKONNECT_API_KEY in environment.`);
+function cleanCredential(val?: string): string {
+  if (!val) return "";
+  let str = String(val).trim();
+  // Strip quotes if accidentally included in .env
+  if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
+    str = str.slice(1, -1).trim();
   }
-
-  return {
-    BASE_URL,
-    USER_ID: USER_ID || "",
-    API_KEY: API_KEY || "",
-  };
+  // Strip control characters like \r or \n
+  return str.replace(/[\r\n\t]/g, "").trim();
 }
 
-export const clubkonnectConfig = validateClubkonnectConfig();
+class DynamicClubkonnectConfig implements ClubkonnectConfig {
+  private customUserId?: string;
+  private customApiKey?: string;
+  private customBaseUrl?: string;
+
+  get BASE_URL(): string {
+    const raw = this.customBaseUrl || process.env.CLUBKONNECT_BASE_URL || "https://www.nellobytesystems.com";
+    return cleanCredential(raw).replace(/\/+$/, "") || "https://www.nellobytesystems.com";
+  }
+
+  set BASE_URL(val: string) {
+    this.customBaseUrl = val;
+  }
+
+  get USER_ID(): string {
+    const raw = this.customUserId !== undefined ? this.customUserId : (process.env.CLUBKONNECT_USER_ID || "");
+    return cleanCredential(raw);
+  }
+
+  set USER_ID(val: string) {
+    this.customUserId = val;
+  }
+
+  get API_KEY(): string {
+    const raw = this.customApiKey !== undefined ? this.customApiKey : (process.env.CLUBKONNECT_API_KEY || "");
+    return cleanCredential(raw);
+  }
+
+  set API_KEY(val: string) {
+    this.customApiKey = val;
+  }
+}
+
+export const clubkonnectConfig: ClubkonnectConfig = new DynamicClubkonnectConfig();
 
 // Hardcoded default network mappings as reliable fallback
 export const DEFAULT_NETWORK_MAPPINGS: Record<string, string> = {

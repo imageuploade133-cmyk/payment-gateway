@@ -20,17 +20,31 @@ export function parseUserIdFromTxRef(txRef?: string | null): string | null {
   return null;
 }
 
+export function isValidFlwId(flwId?: string | null): boolean {
+  if (!flwId) return false;
+  const clean = String(flwId).trim();
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower === "n/a" || lower === "undefined" || lower === "null" || lower === "0" || lower === "unknown") {
+    return false;
+  }
+  return true;
+}
+
 export function resolveFundingLedgerDocId(txRef?: string | null, flwId?: string | null): string {
+  const cleanFlwId = (flwId || "").trim();
+  if (isValidFlwId(cleanFlwId)) {
+    if (cleanFlwId.startsWith("tx-FUNDING-flw-")) return cleanFlwId;
+    if (cleanFlwId.startsWith("tx-FUNDING-")) return `tx-FUNDING-flw-${cleanFlwId.replace("tx-FUNDING-", "")}`;
+    return `tx-FUNDING-flw-${cleanFlwId}`;
+  }
+
   const ref = (txRef || "").trim();
-  if (ref) {
+  if (ref && !ref.startsWith("user-wallet-")) {
     if (ref.startsWith("tx-FUNDING-")) return ref;
     if (ref.startsWith("tx-")) return `tx-FUNDING-${ref.substring(3)}`;
     return `tx-FUNDING-${ref}`;
   }
-  const id = (flwId || "").trim();
-  if (id) {
-    if (id.startsWith("tx-FUNDING-")) return id;
-    return `tx-FUNDING-${id}`;
-  }
+
   return "tx-FUNDING-UNKNOWN";
 }

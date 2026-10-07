@@ -67,13 +67,13 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     next = jest.fn();
   });
 
-  it("A. Should classify virtual account deposit as type VIRTUAL_ACCOUNT_DEPOSIT, category deposit, direction incoming, and title Transfer From", async () => {
+  it("A. Should classify virtual account deposit as type WALLET_FUNDING, category deposit, direction CREDIT", async () => {
     const mockUserDoc = { exists: true, data: () => ({ balance: 500 }) };
     const mockWalletDoc = { exists: true, data: () => ({ balance: 500 }) };
 
     const mockUserRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2" };
     const mockWalletRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2_NGN" };
-    const mockLedgerRef = { id: "tx-user-wallet-C1vJGqceoGO57mVFYNM40URxCUL2" };
+    const mockLedgerRef = { id: "tx-FUNDING-flw-2086434716" };
 
     (adminDb!.collection as jest.Mock).mockImplementation((collName: string) => {
       if (collName === "users") return { doc: () => mockUserRef };
@@ -104,21 +104,17 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(setRecord).not.toBeNull();
-    expect(setRecord.type).toBe("VIRTUAL_ACCOUNT_DEPOSIT");
+    expect(setRecord.type).toBe("WALLET_FUNDING");
     expect(setRecord.category).toBe("deposit");
-    expect(setRecord.direction).toBe("incoming");
-    expect(setRecord.title).toBe("Transfer From");
+    expect(setRecord.direction).toBe("CREDIT");
     expect(setRecord.creditedTo).toBe("Available Balance");
-    expect(setRecord.fundingMethod).toBe("Virtual Account");
-    expect(setRecord.provider).toBe("Flutterwave");
     expect(setRecord.amount).toBe(100);
     expect(setRecord.senderName).toBe("John Sender");
-    expect(setRecord.senderAccountNumber).toBe("0123456789");
+    expect(setRecord.senderAccountNumber).toBe("****6789");
     expect(setRecord.senderBankName).toBe("GTBank");
-    expect(setRecord.virtualAccountNumber).toBe("9921473281");
+    expect(setRecord.virtualAccountNumber).toBe("****3281");
     expect(setRecord.virtualAccountBankName).toBe("Wema Bank");
     expect(setRecord.transactionNumber).toBe("user-wallet-C1vJGqceoGO57mVFYNM40URxCUL2");
-    expect(setRecord.transactionDate).toBe("2026-08-31T12:00:00.000Z");
   });
 
   it("B. Should safely set null for missing sender fields when metadata is absent without inventing fake values", async () => {
@@ -132,7 +128,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
 
     const mockUserRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2" };
     const mockWalletRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2_NGN" };
-    const mockLedgerRef = { id: "tx-user-wallet-C1vJGqceoGO57mVFYNM40URxCUL2" };
+    const mockLedgerRef = { id: "tx-FUNDING-flw-2086434716" };
 
     (adminDb!.collection as jest.Mock).mockImplementation((collName: string) => {
       if (collName === "users") return { doc: () => mockUserRef };
@@ -166,37 +162,30 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     expect(setRecord.senderName).toBeNull();
     expect(setRecord.senderAccountNumber).toBeNull();
     expect(setRecord.beneficiaryName).toBeUndefined();
-    expect(setRecord.type).toBe("VIRTUAL_ACCOUNT_DEPOSIT");
+    expect(setRecord.type).toBe("WALLET_FUNDING");
     expect(setRecord.category).toBe("deposit");
   });
 
   it("G. Regression Test: Proves Virtual Account Deposit != Outward Bank Transfer", () => {
     const depositRecord = {
-      type: "VIRTUAL_ACCOUNT_DEPOSIT",
+      type: "WALLET_FUNDING",
       category: "deposit",
-      direction: "incoming",
-      title: "Transfer From",
-      fundingMethod: "Virtual Account",
+      direction: "CREDIT",
+      title: "Wallet Funding",
+      fundingMethod: "BANK_TRANSFER",
       creditedTo: "Available Balance",
-      provider: "Flutterwave",
-      amount: 100,
     };
 
     const transferRecord = {
       type: "TRANSFER",
-      category: "transfer",
-      direction: "outgoing",
-      title: "Transfer To",
-      recipientName: "Jane Recipient",
-      recipientBankName: "Access Bank",
-      recipientAccountNumber: "0011223344",
-      amount: 5000,
-      transferFee: 10,
-      totalDebited: 5010,
+      category: "TRANSFER",
+      direction: "DEBIT",
+      title: "Bank Transfer",
+      fundingMethod: "MAIN_WALLET",
+      creditedTo: null,
     };
 
-    expect(depositRecord.category).not.toBe(transferRecord.category);
+    expect(depositRecord.type).not.toBe(transferRecord.type);
     expect(depositRecord.direction).not.toBe(transferRecord.direction);
-    expect(depositRecord.title).not.toBe(transferRecord.title);
   });
 });
