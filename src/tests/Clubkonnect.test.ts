@@ -1,7 +1,7 @@
 import request from "supertest";
 import app from "../app";
 import axios from "axios";
-import { ClubkonnectService } from "../services/clubkonnect.service";
+import { ClubkonnectService, sanitizeUrlAndPayload, extractSanitizedAxiosError } from "../services/clubkonnect.service";
 import { clubkonnectConfig } from "../config/clubkonnect";
 import { env } from "../config/env";
 import { adminDb } from "../config/firebase";
@@ -318,6 +318,42 @@ describe("Clubkonnect Provider Integration Tests", () => {
         expect.stringContaining("MobileNumber=08031234567"),
         expect.any(Object)
       );
+    });
+
+    it("should capture HTTP 503 error details and sanitize APIKey credentials in diagnostic logs", async () => {
+      const axiosError = {
+        message: "Request failed with status code 503",
+        code: "ERR_BAD_RESPONSE",
+        response: {
+          status: 503,
+          data: "<html><body>Service Unavailable - APIKey=SECRET_KEY_12345678</body></html>",
+          headers: {
+            "content-type": "text/html",
+            "server": "cloudflare",
+          },
+        },
+      };
+
+      mockedAxios.get.mockRejectedValue(axiosError);
+
+      await expect(
+        ClubkonnectService.purchaseData({
+          network: "MTN",
+          phone: "08031234567",
+          planCode: "38",
+          requestId: "test-503-diag",
+        })
+      ).rejects.toThrow("Failed to complete mobile data purchase from Clubkonnect after 3 attempts. Provider status: 503");
+
+      expect(mockedAxios.get).toHaveBeenCalledTimes(3);
+
+      const diag = extractSanitizedAxiosError(axiosError);
+      expect(diag.status).toBe(503);
+      expect(diag.body).toContain("APIKey=SEC***78");
+      expect(diag.body).not.toContain("SECRET_KEY_12345678");
+
+      const maskedUrl = sanitizeUrlAndPayload("https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=CK100&APIKey=SECRET_KEY_12345678");
+      expect(maskedUrl).toBe("https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=CK100&APIKey=SEC***78");
     });
   });
 
