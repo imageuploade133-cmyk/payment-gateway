@@ -1,6 +1,7 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from "axios";
 import logger from "../../config/logger";
 import { FlutterwaveError } from "./FlutterwaveError";
+import { PaymentProvider } from "../PaymentProvider";
 
 export interface FlutterwaveClientConfig {
   baseUrl: string;
@@ -11,7 +12,8 @@ export interface FlutterwaveClientConfig {
   maxRetries?: number;
 }
 
-export class FlutterwaveClient {
+export class FlutterwaveClient implements PaymentProvider {
+  public readonly name = "flutterwave";
   private axiosInstance: AxiosInstance;
   private config: FlutterwaveClientConfig;
 
@@ -114,3 +116,5 @@ export class FlutterwaveClient {
     }
   }
 }
+
+export default FlutterwaveClient;
