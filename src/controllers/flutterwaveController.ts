@@ -15,6 +15,7 @@ import { BankCacheService } from "../services/bankCacheService";
 import { FieldValue } from "firebase-admin/firestore";
 import { AuthenticatedRequest } from "../middleware/auth";
 import { NotificationService } from "../services/notificationService";
+import { extractSenderInfo } from "../utils/senderExtractor";
 
 const idempotency = FirestoreIdempotency.getInstance();
 
@@ -1251,22 +1252,23 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
                 ussdBankName = ussdBankRaw ? String(ussdBankRaw) : null;
               }
 
-              const senderName = (result as any).sender_name || (result as any).customer?.name || null;
-              const senderBankName = (result as any).sender_bank || null;
-              const senderAccountNumber = maskAccount((result as any).sender_account);
-              const virtualAccountNumber = maskAccount((result as any).account_number);
-              const virtualAccountBankName = (result as any).bank_name || null;
+              const extractedSender = extractSenderInfo(result);
+              const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
 
-              let descStr = "Wallet Funding";
+              const senderName = extractedSender.senderName || existingData?.senderName || (result as any).sender_name || null;
+              const senderBankName = extractedSender.senderBankName || existingData?.senderBankName || (result as any).sender_bank || null;
+              const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber || (result as any).sender_account) || existingData?.senderAccountNumber || null;
+              const virtualAccountNumber = maskAccount((result as any).account_number) || existingData?.virtualAccountNumber || null;
+              const virtualAccountBankName = (result as any).bank_name || existingData?.virtualAccountBankName || null;
+
+              let descStr = existingData?.description || "Wallet Funding";
               if (resolvedFundingMethod === "CARD") {
                 descStr = maskedCardNumber ? `Card Payment (${maskedCardNumber})` : "Card Payment";
               } else if (resolvedFundingMethod === "USSD") {
                 descStr = ussdBankName ? `USSD • ${ussdBankName}` : "USSD Payment";
               } else {
-                descStr = senderName ? `Bank Transfer • From ${senderName}` : "Bank Transfer";
+                descStr = senderName ? `Transfer From ${senderName}` : (existingData?.description || "Bank Transfer");
               }
-
-              const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
 
               transaction.set(ledgerRef, {
                 userId,
@@ -1517,9 +1519,11 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         const amount = Number(payload.data?.amount) || 0;
         const data = payload.data || {};
 
-        const senderName = data.originatorname || data.originator_name || data.sender_name || data.customer?.name || data.meta?.senderName || undefined;
-        const senderBankName = data.originatorbankname || data.originator_bank || data.sender_bank || data.meta?.senderBankName || undefined;
-        const senderAccountNumber = maskAccount(data.originatoraccountnumber || data.originator_account || data.sender_account || data.meta?.senderAccountNumber);
+        const extractedSender = extractSenderInfo(data);
+
+        const senderName = extractedSender.senderName || data.sender_name || undefined;
+        const senderBankName = extractedSender.senderBankName || data.sender_bank || undefined;
+        const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber || data.sender_account) || undefined;
 
         const virtualAccountNumber = maskAccount(data.account_number || data.virtual_account_number);
         const virtualAccountBankName = data.bank_name || data.virtual_account_bank || undefined;
@@ -1677,16 +1681,20 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 ussdBankName = ussdBankRaw ? String(ussdBankRaw) : null;
               }
 
-              let descStr = "Wallet Funding";
+              const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
+
+              const finalSenderName = senderName || existingData?.senderName || null;
+              const finalSenderBankName = senderBankName || existingData?.senderBankName || null;
+              const finalSenderAccountNumber = senderAccountNumber || existingData?.senderAccountNumber || null;
+
+              let descStr = existingData?.description || "Wallet Funding";
               if (resolvedFundingMethod === "CARD") {
                 descStr = maskedCardNumber ? `Card Payment (${maskedCardNumber})` : "Card Payment";
               } else if (resolvedFundingMethod === "USSD") {
                 descStr = ussdBankName ? `USSD • ${ussdBankName}` : "USSD Payment";
               } else {
-                descStr = senderName ? `Bank Transfer • From ${senderName}` : "Bank Transfer";
+                descStr = finalSenderName ? `Transfer From ${finalSenderName}` : (existingData?.description || "Bank Transfer");
               }
-
-              const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
 
               transaction.set(ledgerRef, {
                 userId,
@@ -1709,9 +1717,9 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
                 cardLast4,
                 maskedCardNumber,
                 ussdBankName,
-                senderName: senderName || null,
-                senderBankName: senderBankName || null,
-                senderAccountNumber: senderAccountNumber || null,
+                senderName: finalSenderName,
+                senderBankName: finalSenderBankName,
+                senderAccountNumber: finalSenderAccountNumber,
                 virtualAccountNumber: virtualAccountNumber || null,
                 virtualAccountBankName: virtualAccountBankName || null,
                 status: "SUCCESS",
