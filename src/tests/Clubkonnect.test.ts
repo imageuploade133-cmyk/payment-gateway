@@ -282,7 +282,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
   });
 
   describe("ClubkonnectService.purchaseData", () => {
-    it("should successfully purchase mobile data plan", async () => {
+    it("should successfully purchase mobile data plan using APIDatabundleV1.asp endpoint", async () => {
       mockedAxios.get.mockResolvedValueOnce({
         status: 200,
         data: {
@@ -305,6 +305,19 @@ describe("Clubkonnect Provider Integration Tests", () => {
         status: "Pending",
         message: "Accepted",
       });
+
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining("APIDatabundleV1.asp"),
+        expect.any(Object)
+      );
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining("DataPlan=1"),
+        expect.any(Object)
+      );
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining("MobileNumber=08031234567"),
+        expect.any(Object)
+      );
     });
   });
 
