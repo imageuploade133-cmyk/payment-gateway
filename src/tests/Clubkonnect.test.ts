@@ -13,7 +13,7 @@ const mockedAxios = axios as jest.Mocked<typeof axios>;
 // Mock adminDb
 jest.mock("../config/firebase", () => {
   const mDoc = {
-    get: jest.fn(),
+    get: jest.fn().mockResolvedValue({ exists: true, data: () => ({ balance: 1000 }) }),
     set: jest.fn(),
     update: jest.fn(),
   };
@@ -403,6 +403,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
@@ -419,6 +420,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/airtime")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
@@ -459,6 +461,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/data")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",
@@ -475,6 +478,7 @@ describe("Clubkonnect Provider Integration Tests", () => {
       const res = await request(app)
         .post("/api/vtu/data")
         .set("X-API-Key", getTestApiKey())
+        .set("X-Session-ID", "test-session-123")
         .set("Authorization", `Bearer ${getTestAuthToken()}`)
         .send({
           network: "MTN",

@@ -103,7 +103,8 @@ export class ClubkonnectService {
       throw new Error("Invalid or empty response format received for network codes");
     } catch (error: any) {
       logger.error(`[Clubkonnect Service] Failed to fetch dynamic network codes: ${error.message} | reqId=${requestId}`);
-      // Fallback is already initialized in networkCache.mappings, do not overwrite if fetch fails
+      // Mark lastFetched so transient discovery failures cleanly use DEFAULT_NETWORK_MAPPINGS fallback without looping or throwing
+      networkCache.lastFetched = Date.now();
     }
   }
 
