@@ -46,6 +46,42 @@ export interface QueryTransactionResponse {
   remark?: string;
 }
 
+export function sanitizeUrlAndPayload(inputStr: string): string {
+  if (!inputStr || typeof inputStr !== "string") return "";
+  return inputStr.replace(/APIKey=([^&"'<>\s]+)/gi, (_match, keyVal) => {
+    if (!keyVal || keyVal.length <= 5) return "APIKey=***";
+    return `APIKey=${keyVal.slice(0, 3)}***${keyVal.slice(-2)}`;
+  });
+}
+
+export function extractSanitizedAxiosError(err: any) {
+  const status = err?.response?.status || "NO_STATUS";
+  let body = "NO_BODY";
+  if (err?.response?.data !== undefined && err?.response?.data !== null) {
+    if (typeof err.response.data === "object") {
+      body = sanitizeUrlAndPayload(JSON.stringify(err.response.data));
+    } else {
+      body = sanitizeUrlAndPayload(String(err.response.data));
+    }
+  }
+
+  let headers = "NO_HEADERS";
+  if (err?.response?.headers && typeof err.response.headers === "object") {
+    const h = err.response.headers;
+    headers = JSON.stringify({
+      "content-type": h["content-type"] || h["Content-Type"],
+      "server": h["server"] || h["Server"],
+      "cf-ray": h["cf-ray"] || h["Cf-Ray"],
+      "date": h["date"] || h["Date"],
+    });
+  }
+
+  const code = err?.code || "ERR_AXIOS";
+  const message = sanitizeUrlAndPayload(err?.message || "Axios HTTP request failed");
+
+  return { status, body, headers, code, message };
+}
+
 export class ClubkonnectService {
   /**
    * Refreshes the dynamic network code mappings from Clubkonnect API.
