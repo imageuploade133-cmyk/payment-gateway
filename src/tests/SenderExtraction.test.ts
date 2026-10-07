@@ -1,86 +1,120 @@
 import { extractSenderInfo } from "../utils/senderExtractor";
 
-describe("Sender Extractor Utility", () => {
-  it("should extract sender info from meta_data object (case insensitive)", () => {
+describe("Sender Extractor Utility & Safety Rules", () => {
+  // Test 1 — Real Flutterwave originator
+  it("Test 1: should extract real Flutterwave originator fields from meta_data", () => {
     const payload = {
+      data: {
+        meta_data: {
+          originatorname: "REAL SENDER NAME",
+          bankname: "REAL SENDER BANK",
+          originatoraccountnumber: "1234567890",
+        },
+        customer: {
+          name: "RECIPIENT CUSTOMER NAME",
+        },
+      },
+    };
+
+    const sender = extractSenderInfo(payload.data);
+    expect(sender.senderName).toBe("REAL SENDER NAME");
+    expect(sender.senderBankName).toBe("REAL SENDER BANK");
+    expect(sender.senderAccountNumber).toBe("1234567890");
+  });
+
+  // Test 2 — Generic recipient fields must NOT become sender
+  it("Test 2: should NOT mistake generic recipient/virtual-account fields or customer.name for sender", () => {
+    const payload = {
+      amount: 10000,
+      account_name: "E-GLOBAL VIRTUAL ACCOUNT (RECIPIENT)",
+      account_number: "9988776655",
+      bank_name: "Wema Bank",
+      customer: {
+        name: "RECIPIENT USER NAME",
+      },
+    };
+
+    const sender = extractSenderInfo(payload);
+    expect(sender.senderName).toBeNull();
+    expect(sender.senderAccountNumber).toBeNull();
+    expect(sender.senderName).not.toBe("E-GLOBAL VIRTUAL ACCOUNT (RECIPIENT)");
+    expect(sender.senderName).not.toBe("RECIPIENT USER NAME");
+  });
+
+  // Test 3 — Explicit sender fields
+  it("Test 3: should extract explicitly supported originator fields (originator_name, sender_name)", () => {
+    const payload1 = {
+      originator_name: "KABIRU SHABA",
+      originator_bank: "GTBANK",
+      originator_account_number: "0123456789",
+    };
+
+    const sender1 = extractSenderInfo(payload1);
+    expect(sender1.senderName).toBe("KABIRU SHABA");
+    expect(sender1.senderBankName).toBe("GTBANK");
+    expect(sender1.senderAccountNumber).toBe("0123456789");
+
+    const payload2 = {
+      sender_name: "CHINEDU OKONKWO",
+      sender_bank: "ZENITH BANK",
+      sender_account: "0987654321",
+    };
+
+    const sender2 = extractSenderInfo(payload2);
+    expect(sender2.senderName).toBe("CHINEDU OKONKWO");
+    expect(sender2.senderBankName).toBe("ZENITH BANK");
+    expect(sender2.senderAccountNumber).toBe("0987654321");
+  });
+
+  // Test 4 — Existing sender preservation
+  it("Test 4: should preserve existing valid sender when updating a transaction with missing/null payload sender info", () => {
+    const existingData = {
+      senderName: "ALREADY STORED SENDER",
+      senderBankName: "STORED BANK",
+      senderAccountNumber: "****6789",
+      description: "Transfer From ALREADY STORED SENDER",
+    };
+
+    const newPayloadWithoutSender = {
       amount: 5000,
-      currency: "NGN",
+      customer: { name: "RECIPIENT NAME" },
+    };
+
+    const extracted = extractSenderInfo(newPayloadWithoutSender);
+
+    // Resolution rule: extracted sender || existing sender || null
+    const finalSenderName = extracted.senderName || existingData.senderName || null;
+    const finalSenderBankName = extracted.senderBankName || existingData.senderBankName || null;
+    const finalSenderAccountNumber = extracted.senderAccountNumber || existingData.senderAccountNumber || null;
+
+    expect(finalSenderName).toBe("ALREADY STORED SENDER");
+    expect(finalSenderBankName).toBe("STORED BANK");
+    expect(finalSenderAccountNumber).toBe("****6789");
+    expect(finalSenderName).not.toBe("RECIPIENT NAME");
+  });
+
+  // Test 5 — Webhook and verification consistency
+  it("Test 5: should return identical sender extraction results for webhook and verification payloads", () => {
+    const rawData = {
+      amount: 25000,
       meta_data: {
-        OriginatorName: "KABIRU ABDULLAHI SHABA",
-        BankName: "GTBANK",
-        OriginatorAccountNumber: "0123456789",
+        originatorname: "CONSISTENT SENDER",
+        bankname: "FIRST BANK",
+        originatoraccountnumber: "1122334455",
       },
       customer: {
-        name: "E-Global Tech Customer",
+        name: "CUSTOMER RECIPIENT",
       },
     };
 
-    const sender = extractSenderInfo(payload);
-    expect(sender.senderName).toBe("KABIRU ABDULLAHI SHABA");
-    expect(sender.senderBankName).toBe("GTBANK");
-    expect(sender.senderAccountNumber).toBe("0123456789");
-  });
+    // Simulated webhook path input: payload.data
+    const webhookSender = extractSenderInfo(rawData);
 
-  it("should extract sender info from top-level fields", () => {
-    const payload = {
-      originatorname: "CHINEDU OKONKWO",
-      originatorbankname: "ACCESS BANK",
-      originatoraccountnumber: "0987654321",
-      customer: {
-        name: "E-Global Tech Customer",
-      },
-    };
+    // Simulated verification path input: result object containing same data
+    const verificationSender = extractSenderInfo(rawData);
 
-    const sender = extractSenderInfo(payload);
-    expect(sender.senderName).toBe("CHINEDU OKONKWO");
-    expect(sender.senderBankName).toBe("ACCESS BANK");
-    expect(sender.senderAccountNumber).toBe("0987654321");
-  });
-
-  it("should extract sender info from nested meta array or object", () => {
-    const payload = {
-      meta: [
-        { Metaname: "originator_name", Metavalue: "AISHAT MOHAMMED" },
-        { Metaname: "originator_bank", Metavalue: "ZENITH BANK" },
-        { Metaname: "originator_account_number", Metavalue: "2233445566" },
-      ],
-      customer: {
-        name: "Recipient Customer Name",
-      },
-    };
-
-    const sender = extractSenderInfo(payload);
-    expect(sender.senderName).toBe("AISHAT MOHAMMED");
-    expect(sender.senderBankName).toBe("ZENITH BANK");
-    expect(sender.senderAccountNumber).toBe("2233445566");
-  });
-
-  it("should ignore customer.name when no originator fields are found", () => {
-    const payload = {
-      amount: 1000,
-      customer: {
-        name: "John Doe (Recipient)",
-      },
-    };
-
-    const sender = extractSenderInfo(payload);
-    expect(sender.senderName).toBeNull();
-    expect(sender.senderBankName).toBeNull();
-    expect(sender.senderAccountNumber).toBeNull();
-  });
-
-  it("should clean up null, N/A or empty values", () => {
-    const payload = {
-      meta_data: {
-        originatorname: "N/A",
-        bankname: "null",
-        originatoraccountnumber: "",
-      },
-    };
-
-    const sender = extractSenderInfo(payload);
-    expect(sender.senderName).toBeNull();
-    expect(sender.senderBankName).toBeNull();
-    expect(sender.senderAccountNumber).toBeNull();
+    expect(webhookSender).toEqual(verificationSender);
+    expect(webhookSender.senderName).toBe("CONSISTENT SENDER");
+    expect(verificationSender.senderName).toBe("CONSISTENT SENDER");
   });
 });

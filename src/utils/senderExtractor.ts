@@ -63,13 +63,11 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     "originator_account_name",
     "sender_name",
     "senderName",
-    "sender",
-    "account_name",
+    "sender_account_name",
+    "senderAccountName",
   ];
 
   const bankNameKeys = [
-    "bankname",
-    "bank_name",
     "originatorbankname",
     "originator_bank_name",
     "originator_bank",
@@ -78,6 +76,7 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     "sender_bank",
     "senderBankName",
     "senderBank",
+    "bankname",
   ];
 
   const accountNumberKeys = [
@@ -89,7 +88,6 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     "sender_account",
     "senderAccountNumber",
     "senderAccount",
-    "account_number",
   ];
 
   const bankCodeKeys = [
