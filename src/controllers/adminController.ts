@@ -433,6 +433,84 @@ export class AdminController {
   }
 
   /**
+   * Permanently delete an unverified user and purge associated KYC records securely.
+   */
+  public static async deleteUnverifiedUser(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const reqId = req.requestId;
+    const { userId } = req.params;
+    const adminUid = req.user?.uid || "unknown-admin";
+
+    try {
+      if (!userId) {
+        res.status(400).json({ success: false, message: "User ID parameter is required." });
+        return;
+      }
+
+      if (!adminDb) {
+        res.status(500).json({ success: false, message: "Database offline." });
+        return;
+      }
+
+      const db = adminDb;
+      const userRef = db.collection("users").doc(userId);
+      const userSnap = await userRef.get();
+
+      if (!userSnap.exists) {
+        res.status(404).json({ success: false, message: "User document not found." });
+        return;
+      }
+
+      const userData = userSnap.data() || {};
+      const kycStatus = String(userData.kycStatus || "UNVERIFIED").toUpperCase();
+
+      if (kycStatus === "VERIFIED") {
+        res.status(400).json({
+          success: false,
+          message: "Cannot delete verified users from the unverified queue. Only UNVERIFIED or non-VERIFIED users can be purged."
+        });
+        return;
+      }
+
+      logger.info(`[AdminController] Admin ${adminUid} purging unverified user: ${userId} (kycStatus=${kycStatus}) | reqId=${reqId}`);
+
+      const kycRef = db.collection("kyc_submissions").doc(userId);
+      const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
+      const accountRef = db.collection("wallet_accounts").doc(userId);
+
+      await db.runTransaction(async (transaction) => {
+        transaction.delete(userRef);
+        transaction.delete(kycRef);
+        transaction.delete(walletRef);
+        transaction.delete(accountRef);
+      });
+
+      // Audit trail record
+      await db.collection("admin_audit_logs").add({
+        action: "delete_unverified_user",
+        adminUid,
+        targetUserId: userId,
+        previousKycStatus: kycStatus,
+        timestamp: new Date().toISOString(),
+        reqId: reqId || "N/A",
+      });
+
+      logger.info(`[AdminController] Successfully purged unverified user: ${userId} from database records | reqId=${reqId}`);
+
+      res.status(200).json({
+        success: true,
+        message: `Unverified user '${userId}' has been permanently deleted from server records.`,
+      });
+
+    } catch (error: any) {
+      logger.error(`[AdminController] deleteUnverifiedUser failure: ${error.message} | reqId=${reqId}`);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to delete unverified user."
+      });
+    }
+  }
+
+  /**
    * Reject a user's KYC submission securely.
    */
   public static async rejectKycSubmission(req: AuthenticatedRequest, res: Response): Promise<void> {

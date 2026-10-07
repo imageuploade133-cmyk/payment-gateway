@@ -25,6 +25,7 @@ router.get("/kyc/pending", requireFirebaseAuth, requireAdmin, requirePermission(
 router.post("/kyc/:userId/approve", requireFirebaseAuth, requireAdmin, requirePermission("kyc.approve"), AdminController.approveKycSubmission);
 router.post("/kyc/:userId/reject", requireFirebaseAuth, requireAdmin, requirePermission("kyc.reject"), AdminController.rejectKycSubmission);
 router.post("/kyc/:userId/retry-provisioning", requireFirebaseAuth, requireAdmin, requirePermission("kyc.approve"), AdminController.retryKycProvisioning);
+router.delete("/kyc/:userId", requireFirebaseAuth, requireAdmin, requirePermission("kyc.reject"), AdminController.deleteUnverifiedUser);
 
 // Secure Admin Management endpoints (strictly requires Firebase Auth + requireAdmin + requirePermission("admins.view" / "admins.edit"))
 router.get("/admins", requireFirebaseAuth, requireAdmin, requirePermission("admins.view"), AdminController.getAdmins);
