@@ -46,6 +46,60 @@ export interface QueryTransactionResponse {
   remark?: string;
 }
 
+export function sanitizeUrlAndPayload(inputStr: string): string {
+  if (!inputStr || typeof inputStr !== "string") return "";
+  let result = inputStr;
+
+  // Mask APIKey=... query params
+  result = result.replace(/APIKey=([^&"'<>\s]+)/gi, (_match, keyVal) => {
+    if (!keyVal || keyVal.length <= 5) return "APIKey=***";
+    return `APIKey=${keyVal.slice(0, 3)}***${keyVal.slice(-2)}`;
+  });
+
+  // Mask Authorization Bearer tokens
+  result = result.replace(/Bearer\s+([^\s"']+)/gi, "Bearer ***");
+
+  // Mask Firebase ID Tokens / generic Auth tokens
+  result = result.replace(/(idToken|firebaseToken|jwt|id_token|token)=([^&"'<>\s]+)/gi, "$1=***");
+
+  return result;
+}
+
+export function extractSanitizedAxiosError(err: any) {
+  const status = err?.response?.status || "NO_STATUS";
+
+  let body = "NO_BODY";
+  if (err?.response?.data !== undefined && err?.response?.data !== null) {
+    if (typeof err.response.data === "object") {
+      body = sanitizeUrlAndPayload(JSON.stringify(err.response.data));
+    } else {
+      body = sanitizeUrlAndPayload(String(err.response.data));
+    }
+  }
+
+  // Filter ONLY explicitly allowed response headers (content-type, server, cf-ray, date)
+  let headers = "NO_HEADERS";
+  if (err?.response?.headers && typeof err.response.headers === "object") {
+    const rawHeaders = err.response.headers;
+    const allowedHeaders: Record<string, string> = {};
+
+    const allowedKeys = ["content-type", "server", "cf-ray", "date"];
+    for (const [k, v] of Object.entries(rawHeaders)) {
+      const lowerKey = k.toLowerCase().trim();
+      if (allowedKeys.includes(lowerKey)) {
+        allowedHeaders[lowerKey] = sanitizeUrlAndPayload(String(v));
+      }
+    }
+
+    headers = JSON.stringify(allowedHeaders);
+  }
+
+  const code = err?.code || "ERR_AXIOS";
+  const message = sanitizeUrlAndPayload(err?.message || "Axios HTTP request failed");
+
+  return { status, body, headers, code, message };
+}
+
 export class ClubkonnectService {
   /**
    * Refreshes the dynamic network code mappings from Clubkonnect API.
@@ -451,12 +505,14 @@ export class ClubkonnectService {
         });
       } catch (requestError: any) {
         attempt++;
+        const errDiag = extractSanitizedAxiosError(requestError);
+
         logger.error(
-          `[Clubkonnect Service] Network/HTTP error executing airtime purchase (attempt ${attempt}/${maxRetries + 1}) | error=${requestError.message} | reqId=${requestId}`
+          `[Clubkonnect Service Diagnostic] Airtime purchase HTTP/Network Error | attempt=${attempt}/${maxRetries + 1} | HTTP Status=${errDiag.status} | Axios Error Code=${errDiag.code} | Error Message=${errDiag.message} | Response Body=${errDiag.body} | Response Headers=${errDiag.headers} | Request Params={UserID: "${USER_ID}", MobileNetwork: "${networkCode}", Amount: "${params.amount}", MobileNumber: "${params.phone}", RequestID: "${params.requestId}"} | reqId=${requestId}`
         );
 
         if (attempt > maxRetries) {
-          throw new Error(`Failed to complete airtime purchase from Clubkonnect after ${attempt} attempts. Original error: ${requestError.message}`);
+          throw new Error(`Failed to complete airtime purchase from Clubkonnect after ${attempt} attempts. Provider status: ${errDiag.status}. Original error: ${errDiag.message}`);
         }
         continue;
       }
@@ -525,12 +581,14 @@ export class ClubkonnectService {
         });
       } catch (requestError: any) {
         attempt++;
+        const errDiag = extractSanitizedAxiosError(requestError);
+
         logger.error(
-          `[Clubkonnect Service] Network/HTTP error executing mobile data purchase (attempt ${attempt}/${maxRetries + 1}) | error=${requestError.message} | reqId=${requestId}`
+          `[Clubkonnect Service Diagnostic] Mobile data purchase HTTP/Network Error | attempt=${attempt}/${maxRetries + 1} | HTTP Status=${errDiag.status} | Axios Error Code=${errDiag.code} | Error Message=${errDiag.message} | Response Body=${errDiag.body} | Response Headers=${errDiag.headers} | Request Params={UserID: "${USER_ID}", MobileNetwork: "${networkCode}", DataPlan: "${params.planCode}", MobileNumber: "${params.phone}", RequestID: "${params.requestId}"} | reqId=${requestId}`
         );
 
         if (attempt > maxRetries) {
-          throw new Error(`Failed to complete mobile data purchase from Clubkonnect after ${attempt} attempts. Original error: ${requestError.message}`);
+          throw new Error(`Failed to complete mobile data purchase from Clubkonnect after ${attempt} attempts. Provider status: ${errDiag.status}. Original error: ${errDiag.message}`);
         }
         continue;
       }

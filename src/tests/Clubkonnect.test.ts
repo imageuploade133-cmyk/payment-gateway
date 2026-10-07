@@ -1,7 +1,7 @@
 import request from "supertest";
 import app from "../app";
 import axios from "axios";
-import { ClubkonnectService } from "../services/clubkonnect.service";
+import { ClubkonnectService, extractSanitizedAxiosError, sanitizeUrlAndPayload } from "../services/clubkonnect.service";
 import { clubkonnectConfig } from "../config/clubkonnect";
 import { env } from "../config/env";
 import { adminDb } from "../config/firebase";
@@ -318,6 +318,61 @@ describe("Clubkonnect Provider Integration Tests", () => {
         expect.stringContaining("MobileNumber=08031234567"),
         expect.any(Object)
       );
+    });
+
+    it("should capture HTTP 503 error details, sanitize APIKey, Bearer tokens, and filter headers safely", async () => {
+      const axiosError = {
+        message: "Request failed with status code 503 - Bearer secret_bearer_token_999",
+        code: "ERR_BAD_RESPONSE",
+        response: {
+          status: 503,
+          data: "<html><body>Service Unavailable - APIKey=SECRET_KEY_12345678</body></html>",
+          headers: {
+            "content-type": "text/html",
+            "server": "cloudflare",
+            "cf-ray": "123456789abcdef-LHR",
+            "date": "Wed, 07 Oct 2026 22:00:00 GMT",
+            "set-cookie": "session_cookie_secret=abcdef123456",
+            "authorization": "Bearer secret_auth_header",
+          },
+        },
+      };
+
+      mockedAxios.get.mockRejectedValue(axiosError);
+
+      await expect(
+        ClubkonnectService.purchaseData({
+          network: "MTN",
+          phone: "08031234567",
+          planCode: "38",
+          requestId: "test-503-diag",
+        })
+      ).rejects.toThrow("Failed to complete mobile data purchase from Clubkonnect after 3 attempts. Provider status: 503");
+
+      expect(mockedAxios.get).toHaveBeenCalledTimes(3);
+
+      const diag = extractSanitizedAxiosError(axiosError);
+      expect(diag.status).toBe(503);
+      expect(diag.body).toContain("Service Unavailable");
+      expect(diag.body).toContain("APIKey=SEC***78");
+      expect(diag.body).not.toContain("SECRET_KEY_12345678");
+
+      // Verify token masking
+      expect(diag.message).toContain("Bearer ***");
+      expect(diag.message).not.toContain("secret_bearer_token_999");
+
+      // Verify header filtering: allowed headers retained, sensitive cookies/auth headers excluded
+      expect(diag.headers).toContain("content-type");
+      expect(diag.headers).toContain("server");
+      expect(diag.headers).toContain("cf-ray");
+      expect(diag.headers).toContain("date");
+      expect(diag.headers).not.toContain("set-cookie");
+      expect(diag.headers).not.toContain("session_cookie_secret");
+      expect(diag.headers).not.toContain("secret_auth_header");
+
+      // Verify sanitizeUrlAndPayload standalone helper
+      const maskedUrl = sanitizeUrlAndPayload("https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=CK100&APIKey=SECRET_KEY_12345678&idToken=SECRET_FIREBASE_TOKEN");
+      expect(maskedUrl).toBe("https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=CK100&APIKey=SEC***78&idToken=***");
     });
   });
 
