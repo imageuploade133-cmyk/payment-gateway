@@ -9,13 +9,25 @@ export interface ClubkonnectConfig {
   API_KEY: string;
 }
 
+function cleanCredential(val?: string): string {
+  if (!val) return "";
+  let str = String(val).trim();
+  // Strip quotes if accidentally included in .env
+  if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
+    str = str.slice(1, -1).trim();
+  }
+  // Strip control characters like \r or \n
+  return str.replace(/[\r\n\t]/g, "").trim();
+}
+
 class DynamicClubkonnectConfig implements ClubkonnectConfig {
   private customUserId?: string;
   private customApiKey?: string;
   private customBaseUrl?: string;
 
   get BASE_URL(): string {
-    return this.customBaseUrl || process.env.CLUBKONNECT_BASE_URL || "https://www.nellobytesystems.com";
+    const raw = this.customBaseUrl || process.env.CLUBKONNECT_BASE_URL || "https://www.nellobytesystems.com";
+    return cleanCredential(raw).replace(/\/+$/, "") || "https://www.nellobytesystems.com";
   }
 
   set BASE_URL(val: string) {
@@ -23,7 +35,8 @@ class DynamicClubkonnectConfig implements ClubkonnectConfig {
   }
 
   get USER_ID(): string {
-    return this.customUserId !== undefined ? this.customUserId : (process.env.CLUBKONNECT_USER_ID || "");
+    const raw = this.customUserId !== undefined ? this.customUserId : (process.env.CLUBKONNECT_USER_ID || "");
+    return cleanCredential(raw);
   }
 
   set USER_ID(val: string) {
@@ -31,7 +44,8 @@ class DynamicClubkonnectConfig implements ClubkonnectConfig {
   }
 
   get API_KEY(): string {
-    return this.customApiKey !== undefined ? this.customApiKey : (process.env.CLUBKONNECT_API_KEY || "");
+    const raw = this.customApiKey !== undefined ? this.customApiKey : (process.env.CLUBKONNECT_API_KEY || "");
+    return cleanCredential(raw);
   }
 
   set API_KEY(val: string) {
