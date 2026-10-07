@@ -55,11 +55,17 @@ export class ClubkonnectService {
     const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
     if (!USER_ID || !API_KEY) return;
 
-    const url = `${BASE_URL}/APIAirtimeNetworkV2.asp?UserID=${USER_ID}&APIKey=${API_KEY}`;
+    const url = `${BASE_URL}/APIAirtimeNetworkV2.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}`;
     logger.info(`[Clubkonnect Service] Refreshing dynamic network cache | reqId=${requestId}`);
 
     try {
-      const response: AxiosResponse = await axios.get(url, { timeout: 10000 });
+      const response: AxiosResponse = await axios.get(url, {
+        timeout: 10000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "Accept": "application/json, text/plain, */*",
+        },
+      });
       if (!response) {
         throw new Error("Empty response received from Clubkonnect API");
       }
@@ -103,8 +109,7 @@ export class ClubkonnectService {
       throw new Error("Invalid or empty response format received for network codes");
     } catch (error: any) {
       logger.error(`[Clubkonnect Service] Failed to fetch dynamic network codes: ${error.message} | reqId=${requestId}`);
-      // Mark lastFetched so transient discovery failures cleanly use DEFAULT_NETWORK_MAPPINGS fallback without looping or throwing
-      networkCache.lastFetched = Date.now();
+      // Fallback is already initialized in networkCache.mappings, do not overwrite if fetch fails
     }
   }
 
@@ -136,11 +141,17 @@ export class ClubkonnectService {
     if (!USER_ID || !API_KEY) return;
 
     // Call the correct verified Clubkonnect API endpoint: APIDatabundlePlansV2.asp
-    const url = `${BASE_URL}/APIDatabundlePlansV2.asp?UserID=${USER_ID}&APIKey=${API_KEY}`;
+    const url = `${BASE_URL}/APIDatabundlePlansV2.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}`;
     logger.info(`[Clubkonnect Service] Refreshing dynamic mobile data plans cache via APIDatabundlePlansV2.asp | reqId=${requestId}`);
 
     try {
-      const response: AxiosResponse = await axios.get(url, { timeout: 10000 });
+      const response: AxiosResponse = await axios.get(url, {
+        timeout: 10000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "Accept": "application/json, text/plain, */*",
+        },
+      });
       if (!response) {
         throw new Error("Empty response received from Clubkonnect API");
       }
@@ -343,7 +354,7 @@ export class ClubkonnectService {
       throw new Error("Clubkonnect credentials (CLUBKONNECT_USER_ID or CLUBKONNECT_API_KEY) are not configured.");
     }
 
-    const url = `${BASE_URL}/APIWalletBalanceV1.asp?UserID=${USER_ID}&APIKey=${API_KEY}`;
+    const url = `${BASE_URL}/APIWalletBalanceV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}`;
     const timeout = 10000; // 10 seconds timeout
     const maxRetries = 2; // 2 retries (3 total attempts)
 
@@ -360,7 +371,8 @@ export class ClubkonnectService {
         response = await axios.get(url, {
           timeout,
           headers: {
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json, text/plain, */*",
           },
         });
       } catch (requestError: any) {
@@ -415,7 +427,7 @@ export class ClubkonnectService {
 
     const networkCode = await this.getNetworkCode(params.network, requestId);
     const cbParam = params.callbackUrl ? `&CallBackURL=${encodeURIComponent(params.callbackUrl)}` : "";
-    const url = `${BASE_URL}/APIAirtimeV1.asp?UserID=${USER_ID}&APIKey=${API_KEY}&MobileNetwork=${networkCode}&Amount=${params.amount}&MobileNumber=${params.phone}&RequestID=${params.requestId}${cbParam}`;
+    const url = `${BASE_URL}/APIAirtimeV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&Amount=${params.amount}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
 
     const timeout = 10000; // 10 seconds
     const maxRetries = 2; // 2 retries (3 attempts total)
@@ -430,7 +442,13 @@ export class ClubkonnectService {
           `[Clubkonnect Service] Sending airtime purchase request | URL=${BASE_URL}/APIAirtimeV1.asp?UserID=${USER_ID}&APIKey=${maskedKey}&MobileNetwork=${networkCode}&Amount=${params.amount}&MobileNumber=${params.phone}&RequestID=${params.requestId} | attempt=${attempt + 1}/${maxRetries + 1} | reqId=${requestId}`
         );
 
-        response = await axios.get(url, { timeout });
+        response = await axios.get(url, {
+          timeout,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json, text/plain, */*",
+          },
+        });
       } catch (requestError: any) {
         attempt++;
         logger.error(
@@ -483,7 +501,7 @@ export class ClubkonnectService {
 
     const networkCode = await this.getNetworkCode(params.network, requestId);
     const cbParam = params.callbackUrl ? `&CallBackURL=${encodeURIComponent(params.callbackUrl)}` : "";
-    const url = `${BASE_URL}/APIDataV1.asp?UserID=${USER_ID}&APIKey=${API_KEY}&MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId}${cbParam}`;
+    const url = `${BASE_URL}/APIDataV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
 
     const timeout = 10000; // 10 seconds
     const maxRetries = 2; // 2 retries (3 attempts total)
@@ -498,7 +516,13 @@ export class ClubkonnectService {
           `[Clubkonnect Service] Sending mobile data purchase request | URL=${BASE_URL}/APIDataV1.asp?UserID=${USER_ID}&APIKey=${maskedKey}&MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | attempt=${attempt + 1}/${maxRetries + 1} | reqId=${requestId}`
         );
 
-        response = await axios.get(url, { timeout });
+        response = await axios.get(url, {
+          timeout,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json, text/plain, */*",
+          },
+        });
       } catch (requestError: any) {
         attempt++;
         logger.error(
@@ -558,7 +582,7 @@ export class ClubkonnectService {
       throw new Error("Either OrderID or RequestID must be provided to query transaction.");
     }
 
-    const url = `${BASE_URL}/APIQueryV1.asp?UserID=${USER_ID}&APIKey=${API_KEY}${queryParam}`;
+    const url = `${BASE_URL}/APIQueryV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}${queryParam}`;
     const timeout = 10000;
 
     try {
@@ -567,7 +591,13 @@ export class ClubkonnectService {
         `[Clubkonnect Service] Sending transaction query | URL=${BASE_URL}/APIQueryV1.asp?UserID=${USER_ID}&APIKey=${maskedKey}${queryParam} | reqId=${requestId}`
       );
 
-      const response: AxiosResponse = await axios.get(url, { timeout });
+      const response: AxiosResponse = await axios.get(url, {
+        timeout,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "Accept": "application/json, text/plain, */*",
+        },
+      });
       logger.info(
         `[Clubkonnect Service] Transaction query response received | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`
       );
