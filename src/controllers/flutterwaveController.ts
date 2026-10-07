@@ -1,5 +1,5 @@
 import { mapProviderStatus } from "../utils/statusMapper";
-import { parseUserIdFromTxRef, resolveFundingLedgerDocId } from "../utils/userIdParser";
+import { parseUserIdFromTxRef, resolveFundingLedgerDocId, isValidFlwId } from "../utils/userIdParser";
 import { env } from "../config/env";
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
@@ -1073,6 +1073,30 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
         newBalance: 0,
       };
 
+      if (!isValidFlwId(flwId)) {
+        logger.error(`[verifyPayment] Automatic credit refused: missing or invalid flwId ('${flwId}'). Reference='${referenceToUse}'`);
+        if (adminDb && referenceToUse) {
+          try {
+            await adminDb.collection("transactions").doc(ledgerDocId).set({
+              status: "PENDING",
+              totalCredited: 0,
+              credited: false,
+              unmatched: true,
+              reason: "Automatic credit refused due to missing or invalid flwId identity",
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+          } catch (err: any) {
+            logger.warn(`[verifyPayment] Error flagging unmatched tx without valid flwId: ${err.message}`);
+          }
+        }
+        res.status(400).json({
+          success: false,
+          status: "FAILED",
+          message: "Payment verification failed: valid provider transaction ID (flwId) is required for automatic wallet crediting.",
+        });
+        return;
+      }
+
       if (adminDb && flwId) {
         const db = adminDb;
         try {
@@ -1486,7 +1510,7 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
       const statusRaw = payload.data?.status || "FAILED";
       const canonicalStatus = mapProviderStatus(statusRaw);
       const txRef = payload.data?.tx_ref || "";
-      const transactionId = flwId || "N/A";
+      const transactionId = flwId || "";
       const ledgerDocId = resolveFundingLedgerDocId(txRef, transactionId);
 
       if (canonicalStatus === "SUCCESS") {
@@ -1499,6 +1523,22 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
         const virtualAccountNumber = maskAccount(data.account_number || data.virtual_account_number);
         const virtualAccountBankName = data.bank_name || data.virtual_account_bank || undefined;
+
+        if (!isValidFlwId(flwId)) {
+          logger.error(`[Webhook charge.completed] Automatic credit refused: missing or invalid flwId ('${flwId}'). txRef='${txRef}'`);
+          if (adminDb && ledgerDocId !== "tx-FUNDING-UNKNOWN") {
+            await adminDb.collection("transactions").doc(ledgerDocId).set({
+              status: "PENDING",
+              totalCredited: 0,
+              credited: false,
+              unmatched: true,
+              reason: "Automatic credit refused due to missing or invalid flwId identity in webhook",
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+          }
+          res.status(200).json({ success: true, message: "Webhook acknowledged; held for manual review due to missing flwId" });
+          return;
+        }
 
         const userId = await resolveUserIdFromPayload(payload.data, txRef);
 

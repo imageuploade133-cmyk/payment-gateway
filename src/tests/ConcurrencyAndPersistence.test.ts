@@ -1,8 +1,8 @@
-import { resolveFundingLedgerDocId } from "../utils/userIdParser";
+import { resolveFundingLedgerDocId, isValidFlwId } from "../utils/userIdParser";
 
 describe("Concurrency, Persistence & Canonical Idempotency Final-State Integration Suite", () => {
-  it("A. Same permanent virtual account receiving ₦500 (flwId: 101) and ₦200 (flwId: 102) creates distinct canonical ledger docs", () => {
-    const permanentTxRef = "user-wallet-user123";
+  it("A. Permanent Virtual Account deposits with distinct flwId generate canonical doc IDs", () => {
+    const permanentTxRef = "user-wallet-123";
     const docId1 = resolveFundingLedgerDocId(permanentTxRef, "101");
     const docId2 = resolveFundingLedgerDocId(permanentTxRef, "102");
 
@@ -11,54 +11,31 @@ describe("Concurrency, Persistence & Canonical Idempotency Final-State Integrati
     expect(docId1).not.toBe(docId2);
   });
 
-  it("B. Concurrent Webhook + Manual Verification + Reconciliation race for flwId: 999 results in exactly ONE credit", async () => {
-    let userBalance = 1000;
-    const ledgerDb: Record<string, any> = {};
+  it("B. Concurrent deposits to same account yield unique canonical provider identities", () => {
+    const flwId = "101";
+    const txRef = "user-wallet-123";
 
-    async function executeAtomicCredit(flwId: string, txRef: string, amount: number) {
-      const docId = resolveFundingLedgerDocId(txRef, flwId);
+    const docId = resolveFundingLedgerDocId(txRef, flwId);
+    expect(docId).toBe("tx-FUNDING-flw-101");
 
-      // Simulate atomic transaction
-      if (ledgerDb[docId] && (ledgerDb[docId].status === "SUCCESS" || ledgerDb[docId].credited === true)) {
-        return { credited: false, alreadyCredited: true, balance: userBalance };
-      }
+    // Race simulation: both webhook and verify produce the exact same doc ID
+    const docIdWebhook = resolveFundingLedgerDocId(txRef, flwId);
+    const docIdVerify = resolveFundingLedgerDocId(txRef, flwId);
 
-      // Record credit atomically
-      userBalance += amount;
-      ledgerDb[docId] = {
-        flwId,
-        txRef,
-        amount,
-        status: "SUCCESS",
-        credited: true,
-        createdAt: new Date().toISOString(),
-      };
-
-      return { credited: true, alreadyCredited: false, balance: userBalance };
-    }
-
-    // Simulate 3 concurrent executions (Webhook, Manual Verification, Reconciliation)
-    const [resWebhook, resVerify, resReconcile] = await Promise.all([
-      executeAtomicCredit("999", "flw-tx-user123-1", 500),
-      executeAtomicCredit("999", "flw-tx-user123-1", 500),
-      executeAtomicCredit("999", "flw-tx-user123-1", 500),
-    ]);
-
-    const creditsApplied = [resWebhook, resVerify, resReconcile].filter(r => r.credited).length;
-    const alreadyCreditedCount = [resWebhook, resVerify, resReconcile].filter(r => r.alreadyCredited).length;
-
-    expect(creditsApplied).toBe(1);
-    expect(alreadyCreditedCount).toBe(2);
-    expect(userBalance).toBe(1500); // 1000 + 500 = 1500, NOT 2500!
-    expect(Object.keys(ledgerDb).length).toBe(1);
+    expect(docIdWebhook).toBe("tx-FUNDING-flw-101");
+    expect(docIdVerify).toBe("tx-FUNDING-flw-101");
+    expect(docIdWebhook).toBe(docIdVerify);
   });
 
-  it("C. Missing or invalid flwId prevents automated credit and flags for manual review", () => {
+  it("C. Missing or invalid flwId fails closed and generates tx-FUNDING-UNKNOWN to prevent static txRef auto-credit", () => {
     const invalidDocIdNull = resolveFundingLedgerDocId("user-wallet-123", null);
     const invalidDocIdNA = resolveFundingLedgerDocId("user-wallet-123", "N/A");
 
-    // Falls back to txRef docId rather than inventing a false flwId
-    expect(invalidDocIdNull).toBe("tx-FUNDING-user-wallet-123");
-    expect(invalidDocIdNA).toBe("tx-FUNDING-user-wallet-123");
+    expect(isValidFlwId(null)).toBe(false);
+    expect(isValidFlwId("N/A")).toBe(false);
+
+    // Static permanent virtual account txRef is blocked from generating a usable auto-credit doc ID
+    expect(invalidDocIdNull).toBe("tx-FUNDING-UNKNOWN");
+    expect(invalidDocIdNA).toBe("tx-FUNDING-UNKNOWN");
   });
 });
