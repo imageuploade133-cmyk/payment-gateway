@@ -322,9 +322,15 @@ export const purchaseAirtime = async (
         }
       }
 
+      let userFacingMsg = `Airtime purchase failed: ${airtimeResult.message || "Unknown provider error."}`;
+      const rawMsgUpper = String(airtimeResult.message || "").toUpperCase();
+      if (rawMsgUpper.includes("AIRTIME_RECIPIENT_PURCHASE_LIMIT_REACHED") || rawMsgUpper.includes("RECIPIENT_PURCHASE_LIMIT_REACHED") || rawMsgUpper.includes("PURCHASE_LIMIT_REACHED")) {
+        userFacingMsg = "This recipient has reached the airtime purchase limit. Please try another phone number.";
+      }
+
       res.status(400).json({
         success: false,
-        message: `Airtime purchase failed: ${airtimeResult.message || "Unknown provider error."}`,
+        message: userFacingMsg,
       });
     }
 
