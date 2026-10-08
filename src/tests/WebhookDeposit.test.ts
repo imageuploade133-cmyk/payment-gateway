@@ -68,18 +68,26 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
   });
 
   it("A. Should classify virtual account deposit as type WALLET_FUNDING, category deposit, direction CREDIT", async () => {
-    const mockUserDoc = { exists: true, data: () => ({ balance: 500 }) };
-    const mockWalletDoc = { exists: true, data: () => ({ balance: 500 }) };
+    const mockUserDoc = { exists: true, id: "C1vJGqceoGO57mVFYNM40URxCUL2", data: () => ({ balance: 500 }) };
+    const mockWalletDoc = { exists: true, id: "C1vJGqceoGO57mVFYNM40URxCUL2_NGN", data: () => ({ balance: 500 }) };
 
     const mockUserRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2" };
     const mockWalletRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2_NGN" };
     const mockLedgerRef = { id: "tx-FUNDING-flw-2086434716" };
 
+    const mockQuery = {
+      get: jest.fn().mockResolvedValue({
+        empty: false,
+        docs: [mockUserDoc]
+      })
+    };
+
     (adminDb!.collection as jest.Mock).mockImplementation((collName: string) => {
-      if (collName === "users") return { doc: () => mockUserRef };
-      if (collName === "wallets") return { doc: () => mockWalletRef };
-      if (collName === "transactions") return { doc: () => mockLedgerRef };
-      return { doc: () => ({}) };
+      if (collName === "users") return { doc: () => mockUserRef, where: () => mockQuery };
+      if (collName === "wallets") return { doc: () => mockWalletRef, where: () => mockQuery };
+      if (collName === "transactions") return { doc: () => mockLedgerRef, where: () => mockQuery };
+      if (collName === "wallet_accounts") return { doc: () => ({}), where: () => ({ get: async () => ({ empty: true, docs: [] }) }) };
+      return { doc: () => ({}), where: () => ({ get: async () => ({ empty: true, docs: [] }) }) };
     });
 
     let setRecord: any = null;
@@ -123,18 +131,26 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     delete req.body.data.originatorbankname;
     delete req.body.data.originatoraccountnumber;
 
-    const mockUserDoc = { exists: true, data: () => ({ balance: 500 }) };
-    const mockWalletDoc = { exists: true, data: () => ({ balance: 500 }) };
+    const mockUserDoc = { exists: true, id: "C1vJGqceoGO57mVFYNM40URxCUL2", data: () => ({ balance: 500 }) };
+    const mockWalletDoc = { exists: true, id: "C1vJGqceoGO57mVFYNM40URxCUL2_NGN", data: () => ({ balance: 500 }) };
 
     const mockUserRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2" };
     const mockWalletRef = { id: "C1vJGqceoGO57mVFYNM40URxCUL2_NGN" };
     const mockLedgerRef = { id: "tx-FUNDING-flw-2086434716" };
 
+    const mockQuery = {
+      get: jest.fn().mockResolvedValue({
+        empty: false,
+        docs: [mockUserDoc]
+      })
+    };
+
     (adminDb!.collection as jest.Mock).mockImplementation((collName: string) => {
-      if (collName === "users") return { doc: () => mockUserRef };
-      if (collName === "wallets") return { doc: () => mockWalletRef };
-      if (collName === "transactions") return { doc: () => mockLedgerRef };
-      return { doc: () => ({}) };
+      if (collName === "users") return { doc: () => mockUserRef, where: () => mockQuery };
+      if (collName === "wallets") return { doc: () => mockWalletRef, where: () => mockQuery };
+      if (collName === "transactions") return { doc: () => mockLedgerRef, where: () => mockQuery };
+      if (collName === "wallet_accounts") return { doc: () => ({}), where: () => ({ get: async () => ({ empty: true, docs: [] }) }) };
+      return { doc: () => ({}), where: () => ({ get: async () => ({ empty: true, docs: [] }) }) };
     });
 
     let setRecord: any = null;

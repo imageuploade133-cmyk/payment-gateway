@@ -1,5 +1,6 @@
 import { mapProviderStatus } from "../utils/statusMapper";
 import { parseUserIdFromTxRef, resolveFundingLedgerDocId, isValidFlwId } from "../utils/userIdParser";
+import { WalletFundingService } from "../services/walletFundingService";
 import { env } from "../config/env";
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
@@ -110,69 +111,6 @@ function maskAccount(num?: string): string | null {
   return `****${str.slice(-4)}`;
 }
 
-async function resolveUserIdFromPayload(data: any, txRef: string): Promise<string | null> {
-  if (data?.meta?.userId) {
-    return String(data.meta.userId).trim();
-  }
-  if (data?.meta?.user_id) {
-    return String(data.meta.user_id).trim();
-  }
-  const parsedUid = parseUserIdFromTxRef(txRef);
-  if (parsedUid) {
-    return parsedUid;
-  }
-
-  if (adminDb) {
-    // 1. Virtual Account Number Lookup in wallet_accounts & users collections
-    const rawAcc = data?.account_number || data?.virtual_account_number || data?.meta?.account_number || data?.customer?.account_number;
-    if (rawAcc) {
-      const cleanAcc = String(rawAcc).trim().replace(/\D/g, "");
-      if (cleanAcc.length >= 8) {
-        try {
-          // Query wallet_accounts collection
-          const waSnap = await adminDb.collection("wallet_accounts").where("accountNumber", "==", cleanAcc).limit(1).get();
-          if (!waSnap.empty) {
-            const matchedUid = waSnap.docs[0].id || waSnap.docs[0].data()?.userId;
-            if (matchedUid) {
-              logger.info(`[resolveUserIdFromPayload] Successfully resolved userId=${matchedUid} from wallet_accounts via virtual account number ${cleanAcc}`);
-              return matchedUid;
-            }
-          }
-
-          // Query users collection by virtual account number or account number
-          const uSnap1 = await adminDb.collection("users").where("virtualAccountNumber", "==", cleanAcc).limit(1).get();
-          if (!uSnap1.empty) {
-            logger.info(`[resolveUserIdFromPayload] Successfully resolved userId=${uSnap1.docs[0].id} from users via virtualAccountNumber ${cleanAcc}`);
-            return uSnap1.docs[0].id;
-          }
-
-          const uSnap2 = await adminDb.collection("users").where("accountNumber", "==", cleanAcc).limit(1).get();
-          if (!uSnap2.empty) {
-            logger.info(`[resolveUserIdFromPayload] Successfully resolved userId=${uSnap2.docs[0].id} from users via accountNumber ${cleanAcc}`);
-            return uSnap2.docs[0].id;
-          }
-        } catch (vAccErr: any) {
-          logger.error(`[resolveUserIdFromPayload] Virtual account lookup failed for ${cleanAcc}: ${vAccErr.message}`);
-        }
-      }
-    }
-
-    // 2. Email lookup fallback
-    const email = data?.customer?.email;
-    if (email) {
-      try {
-        const snap = await adminDb.collection("users").where("email", "==", email).get();
-        if (!snap.empty) {
-          return snap.docs[0].id;
-        }
-      } catch (err: any) {
-        logger.error(`[resolveUserIdFromPayload] Email lookup failed for ${email}: ${err.message}`);
-      }
-    }
-  }
-
-  return null;
-}
 
 export const BANK_CODE_MAPPING: Record<string, string> = {
   // Major Banks
@@ -1096,287 +1034,24 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
     if (canonicalStatus === "SUCCESS") {
       const flwId = result.flw_id || String(transaction_id || "");
       const amount = Number(result.amount) || 0;
-      let credited = false;
-      let newBalance = 0;
 
-      let txOutcome: {
-        credited: boolean;
-        alreadyCredited: boolean;
-        isExpired: boolean;
-        totalCredited: number;
-        newBalance: number;
-      } = {
-        credited: false,
-        alreadyCredited: false,
-        isExpired: false,
-        totalCredited: 0,
-        newBalance: 0,
-      };
+      const creditResult = await WalletFundingService.executeAtomicWalletCredit({
+        flwId,
+        txRef: String(referenceToUse),
+        amount,
+        currency: result.currency || "NGN",
+        payloadData: result,
+        requestId: reqId,
+        source: "verify",
+      });
 
-      if (!isValidFlwId(flwId)) {
-        logger.error(`[verifyPayment] Automatic credit refused: missing or invalid flwId ('${flwId}'). Reference='${referenceToUse}'`);
-        if (adminDb && referenceToUse) {
-          try {
-            await adminDb.collection("transactions").doc(ledgerDocId).set({
-              status: "PENDING",
-              totalCredited: 0,
-              credited: false,
-              unmatched: true,
-              reason: "Automatic credit refused due to missing or invalid flwId identity",
-              updatedAt: new Date().toISOString(),
-            }, { merge: true });
-          } catch (err: any) {
-            logger.warn(`[verifyPayment] Error flagging unmatched tx without valid flwId: ${err.message}`);
-          }
-        }
+      if (!creditResult.success && creditResult.unmatched) {
         res.status(400).json({
-          success: false,
-          status: "FAILED",
-          message: "Payment verification failed: valid provider transaction ID (flwId) is required for automatic wallet crediting.",
-        });
-        return;
-      }
-
-      if (adminDb && flwId) {
-        const db = adminDb;
-        try {
-          const userId = await resolveUserIdFromPayload(result, String(referenceToUse));
-
-          if (userId) {
-            const userRef = db.collection("users").doc(userId);
-            const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
-            const ledgerRef = db.collection("transactions").doc(ledgerDocId);
-
-            txOutcome = await db.runTransaction(async (transaction) => {
-              const ledgerSnap = await transaction.get(ledgerRef);
-              const ledgerData = (ledgerSnap.exists ? ledgerSnap.data() : {}) || {};
-
-              if (ledgerSnap.exists && (ledgerData.status === "SUCCESS" || ledgerData.credited === true)) {
-                logger.info(`[verifyPayment] Transaction ${ledgerDocId} already marked SUCCESS. Skipping credit.`);
-                const userDoc = await transaction.get(userRef);
-                const currentBal = Number(userDoc.data()?.balance) || 0;
-                return {
-                  credited: false,
-                  alreadyCredited: true,
-                  isExpired: false,
-                  totalCredited: Number(ledgerData.totalCredited || ledgerData.amount || amount),
-                  newBalance: currentBal,
-                };
-              }
-
-              const nowIso = new Date().toISOString();
-              const isExpiredByTime = ledgerData.expiresAt
-                ? (nowIso >= ledgerData.expiresAt)
-                : (ledgerData.createdAt ? (Date.now() - new Date(ledgerData.createdAt).getTime() >= 11 * 60 * 1000) : false);
-
-              if (ledgerSnap.exists && (ledgerData.status === "EXPIRED" || isExpiredByTime)) {
-                logger.warn(`[verifyPayment] Late payment verified for EXPIRED transaction ${ledgerDocId}. Flagging for manual reconciliation.`);
-                transaction.set(ledgerRef, {
-                  status: "EXPIRED",
-                  unmatched: true,
-                  reconciliationRequired: true,
-                  latePaymentReceived: true,
-                  latePaymentAmount: amount,
-                  latePaymentAt: nowIso,
-                  reason: "Late payment verified after dynamic funding expired",
-                  updatedAt: nowIso,
-                }, { merge: true });
-                return {
-                  credited: false,
-                  alreadyCredited: false,
-                  isExpired: true,
-                  totalCredited: 0,
-                  newBalance: 0,
-                };
-              }
-
-              const userDoc = await transaction.get(userRef);
-              if (!userDoc.exists) {
-                throw new Error(`User profile document not found in Firestore for UID: ${userId}`);
-              }
-
-              const walletDoc = await transaction.get(walletRef);
-              const walletExists = walletDoc.exists;
-
-              const oldBalance = Number(userDoc.data()?.balance) || 0;
-              const userData = userDoc.data() || {};
-              const currentDebt = Math.max(0, Number(userData.outstandingDebt) || 0);
-
-              // Integer minor units calculation to prevent floating point imprecision
-              const amountMinor = Math.round(amount * 100);
-              const debtMinor = Math.round(currentDebt * 100);
-
-              const debtRecoveredMinor = Math.min(amountMinor, debtMinor);
-              const netCreditMinor = amountMinor - debtRecoveredMinor;
-
-              const debtRecovered = debtRecoveredMinor / 100;
-              const netCredit = netCreditMinor / 100;
-              const updatedBal = oldBalance + netCredit;
-
-              logger.info(`[verifyPayment] Processing WALLET_FUNDING ledger and atomically crediting wallet (Funding: ₦${amount}, Debt Recovered: ₦${debtRecovered}, Net Credit: ₦${netCredit})...`);
-
-              const userUpdates: Record<string, any> = {
-                balance: FieldValue.increment(netCredit),
-                updatedAt: new Date().toISOString(),
-              };
-
-              if (debtRecovered > 0) {
-                userUpdates.outstandingDebt = FieldValue.increment(-debtRecovered);
-              }
-
-              transaction.update(userRef, userUpdates);
-
-              if (walletExists) {
-                transaction.update(walletRef, {
-                  balance: FieldValue.increment(netCredit),
-                  updatedAt: new Date().toISOString(),
-                });
-              } else {
-                transaction.set(walletRef, {
-                  userId,
-                  currency: "NGN",
-                  balance: netCredit,
-                  createdAt: new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                });
-              }
-
-              if (debtRecovered > 0) {
-                const debtTxRef = `recovery-${referenceToUse}`;
-                const debtTxDocRef = db.collection("transactions").doc(`tx-${debtTxRef}`);
-                transaction.set(debtTxDocRef, {
-                  userId,
-                  amount: debtRecovered,
-                  currency: "NGN",
-                  reference: debtTxRef,
-                  type: "DEBT_RECOVERY",
-                  category: "DEDUCTION",
-                  direction: "DEBIT",
-                  description: `Automatic Recovery for Outstanding Debt (₦${debtRecovered.toLocaleString()})`,
-                  recipientName: "System Recovery",
-                  status: "SUCCESS",
-                  date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
-                  time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-                  fee: 0,
-                  totalDebited: debtRecovered,
-                  totalCredited: 0,
-                  createdAt: new Date().toISOString(),
-                  completedAt: new Date().toISOString(),
-                  metadata: {
-                    fundingReference: referenceToUse,
-                    recoveredAmount: debtRecovered,
-                    originalAmount: amount,
-                  },
-                });
-              }
-
-              const paymentType = ((result as any).payment_type || "").toLowerCase();
-              const cardData = (result as any).card || {};
-              let resolvedFundingMethod = "BANK_TRANSFER";
-              let cardBrand = null;
-              let cardLast4 = null;
-              let maskedCardNumber = null;
-              let ussdBankName = null;
-
-              if (paymentType.includes("card") || cardData.last_4digits || cardData.last4) {
-                resolvedFundingMethod = "CARD";
-                const brandRaw = cardData.issuer || cardData.type || cardData.brand;
-                const last4Raw = cardData.last_4digits || cardData.last4 || cardData.last4digits;
-                cardBrand = brandRaw ? String(brandRaw).toUpperCase() : null;
-                cardLast4 = last4Raw ? String(last4Raw) : null;
-                maskedCardNumber = cardBrand && cardLast4 ? `${cardBrand} •••• ${cardLast4}` : (cardLast4 ? `•••• ${cardLast4}` : null);
-              } else if (paymentType.includes("ussd")) {
-                resolvedFundingMethod = "USSD";
-                const ussdBankRaw = (result as any).bank_name || (result as any).account_bank;
-                ussdBankName = ussdBankRaw ? String(ussdBankRaw) : null;
-              }
-
-              const extractedSender = extractSenderInfo(result);
-              const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
-
-              const senderName = extractedSender.senderName || existingData?.senderName || (result as any).sender_name || null;
-              const senderBankName = extractedSender.senderBankName || existingData?.senderBankName || (result as any).sender_bank || null;
-              const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber || (result as any).sender_account) || existingData?.senderAccountNumber || null;
-              const virtualAccountNumber = maskAccount((result as any).account_number) || existingData?.virtualAccountNumber || null;
-              const virtualAccountBankName = (result as any).bank_name || existingData?.virtualAccountBankName || null;
-
-              let descStr = existingData?.description || "Wallet Funding";
-              if (resolvedFundingMethod === "CARD") {
-                descStr = maskedCardNumber ? `Card Payment (${maskedCardNumber})` : "Card Payment";
-              } else if (resolvedFundingMethod === "USSD") {
-                descStr = ussdBankName ? `USSD • ${ussdBankName}` : "USSD Payment";
-              } else {
-                descStr = senderName ? `Transfer From ${senderName}` : (existingData?.description || "Bank Transfer");
-              }
-
-              transaction.set(ledgerRef, {
-                userId,
-                amount,
-                currency: result.currency || "NGN",
-                reference: referenceToUse,
-                transactionNumber: referenceToUse,
-                flwId,
-                providerTransactionId: flwId,
-                providerReference: referenceToUse,
-                type: "WALLET_FUNDING",
-                category: "deposit",
-                direction: "CREDIT",
-                title: "Wallet Funding",
-                description: descStr,
-                recipientName: "Self",
-                creditedTo: "Available Balance",
-                fundingMethod: resolvedFundingMethod,
-                cardBrand,
-                cardLast4,
-                maskedCardNumber,
-                ussdBankName,
-                senderName,
-                senderBankName,
-                senderAccountNumber,
-                virtualAccountNumber,
-                virtualAccountBankName,
-                status: "SUCCESS",
-                credited: true,
-                fee: 0,
-                totalCredited: amount,
-                createdAt: existingData?.createdAt || new Date().toISOString(),
-                completedAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              }, { merge: true });
-
-              return {
-                credited: true,
-                alreadyCredited: false,
-                isExpired: false,
-                totalCredited: amount,
-                newBalance: updatedBal,
-              };
-            });
-
-            if (txOutcome.credited || txOutcome.alreadyCredited) {
-              if (txOutcome.credited) {
-                logger.info(`[verifyPayment] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
-              }
-              dispatchCreditNotification(userId, amount, result.currency || "NGN", String(referenceToUse), ledgerDocId)
-                .catch((err) => logger.error(`[verifyPayment] dispatchCreditNotification exception: ${err.message}`));
-            }
-          }
-        } catch (creditErr: any) {
-          logger.error(`[verifyPayment] Credit Transaction FAILED for transaction_id=${flwId}: ${creditErr.message}`);
-        }
-      }
-
-      if (txOutcome.isExpired) {
-        res.status(200).json({
           ...result,
           success: false,
-          status: "EXPIRED",
+          status: "FAILED",
           credited: false,
-          alreadyCredited: false,
-          fundedAmount: 0,
-          totalCredited: 0,
-          reason: "Funding expired",
-          message: "Payment verified after dynamic funding expired. Flagged for manual reconciliation."
+          message: creditResult.message || "Unmatched user or ambiguous account ownership.",
         });
         return;
       }
@@ -1385,12 +1060,12 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
         ...result,
         success: true,
         status: "SUCCESS",
-        credited: txOutcome.credited,
-        alreadyCredited: txOutcome.alreadyCredited,
-        fundedAmount: txOutcome.totalCredited || amount,
-        totalCredited: txOutcome.totalCredited || amount,
-        newBalance: txOutcome.newBalance,
-        message: txOutcome.credited
+        credited: creditResult.credited,
+        alreadyCredited: creditResult.alreadyCredited,
+        fundedAmount: creditResult.totalCredited || amount,
+        totalCredited: creditResult.totalCredited || amount,
+        newBalance: creditResult.newBalance,
+        message: creditResult.credited
           ? `Payment verified and wallet credited successfully with ₦${amount.toLocaleString()}.`
           : "Payment verified successfully."
       });
@@ -1556,247 +1231,23 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
       if (canonicalStatus === "SUCCESS") {
         const amount = Number(payload.data?.amount) || 0;
-        const data = payload.data || {};
+        const creditResult = await WalletFundingService.executeAtomicWalletCredit({
+          flwId: transactionId,
+          txRef,
+          amount,
+          currency: payload.data?.currency || "NGN",
+          payloadData: payload.data,
+          requestId: reqId,
+          source: "webhook",
+        });
 
-        const extractedSender = extractSenderInfo(data);
-
-        const senderName = extractedSender.senderName || data.sender_name || undefined;
-        const senderBankName = extractedSender.senderBankName || data.sender_bank || undefined;
-        const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber || data.sender_account) || undefined;
-
-        const virtualAccountNumber = maskAccount(data.account_number || data.virtual_account_number);
-        const virtualAccountBankName = data.bank_name || data.virtual_account_bank || undefined;
-
-        if (!isValidFlwId(flwId)) {
-          logger.error(`[Webhook charge.completed] Automatic credit refused: missing or invalid flwId ('${flwId}'). txRef='${txRef}'`);
-          if (adminDb && ledgerDocId !== "tx-FUNDING-UNKNOWN") {
-            await adminDb.collection("transactions").doc(ledgerDocId).set({
-              status: "PENDING",
-              totalCredited: 0,
-              credited: false,
-              unmatched: true,
-              reason: "Automatic credit refused due to missing or invalid flwId identity in webhook",
-              updatedAt: new Date().toISOString(),
-            }, { merge: true });
-          }
-          res.status(200).json({ success: true, message: "Webhook acknowledged; held for manual review due to missing flwId" });
-          return;
-        }
-
-        const userId = await resolveUserIdFromPayload(payload.data, txRef);
-
-        if (userId && adminDb) {
-          const db = adminDb;
-          try {
-            const userRef = db.collection("users").doc(userId);
-            const walletRef = db.collection("wallets").doc(`${userId}_NGN`);
-            const ledgerRef = db.collection("transactions").doc(ledgerDocId);
-
-            await db.runTransaction(async (transaction) => {
-              const ledgerSnap = await transaction.get(ledgerRef);
-              const ledgerData = (ledgerSnap.exists ? ledgerSnap.data() : {}) || {};
-
-              if (ledgerSnap.exists && (ledgerData.status === "SUCCESS" || ledgerData.credited === true)) {
-                logger.info(`[Webhook charge.completed] Transaction ${ledgerDocId} already SUCCESS. Skipping credit.`);
-                return;
-              }
-
-              const nowIso = new Date().toISOString();
-              const isExpiredByTime = ledgerData.expiresAt
-                ? (nowIso >= ledgerData.expiresAt)
-                : (ledgerData.createdAt ? (Date.now() - new Date(ledgerData.createdAt).getTime() >= 11 * 60 * 1000) : false);
-
-              if (ledgerSnap.exists && (ledgerData.status === "EXPIRED" || isExpiredByTime)) {
-                logger.warn(`[Webhook charge.completed] Late payment received for EXPIRED transaction ${ledgerDocId}. Flagging for manual reconciliation.`);
-                transaction.set(ledgerRef, {
-                  status: "EXPIRED",
-                  unmatched: true,
-                  reconciliationRequired: true,
-                  latePaymentReceived: true,
-                  latePaymentAmount: amount,
-                  latePaymentAt: nowIso,
-                  reason: "Late payment received after dynamic funding expired",
-                  updatedAt: nowIso,
-                }, { merge: true });
-                return;
-              }
-
-              const userDoc = await transaction.get(userRef);
-              if (!userDoc.exists) {
-                throw new Error(`User profile document not found in Firestore for UID: ${userId}`);
-              }
-
-              const walletDoc = await transaction.get(walletRef);
-              const walletExists = walletDoc.exists;
-
-              const userData = userDoc.data() || {};
-              const currentDebt = Math.max(0, Number(userData.outstandingDebt) || 0);
-
-              // Integer minor units calculation to prevent floating point imprecision
-              const amountMinor = Math.round(amount * 100);
-              const debtMinor = Math.round(currentDebt * 100);
-
-              const debtRecoveredMinor = Math.min(amountMinor, debtMinor);
-              const netCreditMinor = amountMinor - debtRecoveredMinor;
-
-              const debtRecovered = debtRecoveredMinor / 100;
-              const netCredit = netCreditMinor / 100;
-
-              logger.info(`[Webhook charge.completed] Processing WALLET_FUNDING ledger and crediting wallet (Gross: ₦${amount}, Debt Recovered: ₦${debtRecovered}, Net Credit: ₦${netCredit})...`);
-
-              const userUpdates: Record<string, any> = {
-                balance: FieldValue.increment(netCredit),
-                updatedAt: new Date().toISOString(),
-              };
-
-              if (debtRecovered > 0) {
-                userUpdates.outstandingDebt = FieldValue.increment(-debtRecovered);
-              }
-
-              transaction.update(userRef, userUpdates);
-
-              if (walletExists) {
-                transaction.update(walletRef, {
-                  balance: FieldValue.increment(netCredit),
-                  updatedAt: new Date().toISOString(),
-                });
-              } else {
-                transaction.set(walletRef, {
-                  userId,
-                  currency: "NGN",
-                  balance: netCredit,
-                  createdAt: new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                });
-              }
-
-              if (debtRecovered > 0) {
-                const debtTxRef = `recovery-${txRef || transactionId}`;
-                const debtTxDocRef = db.collection("transactions").doc(`tx-${debtTxRef}`);
-                transaction.set(debtTxDocRef, {
-                  userId,
-                  amount: debtRecovered,
-                  currency: "NGN",
-                  reference: debtTxRef,
-                  type: "DEBT_RECOVERY",
-                  category: "DEDUCTION",
-                  direction: "DEBIT",
-                  description: `Automatic Recovery for Outstanding Debt (₦${debtRecovered.toLocaleString()})`,
-                  recipientName: "System Recovery",
-                  status: "SUCCESS",
-                  date: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }),
-                  time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-                  fee: 0,
-                  totalDebited: debtRecovered,
-                  totalCredited: 0,
-                  createdAt: new Date().toISOString(),
-                  completedAt: new Date().toISOString(),
-                  metadata: {
-                    fundingReference: txRef || transactionId,
-                    recoveredAmount: debtRecovered,
-                    originalAmount: amount,
-                  },
-                });
-              }
-
-              const paymentType = (payload.data?.payment_type || payload.data?.type || "").toLowerCase();
-              const cardData = payload.data?.card || {};
-              let resolvedFundingMethod = "BANK_TRANSFER";
-              let cardBrand = null;
-              let cardLast4 = null;
-              let maskedCardNumber = null;
-              let ussdBankName = null;
-
-              if (paymentType.includes("card") || cardData.last_4digits || cardData.last4) {
-                resolvedFundingMethod = "CARD";
-                const brandRaw = cardData.issuer || cardData.type || cardData.brand;
-                const last4Raw = cardData.last_4digits || cardData.last4 || cardData.last4digits;
-                cardBrand = brandRaw ? String(brandRaw).toUpperCase() : null;
-                cardLast4 = last4Raw ? String(last4Raw) : null;
-                maskedCardNumber = cardBrand && cardLast4 ? `${cardBrand} •••• ${cardLast4}` : (cardLast4 ? `•••• ${cardLast4}` : null);
-              } else if (paymentType.includes("ussd")) {
-                resolvedFundingMethod = "USSD";
-                const ussdBankRaw = payload.data?.bank_name || payload.data?.account_bank;
-                ussdBankName = ussdBankRaw ? String(ussdBankRaw) : null;
-              }
-
-              const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
-
-              const finalSenderName = senderName || existingData?.senderName || null;
-              const finalSenderBankName = senderBankName || existingData?.senderBankName || null;
-              const finalSenderAccountNumber = senderAccountNumber || existingData?.senderAccountNumber || null;
-
-              let descStr = existingData?.description || "Wallet Funding";
-              if (resolvedFundingMethod === "CARD") {
-                descStr = maskedCardNumber ? `Card Payment (${maskedCardNumber})` : "Card Payment";
-              } else if (resolvedFundingMethod === "USSD") {
-                descStr = ussdBankName ? `USSD • ${ussdBankName}` : "USSD Payment";
-              } else {
-                descStr = finalSenderName ? `Transfer From ${finalSenderName}` : (existingData?.description || "Bank Transfer");
-              }
-
-              transaction.set(ledgerRef, {
-                userId,
-                amount,
-                currency: payload.data?.currency || "NGN",
-                reference: txRef || `DEP-${transactionId}`,
-                transactionNumber: txRef || `DEP-${transactionId}`,
-                flwId: flwId || transactionId,
-                providerTransactionId: flwId || transactionId,
-                providerReference: txRef || `DEP-${transactionId}`,
-                type: "WALLET_FUNDING",
-                category: "deposit",
-                direction: "CREDIT",
-                title: "Wallet Funding",
-                description: descStr,
-                recipientName: "Self",
-                creditedTo: "Available Balance",
-                fundingMethod: resolvedFundingMethod,
-                cardBrand,
-                cardLast4,
-                maskedCardNumber,
-                ussdBankName,
-                senderName: finalSenderName,
-                senderBankName: finalSenderBankName,
-                senderAccountNumber: finalSenderAccountNumber,
-                virtualAccountNumber: virtualAccountNumber || null,
-                virtualAccountBankName: virtualAccountBankName || null,
-                status: "SUCCESS",
-                credited: true,
-                fee: 0,
-                totalCredited: amount,
-                createdAt: existingData?.createdAt || new Date().toISOString(),
-                completedAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              }, { merge: true });
-            });
-
-            if (flwId) {
-              await idempotency.saveWebhookProcessed(flwId);
-            }
-
-            logger.info(`[Webhook charge.completed] SUCCESS: Atomically credited user wallet! User: ${userId} | Amount: ${amount}`);
-            dispatchCreditNotification(userId, amount, payload.data?.currency || "NGN", txRef || `DEP-${transactionId}`, ledgerDocId)
-              .catch((err) => logger.error(`[Webhook charge.completed] dispatchCreditNotification exception: ${err.message}`));
-          } catch (txError: any) {
-            logger.error(`[Webhook charge.completed] Firestore Credit Transaction FAILED for User: ${userId} | Error: ${txError.message}`);
-          }
-        } else {
-          logger.error(`[Webhook charge.completed] Unmatched incoming payment or user resolution failed. Payment held for manual review. Ref=${txRef}`);
-          if (adminDb) {
-            await adminDb.collection("transactions").doc(ledgerDocId).set({
-              status: "PENDING",
-              totalCredited: 0,
-              credited: false,
-              unmatched: true,
-              reason: "Unmatched user for incoming virtual account transfer",
-              updatedAt: new Date().toISOString(),
-            }, { merge: true });
-            if (flwId) {
-              await idempotency.saveWebhookProcessed(flwId);
-            }
-          }
-        }
+        res.status(200).json({
+          success: true,
+          message: creditResult.message || "Webhook payload verified",
+          credited: creditResult.credited,
+          alreadyCredited: creditResult.alreadyCredited,
+        });
+        return;
       } else {
         if (adminDb) {
           try {
