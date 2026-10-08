@@ -599,6 +599,7 @@ export class ReconciliationService {
         .collection("transactions")
         .where("type", "==", "WALLET_FUNDING")
         .where("status", "==", "PENDING")
+        .limit(50)
         .get();
 
       if (pendingFundingSnap.empty) {
@@ -611,16 +612,59 @@ export class ReconciliationService {
       for (const docSnap of pendingFundingSnap.docs) {
         const txData = docSnap.data() || {};
         const flwId = txData.flwId || txData.providerTransactionId;
-        const ref = txData.reference || txData.transactionNumber;
+        const ref = txData.reference || txData.transactionNumber || docSnap.id.replace(/^tx-FUNDING-/, "");
 
         if (flwId || ref) {
           try {
             const { PaymentVerificationService } = require("./paymentVerificationService");
+            const { WalletFundingService } = require("./walletFundingService");
             const { isValidFlwId } = require("../utils/userIdParser");
+
+            let verificationResult: any = null;
+
             if (flwId && isValidFlwId(flwId)) {
-              await PaymentVerificationService.verifyTransaction({ transaction_id: String(flwId), requestId: "reconcile-funding" });
+              verificationResult = await PaymentVerificationService.verifyTransaction({
+                transaction_id: String(flwId),
+                requestId: "reconcile-funding",
+              });
             } else if (ref) {
-              await PaymentVerificationService.verifyTransactionByReference({ tx_ref: String(ref), requestId: "reconcile-funding" });
+              verificationResult = await PaymentVerificationService.verifyTransactionByReference({
+                tx_ref: String(ref),
+                requestId: "reconcile-funding",
+              });
+            }
+
+            // CRITICAL: Inspect verification result and only credit when provider confirms a successful transaction
+            if (verificationResult && (verificationResult.success || verificationResult.status === "successful")) {
+              const targetFlwId = verificationResult.flw_id || String(flwId || "");
+              const targetTxRef = verificationResult.reference || String(ref || "");
+
+              logger.info(
+                `[Deposit Reconciliation] Verified successful deposit for ref=${targetTxRef} | flwId=${targetFlwId} | amount=₦${verificationResult.amount}. Executing shared atomic credit...`
+              );
+
+              const creditResult = await WalletFundingService.executeAtomicWalletCredit({
+                flwId: targetFlwId,
+                txRef: targetTxRef,
+                amount: Number(verificationResult.amount) || 0,
+                currency: verificationResult.currency || "NGN",
+                payloadData: verificationResult,
+                explicitUserId: txData.userId || null,
+                requestId: "reconcile-funding",
+                source: "reconciliation",
+              });
+
+              logger.info(
+                `[Deposit Reconciliation] Reconciled deposit ref=${targetTxRef}: credited=${creditResult.credited}, alreadyCredited=${creditResult.alreadyCredited}, success=${creditResult.success}`
+              );
+            } else if (verificationResult && verificationResult.status === "failed") {
+              const ledgerDocId = docSnap.id;
+              await adminDb.collection("transactions").doc(ledgerDocId).set({
+                status: "FAILED",
+                credited: false,
+                reason: verificationResult.message || "Payment failed or declined on provider rails",
+                updatedAt: new Date().toISOString(),
+              }, { merge: true });
             }
           } catch (vErr: any) {
             logger.warn(`[Deposit Reconciliation] Verification check for deposit ref=${ref} failed: ${vErr.message}`);
