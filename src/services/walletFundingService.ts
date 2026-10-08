@@ -518,7 +518,7 @@ export class WalletFundingService {
         const senderName = extractedSender.senderName || existingData?.senderName || null;
         const senderBankName = extractedSender.senderBankName || existingData?.senderBankName || null;
         const senderBankCode = extractedSender.senderBankCode || existingData?.senderBankCode || null;
-        const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber) || existingData?.senderAccountNumber || null;
+        const senderAccountNumber = extractedSender.senderAccountNumber || existingData?.senderAccountNumber || null;
 
         // Resolve user's permanent virtual account if receiving account info is incomplete
         let rawVirtualAccountNumber = payloadData?.account_number || payloadData?.virtual_account_number;

@@ -118,7 +118,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
     expect(setRecord.creditedTo).toBe("Available Balance");
     expect(setRecord.amount).toBe(100);
     expect(setRecord.senderName).toBe("John Sender");
-    expect(setRecord.senderAccountNumber).toBe("****6789");
+    expect(setRecord.senderAccountNumber).toBe("0123456789");
     expect(setRecord.senderBankName).toBe("GTBank");
     expect(setRecord.virtualAccountNumber).toBe("****3281");
     expect(setRecord.virtualAccountBankName).toBe("Wema Bank");
