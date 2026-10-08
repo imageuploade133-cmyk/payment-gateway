@@ -174,6 +174,25 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     }
   }
 
+  // Safety Rule: Exclude customer / wallet owner / recipient fields from being treated as senderName
+  if (senderName) {
+    const normSender = senderName.toLowerCase().trim();
+    const customerName = data.customer?.name || data.customer_name || data.customerName;
+    const accountName = data.account_name || data.accountName || data.virtual_account_name || data.virtualAccountName;
+    const beneficiaryName = data.beneficiary_name || data.beneficiaryName || data.recipient_name || data.recipientName || data.receiver_name;
+
+    const matchesRecipientField = (candidate: any) => {
+      if (typeof candidate === "string" && candidate.trim().length > 0) {
+        return candidate.toLowerCase().trim() === normSender;
+      }
+      return false;
+    };
+
+    if (matchesRecipientField(customerName) || matchesRecipientField(accountName) || matchesRecipientField(beneficiaryName)) {
+      senderName = null;
+    }
+  }
+
   let senderBankName: string | null = null;
   if (rawBankName && typeof rawBankName === "string") {
     const trimmed = rawBankName.trim();

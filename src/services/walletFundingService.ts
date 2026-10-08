@@ -38,7 +38,7 @@ export interface AtomicFundingCreditResult {
   ledgerDocId: string;
 }
 
-function maskAccount(num?: string): string | null {
+function maskAccount(num?: string | null): string | null {
   if (!num) return null;
   const str = String(num).trim();
   if (str.length <= 4) return str;
@@ -486,9 +486,9 @@ export class WalletFundingService {
         const extractedSender = extractSenderInfo(payloadData || {});
         const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
 
-        const senderName = extractedSender.senderName || existingData?.senderName || payloadData?.sender_name || null;
-        const senderBankName = extractedSender.senderBankName || existingData?.senderBankName || payloadData?.sender_bank || null;
-        const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber || payloadData?.sender_account) || existingData?.senderAccountNumber || null;
+        const senderName = extractedSender.senderName || existingData?.senderName || null;
+        const senderBankName = extractedSender.senderBankName || existingData?.senderBankName || null;
+        const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber) || existingData?.senderAccountNumber || null;
         const virtualAccountNumber = maskAccount(payloadData?.account_number || payloadData?.virtual_account_number) || existingData?.virtualAccountNumber || null;
         const virtualAccountBankName = payloadData?.bank_name || payloadData?.virtual_account_bank || existingData?.virtualAccountBankName || null;
 
