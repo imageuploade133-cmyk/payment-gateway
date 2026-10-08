@@ -80,17 +80,10 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
 
   const metaBankNameKeys = [
     ...topLevelBankNameKeys,
-    "bankname",
-    "bank_name",
-    "bankName",
-    "bank",
   ];
 
   const nestedBankNameKeys = [
     ...topLevelBankNameKeys,
-    "bank_name",
-    "bankName",
-    "bank",
   ];
 
   const accountNumberKeys = [

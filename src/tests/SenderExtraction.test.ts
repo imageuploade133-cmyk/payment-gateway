@@ -74,16 +74,33 @@ describe("Sender Extractor Utility & Final Persistence Boundary Security Suite",
     expect(sender.senderName).toBeNull();
   });
 
-  // Test C — Generic metadata bank must NOT become sender bank
-  it("Test C: Generic metadata bank_name must NOT become sender bank", () => {
-    const payload = {
-      meta_data: {
-        bank_name: "Wema Bank",
-      },
-    };
+  // Test C — Generic metadata bank variants must EACH result in senderBankName === null
+  it("Test C: Generic metadata bank variants (bank_name, bankname, bankName, bank) must EACH result in senderBankName === null", () => {
+    const genericVariants = ["bank_name", "bankname", "bankName", "bank"];
 
-    const sender = extractSenderInfo(payload);
-    expect(sender.senderBankName).toBeNull();
+    for (const key of genericVariants) {
+      // Test inside meta_data
+      const metaPayload = {
+        meta_data: {
+          [key]: "Wema Bank",
+        },
+      };
+      expect(extractSenderInfo(metaPayload).senderBankName).toBeNull();
+
+      // Test inside meta
+      const metaObjPayload = {
+        meta: {
+          [key]: "Wema Bank",
+        },
+      };
+      expect(extractSenderInfo(metaObjPayload).senderBankName).toBeNull();
+
+      // Test top-level
+      const topLevelPayload = {
+        [key]: "Wema Bank",
+      };
+      expect(extractSenderInfo(topLevelPayload).senderBankName).toBeNull();
+    }
   });
 
   // Test D — Explicit originator bank works
