@@ -708,6 +708,17 @@ export class ReconciliationService {
               logger.info(
                 `[Deposit Reconciliation] Reconciled deposit ref=${targetTxRef}: credited=${creditResult.credited}, alreadyCredited=${creditResult.alreadyCredited}, success=${creditResult.success}`
               );
+            } else if (verificationResult && verificationResult.isNotFound) {
+              logger.info(`[Deposit Reconciliation] Provider confirmed transaction NOT_FOUND for ref=${ref || flwId}. Marking FAILED and excluding from future scans.`);
+              const ledgerDocId = docSnap.id;
+              await adminDb.collection("transactions").doc(ledgerDocId).set({
+                status: "FAILED",
+                credited: false,
+                reconciledNotFound: true,
+                reason: verificationResult.message || "No transaction found on provider rails",
+                reconciledAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }, { merge: true });
             } else if (verificationResult && verificationResult.status === "failed" && !verificationResult.isTransient) {
               const ledgerDocId = docSnap.id;
               if (txData.status === "PENDING") {
@@ -715,6 +726,7 @@ export class ReconciliationService {
                   status: "FAILED",
                   credited: false,
                   reason: verificationResult.message || "Payment failed or declined on provider rails",
+                  reconciledAt: new Date().toISOString(),
                   updatedAt: new Date().toISOString(),
                 }, { merge: true });
               }

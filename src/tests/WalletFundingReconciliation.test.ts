@@ -1,6 +1,6 @@
 import { WalletFundingService, resolveUserIdSafely } from "../services/walletFundingService";
 import { ReconciliationService } from "../services/reconciliationService";
-import { PaymentVerificationService } from "../services/paymentVerificationService";
+import { PaymentVerificationService, isProviderNotFoundResponse } from "../services/paymentVerificationService";
 import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 import { parseUserIdFromTxRef, isValidFlwId, resolveFundingLedgerDocId } from "../utils/userIdParser";
 
@@ -166,12 +166,16 @@ jest.mock("../services/notificationService", () => ({
   }
 }));
 
-jest.mock("../services/paymentVerificationService", () => ({
-  PaymentVerificationService: {
-    verifyTransaction: jest.fn(),
-    verifyTransactionByReference: jest.fn()
-  }
-}));
+jest.mock("../services/paymentVerificationService", () => {
+  const original = jest.requireActual("../services/paymentVerificationService");
+  return {
+    ...original,
+    PaymentVerificationService: {
+      verifyTransaction: jest.fn(),
+      verifyTransactionByReference: jest.fn()
+    }
+  };
+});
 
 describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite", () => {
   beforeEach(() => {
@@ -452,7 +456,6 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
       type: "WALLET_FUNDING",
       status: "EXPIRED",
       createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
-      // Notice: NO flwId, NO reference!
     };
 
     await ReconciliationService.getInstance().reconcilePendingFundings();
@@ -508,7 +511,7 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
       requestId: "reconcile-funding"
     });
 
-    expect(mockUserStore["user-123"].balance).toBe(7000); // 1000 + 6000
+    expect(mockUserStore["user-123"].balance).toBe(7000);
     expect(mockTransactionStore["tx-FUNDING-flw-flw-late-trusted-888"].status).toBe("SUCCESS");
   });
 
@@ -535,8 +538,8 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
 
     await ReconciliationService.getInstance().reconcilePendingFundings();
 
-    expect(mockUserStore["user-123"].balance).toBe(1000); // Unchanged
-    expect(mockTransactionStore["tx-FUNDING-flw-expired-failed-777"].status).toBe("EXPIRED"); // Stays EXPIRED
+    expect(mockUserStore["user-123"].balance).toBe(1000);
+    expect(mockTransactionStore["tx-FUNDING-flw-expired-failed-777"].status).toBe("EXPIRED");
   });
 
   test("20. EXPIRED record with transient provider error remains EXPIRED and recoverable for future scans", async () => {
@@ -562,7 +565,101 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
 
     await ReconciliationService.getInstance().reconcilePendingFundings();
 
-    expect(mockUserStore["user-123"].balance).toBe(1000); // Unchanged
-    expect(mockTransactionStore["tx-FUNDING-flw-expired-transient-555"].status).toBe("EXPIRED"); // Stays EXPIRED
+    expect(mockUserStore["user-123"].balance).toBe(1000);
+    expect(mockTransactionStore["tx-FUNDING-flw-expired-transient-555"].status).toBe("EXPIRED");
+  });
+
+  // Additional Regression Tests for Scenarios A-G
+  test("21. Scenario A: HTTP 400 + 'No transaction was found for this id' -> NOT_FOUND, no wallet credit, excluded from future scans", async () => {
+    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
+      success: false,
+      status: "failed",
+      isTransient: false,
+      isNotFound: true,
+      amount: 0,
+      currency: "NGN",
+      reference: "user-wallet-user-123",
+      flw_id: "not-found-400",
+      message: "No transaction was found for this id"
+    });
+
+    mockTransactionStore["tx-FUNDING-flw-not-found-400"] = {
+      type: "WALLET_FUNDING",
+      status: "PENDING",
+      flwId: "not-found-400",
+      reference: "user-wallet-user-123",
+      userId: "user-123"
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(mockUserStore["user-123"].balance).toBe(1000); // No credit
+    expect(mockTransactionStore["tx-FUNDING-flw-not-found-400"].status).toBe("FAILED");
+    expect(mockTransactionStore["tx-FUNDING-flw-not-found-400"].reconciledNotFound).toBe(true);
+  });
+
+  test("22. Scenarios B, C, D: Timeouts, HTTP 429, and HTTP 500/502/503 are transient and remain PENDING", async () => {
+    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
+      success: false,
+      status: "pending",
+      isTransient: true,
+      isNotFound: false,
+      amount: 0,
+      currency: "NGN",
+      reference: "user-wallet-user-123",
+      flw_id: "transient-500",
+      message: "Temporary verification error: HTTP 502 Bad Gateway"
+    });
+
+    mockTransactionStore["tx-FUNDING-flw-transient-500"] = {
+      type: "WALLET_FUNDING",
+      status: "PENDING",
+      flwId: "transient-500",
+      reference: "user-wallet-user-123",
+      userId: "user-123"
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(mockUserStore["user-123"].balance).toBe(1000); // No credit
+    expect(mockTransactionStore["tx-FUNDING-flw-transient-500"].status).toBe("PENDING"); // Remains PENDING
+  });
+
+  test("23. Scenario F: Legitimate webhook arriving after a previous NOT_FOUND reconciliation state CAN still credit wallet safely", async () => {
+    // 1. Reconciliation previously marked transaction FAILED due to NOT_FOUND
+    mockTransactionStore["tx-FUNDING-flw-late-webhook-999"] = {
+      type: "WALLET_FUNDING",
+      status: "FAILED",
+      reconciledNotFound: true,
+      flwId: "late-webhook-999",
+      reference: "user-wallet-user-123",
+      userId: "user-123"
+    };
+
+    // 2. Legitimate Flutterwave webhook arrives later with charge.completed SUCCESS
+    const creditRes = await WalletFundingService.executeAtomicWalletCredit({
+      flwId: "late-webhook-999",
+      txRef: "user-wallet-user-123",
+      amount: 3500,
+      currency: "NGN",
+      source: "webhook"
+    });
+
+    expect(creditRes.success).toBe(true);
+    expect(creditRes.credited).toBe(true);
+    expect(mockUserStore["user-123"].balance).toBe(4500); // 1000 + 3500 = 4500
+    expect(mockTransactionStore["tx-FUNDING-flw-late-webhook-999"].status).toBe("SUCCESS");
+    expect(mockTransactionStore["tx-FUNDING-flw-late-webhook-999"].credited).toBe(true);
+  });
+
+  test("24. Helper isProviderNotFoundResponse detects exact HTTP 400 + 'no transaction found' errors", () => {
+    const err400 = { status: 400, message: "No transaction was found for this id" };
+    expect(isProviderNotFoundResponse(err400)).toBe(true);
+
+    const err500 = { status: 500, message: "No transaction was found for this id" };
+    expect(isProviderNotFoundResponse(err500)).toBe(false); // HTTP status must be 400
+
+    const err400Other = { status: 400, message: "Invalid parameter format" };
+    expect(isProviderNotFoundResponse(err400Other)).toBe(false); // Message must match
   });
 });
