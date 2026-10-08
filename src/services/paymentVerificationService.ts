@@ -54,6 +54,7 @@ export interface VerificationResult {
   created_at?: string;
   payment_type?: string;
   message?: string;
+  rawTxData?: any;
 }
 
 export function isProviderNotFoundResponse(error: any): boolean {
@@ -247,6 +248,7 @@ export class PaymentVerificationService {
           bank_name: txData.bank_name || txData.virtual_account_bank || undefined,
           created_at: txData.created_at || undefined,
           payment_type: txData.payment_type || undefined,
+          rawTxData: txData,
         };
       }
 
@@ -365,6 +367,7 @@ export class PaymentVerificationService {
           bank_name: txData.bank_name || txData.virtual_account_bank || undefined,
           created_at: txData.created_at || undefined,
           payment_type: txData.payment_type || undefined,
+          rawTxData: txData,
         };
       }
 

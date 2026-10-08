@@ -1,6 +1,17 @@
 import { extractSenderInfo } from "../utils/senderExtractor";
 import { WalletFundingService } from "../services/walletFundingService";
+import { PaymentVerificationService } from "../services/paymentVerificationService";
 import { adminDb } from "../config/firebase";
+
+// Mock PaymentVerificationService
+jest.mock("../services/paymentVerificationService", () => {
+  return {
+    PaymentVerificationService: {
+      verifyTransaction: jest.fn(),
+      verifyTransactionByReference: jest.fn(),
+    },
+  };
+});
 
 // Mock Firebase Admin SDK for persistence boundary testing
 jest.mock("../config/firebase", () => {
@@ -33,7 +44,18 @@ jest.mock("../config/firebase", () => {
         const fakeTx = {
           get: async (docRef: any) => docRef.get(),
           set: async (docRef: any, data: any, opts: any) => docRef.set(data, opts),
-          update: async (docRef: any, data: any) => docRef.set(data, { merge: true }),
+      update: async (docRef: any, data: any) => {
+        const cur = (await docRef.get()).data() || {};
+        const updated = { ...cur };
+        for (const [k, v] of Object.entries(data)) {
+          if (v && typeof v === "object" && (v as any).operand !== undefined) {
+            updated[k] = (Number(cur[k]) || 0) + Number((v as any).operand);
+          } else {
+            updated[k] = v;
+          }
+        }
+        return docRef.set(updated, { merge: true });
+      },
         };
         return cb(fakeTx);
       }),
@@ -74,9 +96,9 @@ describe("Sender Extractor Utility & Final Persistence Boundary Security Suite",
     expect(sender.senderName).toBeNull();
   });
 
-  // Test C — Generic metadata bank variants must EACH result in senderBankName === null
-  it("Test C: Generic metadata bank variants (bank_name, bankname, bankName, bank) must EACH result in senderBankName === null", () => {
-    const genericVariants = ["bank_name", "bankname", "bankName", "bank"];
+  // Test C — Generic metadata bank variants
+  it("Test C: Generic metadata bank variants (bank_name, bankName, bank) must EACH result in senderBankName === null", () => {
+    const genericVariants = ["bank_name", "bankName", "bank"];
 
     for (const key of genericVariants) {
       // Test inside meta_data
@@ -230,5 +252,296 @@ describe("Sender Extractor Utility & Final Persistence Boundary Security Suite",
     expect(storedData.senderBankName).toBe("GTBank");
     expect(storedData.virtualAccountBankName).toBe("Wema Bank");
     expect(storedData.senderBankName).not.toBe("Wema Bank");
+  });
+
+  // Test 1-18 explicit requirements
+  it("Test 1: meta_data.originatorname becomes senderName", () => {
+    const res = extractSenderInfo({ meta_data: { originatorname: "Alice Smith" } });
+    expect(res.senderName).toBe("Alice Smith");
+  });
+
+  it("Test 2: meta_data.bankname becomes senderBankName", () => {
+    const res = extractSenderInfo({ meta_data: { bankname: "Zenith Bank" } });
+    expect(res.senderBankName).toBe("Zenith Bank");
+  });
+
+  it("Test 3: meta_data.bankcode becomes senderBankCode", () => {
+    const res = extractSenderInfo({ meta_data: { bankcode: "057" } });
+    expect(res.senderBankCode).toBe("057");
+  });
+
+  it("Test 4: meta_data.originatoraccountnumber becomes senderAccountNumber", () => {
+    const res = extractSenderInfo({ meta_data: { originatoraccountnumber: "0011223344" } });
+    expect(res.senderAccountNumber).toBe("0011223344");
+  });
+
+  it("Test 5: Top-level data.bank_name = 'Wema Bank' must NOT become senderBankName", () => {
+    const res = extractSenderInfo({ bank_name: "Wema Bank" });
+    expect(res.senderBankName).toBeNull();
+  });
+
+  it("Test 6: Top-level data.bank = 'Wema Bank' must NOT become senderBankName", () => {
+    const res = extractSenderInfo({ bank: "Wema Bank" });
+    expect(res.senderBankName).toBeNull();
+  });
+
+  it("Test 7: Generic metadata meta_data.bank_name = 'Wema Bank' must NOT override explicit originator bank", () => {
+    const res = extractSenderInfo({
+      meta_data: {
+        bank_name: "Wema Bank",
+        originatorbankname: "GTBank"
+      }
+    });
+    expect(res.senderBankName).toBe("GTBank");
+  });
+
+  it("Test 8: Customer/wallet-owner name must never become senderName", () => {
+    const res = extractSenderInfo({
+      customer: { name: "John Customer" },
+      sender_name: "John Customer"
+    });
+    expect(res.senderName).toBeNull();
+  });
+
+  it("Test 9 & 10: Missing originator metadata triggers provider-verification enrichment & successful verification enriches sender info", async () => {
+    const targetUid = "test-uid-verify-enrich";
+    const flwId = "12345678";
+    const txRef = `flw-tx-${targetUid}-8888`;
+
+    const db = adminDb!;
+    await db.collection("users").doc(targetUid).set({ balance: 0, email: "enrich@example.com" });
+
+    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValueOnce({
+      success: true,
+      rawTxData: {
+        meta_data: {
+          originatorname: "ENRICHED SENDER",
+          originatorbankname: "FIRST BANK",
+          originatoraccountnumber: "0099887766",
+          bankcode: "011"
+        }
+      }
+    });
+
+    const result = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 1000,
+      currency: "NGN",
+      payloadData: { amount: 1000 },
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    expect(PaymentVerificationService.verifyTransaction).toHaveBeenCalledWith({
+      transaction_id: flwId,
+      requestId: "enrichment-verify"
+    });
+
+    const ledgerDoc = await db.collection("transactions").doc(result.ledgerDocId).get();
+    const storedData = ledgerDoc.data() || {};
+
+    expect(storedData.senderName).toBe("ENRICHED SENDER");
+    expect(storedData.senderBankName).toBe("FIRST BANK");
+    expect(storedData.senderBankCode).toBe("011");
+    expect(storedData.senderAccountNumber).toBe("****7766");
+  });
+
+  it("Test 11: Failed provider verification must NOT break or duplicate wallet credit", async () => {
+    const targetUid = "test-uid-failed-verify";
+    const flwId = "87654321";
+    const txRef = `flw-tx-${targetUid}-7777`;
+
+    const db = adminDb!;
+    await db.collection("users").doc(targetUid).set({ balance: 0, email: "failedverify@example.com" });
+
+    (PaymentVerificationService.verifyTransaction as jest.Mock).mockRejectedValueOnce(new Error("Network timeout"));
+
+    const result = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 2000,
+      currency: "NGN",
+      payloadData: { amount: 2000 },
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.credited).toBe(true);
+
+    const userDoc = await db.collection("users").doc(targetUid).get();
+    expect(userDoc.data()?.balance).toBe(2000);
+  });
+
+  it("Test 12, 13, 14: Receiving virtual account info remains separate from sender and resolves from wallet_accounts/{uid}", async () => {
+    const targetUid = "test-uid-receiving-va";
+    const flwId = "55554444";
+    const txRef = `flw-tx-${targetUid}-3333`;
+
+    const db = adminDb!;
+    await db.collection("users").doc(targetUid).set({ balance: 0, email: "va@example.com" });
+    await db.collection("wallet_accounts").doc(targetUid).set({
+      accountNumber: "9900112233",
+      bankName: "Wema Bank",
+      userId: targetUid
+    });
+
+    const result = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 3000,
+      currency: "NGN",
+      payloadData: {
+        meta_data: {
+          originatorname: "SENDER ALICE",
+          originatorbankname: "GTBank"
+        }
+      },
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    const ledgerDoc = await db.collection("transactions").doc(result.ledgerDocId).get();
+    const storedData = ledgerDoc.data() || {};
+
+    expect(storedData.senderName).toBe("SENDER ALICE");
+    expect(storedData.senderBankName).toBe("GTBank");
+    expect(storedData.virtualAccountBankName).toBe("Wema Bank");
+    expect(storedData.virtualAccountNumber).toBe("****2233");
+  });
+
+  it("Test 15 & 16: Sender bank (GTBank) never becomes receiving bank, and receiving bank (Wema Bank) never becomes sender bank", async () => {
+    const targetUid = "test-uid-bank-sep";
+    const flwId = "99881122";
+    const txRef = `flw-tx-${targetUid}-4444`;
+
+    const db = adminDb!;
+    await db.collection("users").doc(targetUid).set({ balance: 0, email: "sep@example.com" });
+    await db.collection("wallet_accounts").doc(targetUid).set({
+      accountNumber: "8877665544",
+      bankName: "Wema Bank",
+      userId: targetUid
+    });
+
+    const result = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 1500,
+      currency: "NGN",
+      payloadData: {
+        meta_data: {
+          originatorbankname: "GTBank"
+        }
+      },
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    const ledgerDoc = await db.collection("transactions").doc(result.ledgerDocId).get();
+    const storedData = ledgerDoc.data() || {};
+
+    expect(storedData.senderBankName).toBe("GTBank");
+    expect(storedData.virtualAccountBankName).toBe("Wema Bank");
+    expect(storedData.senderBankName).not.toBe("Wema Bank");
+    expect(storedData.virtualAccountBankName).not.toBe("GTBank");
+  });
+
+  it("Test 17: Existing atomic/idempotent funding behavior remains intact", async () => {
+    const targetUid = "test-uid-idempotent";
+    const flwId = "77665544";
+    const txRef = `flw-tx-${targetUid}-5555`;
+
+    const db = adminDb!;
+    await db.collection("users").doc(targetUid).set({ balance: 0, email: "idem@example.com" });
+
+    const first = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 5000,
+      currency: "NGN",
+      payloadData: { amount: 5000 },
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    expect(first.credited).toBe(true);
+
+    const second = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 5000,
+      currency: "NGN",
+      payloadData: { amount: 5000 },
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    expect(second.alreadyCredited).toBe(true);
+    expect(second.credited).toBe(false);
+
+    const userDoc = await db.collection("users").doc(targetUid).get();
+    expect(userDoc.data()?.balance).toBe(5000);
+  });
+
+  it("Test 18: Real Flutterwave transaction structure passes safely through the pipeline", async () => {
+    const targetUid = "test-uid-real-struct";
+    const flwId = "987654321";
+    const txRef = `flw-tx-${targetUid}-6666`;
+
+    const db = adminDb!;
+    await db.collection("users").doc(targetUid).set({ balance: 0, email: "real@example.com" });
+    await db.collection("wallet_accounts").doc(targetUid).set({
+      accountNumber: "1122334455",
+      bankName: "Wema Bank",
+      userId: targetUid
+    });
+
+    const realFlwPayload = {
+      id: 987654321,
+      tx_ref: txRef,
+      flw_ref: "FLW-MOCK-REF-12345",
+      amount: 10000,
+      currency: "NGN",
+      status: "successful",
+      payment_type: "bank_transfer",
+      created_at: "2026-03-31T12:00:00.000Z",
+      customer: {
+        id: 12345,
+        name: "Real Customer Name",
+        email: "real@example.com"
+      },
+      meta_data: {
+        originatorname: "AUTHORITATIVE EXTERNAL SENDER",
+        bankname: "GUARANTY TRUST BANK",
+        bankcode: "058",
+        originatoraccountnumber: "0123456789"
+      }
+    };
+
+    const result = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 10000,
+      currency: "NGN",
+      payloadData: realFlwPayload,
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.credited).toBe(true);
+
+    const ledgerDoc = await db.collection("transactions").doc(result.ledgerDocId).get();
+    const storedData = ledgerDoc.data() || {};
+
+    expect(storedData.senderName).toBe("AUTHORITATIVE EXTERNAL SENDER");
+    expect(storedData.senderBankName).toBe("GUARANTY TRUST BANK");
+    expect(storedData.senderBankCode).toBe("058");
+    expect(storedData.senderAccountNumber).toBe("****6789");
+    expect(storedData.virtualAccountBankName).toBe("Wema Bank");
+    expect(storedData.virtualAccountNumber).toBe("****4455");
+    expect(storedData.status).toBe("SUCCESS");
+    expect(storedData.credited).toBe(true);
   });
 });
