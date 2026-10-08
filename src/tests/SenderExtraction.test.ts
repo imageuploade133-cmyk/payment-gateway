@@ -344,7 +344,7 @@ describe("Sender Extractor Utility & Final Persistence Boundary Security Suite",
     expect(storedData.senderName).toBe("ENRICHED SENDER");
     expect(storedData.senderBankName).toBe("FIRST BANK");
     expect(storedData.senderBankCode).toBe("011");
-    expect(storedData.senderAccountNumber).toBe("****7766");
+    expect(storedData.senderAccountNumber).toBe("0099887766");
   });
 
   it("Test 11: Failed provider verification must NOT break or duplicate wallet credit", async () => {
@@ -484,6 +484,40 @@ describe("Sender Extractor Utility & Final Persistence Boundary Security Suite",
     expect(userDoc.data()?.balance).toBe(5000);
   });
 
+  it("Test 20: Regression test - Unmasked sender account number with leading zero is preserved completely", async () => {
+    const targetUid = "test-uid-leading-zero";
+    const flwId = "1020304050";
+    const txRef = `flw-tx-${targetUid}-9900`;
+
+    const db = adminDb!;
+    await db.collection("users").doc(targetUid).set({ balance: 0, email: "leadingzero@example.com" });
+
+    const result = await WalletFundingService.executeAtomicWalletCredit({
+      flwId,
+      txRef,
+      amount: 5000,
+      currency: "NGN",
+      payloadData: {
+        meta_data: {
+          originatorname: "SENDER WITH LEADING ZERO",
+          originatorbankname: "GTBANK",
+          originatoraccountnumber: "0123456789"
+        }
+      },
+      explicitUserId: targetUid,
+      source: "webhook",
+    });
+
+    expect(result.success).toBe(true);
+
+    const ledgerDoc = await db.collection("transactions").doc(result.ledgerDocId).get();
+    const storedData = ledgerDoc.data() || {};
+
+    expect(storedData.senderAccountNumber).toBe("0123456789");
+    expect(storedData.senderAccountNumber).toHaveLength(10);
+    expect(storedData.senderAccountNumber?.startsWith("0")).toBe(true);
+  });
+
   it("Test 18: Real Flutterwave transaction structure passes safely through the pipeline", async () => {
     const targetUid = "test-uid-real-struct";
     const flwId = "987654321";
@@ -538,7 +572,7 @@ describe("Sender Extractor Utility & Final Persistence Boundary Security Suite",
     expect(storedData.senderName).toBe("AUTHORITATIVE EXTERNAL SENDER");
     expect(storedData.senderBankName).toBe("GUARANTY TRUST BANK");
     expect(storedData.senderBankCode).toBe("058");
-    expect(storedData.senderAccountNumber).toBe("****6789");
+    expect(storedData.senderAccountNumber).toBe("0123456789");
     expect(storedData.virtualAccountBankName).toBe("Wema Bank");
     expect(storedData.virtualAccountNumber).toBe("****4455");
     expect(storedData.status).toBe("SUCCESS");
