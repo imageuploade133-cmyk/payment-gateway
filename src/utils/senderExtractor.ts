@@ -67,7 +67,7 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     "senderAccountName",
   ];
 
-  const bankNameKeys = [
+  const topLevelBankNameKeys = [
     "originatorbankname",
     "originator_bank_name",
     "originator_bank",
@@ -76,6 +76,21 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     "sender_bank",
     "senderBankName",
     "senderBank",
+  ];
+
+  const metaBankNameKeys = [
+    ...topLevelBankNameKeys,
+    "bankname",
+    "bank_name",
+    "bankName",
+    "bank",
+  ];
+
+  const nestedBankNameKeys = [
+    ...topLevelBankNameKeys,
+    "bank_name",
+    "bankName",
+    "bank",
   ];
 
   const accountNumberKeys = [
@@ -119,25 +134,24 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
 
   // 1. Check meta_data / metadata
   let rawSenderName = Array.isArray(metaData) ? extractFromMetaArray(metaData, senderNameKeys) : getCaseInsensitiveProp(metaData, senderNameKeys);
-  let rawBankName = Array.isArray(metaData) ? extractFromMetaArray(metaData, bankNameKeys) : getCaseInsensitiveProp(metaData, bankNameKeys);
+  let rawBankName = Array.isArray(metaData) ? extractFromMetaArray(metaData, metaBankNameKeys) : getCaseInsensitiveProp(metaData, metaBankNameKeys);
   let rawAccountNumber = Array.isArray(metaData) ? extractFromMetaArray(metaData, accountNumberKeys) : getCaseInsensitiveProp(metaData, accountNumberKeys);
   let rawBankCode = Array.isArray(metaData) ? extractFromMetaArray(metaData, bankCodeKeys) : getCaseInsensitiveProp(metaData, bankCodeKeys);
 
   // 2. Check meta
   if (!rawSenderName) rawSenderName = Array.isArray(meta) ? extractFromMetaArray(meta, senderNameKeys) : getCaseInsensitiveProp(meta, senderNameKeys);
-  if (!rawBankName) rawBankName = Array.isArray(meta) ? extractFromMetaArray(meta, bankNameKeys) : getCaseInsensitiveProp(meta, bankNameKeys);
+  if (!rawBankName) rawBankName = Array.isArray(meta) ? extractFromMetaArray(meta, metaBankNameKeys) : getCaseInsensitiveProp(meta, metaBankNameKeys);
   if (!rawAccountNumber) rawAccountNumber = Array.isArray(meta) ? extractFromMetaArray(meta, accountNumberKeys) : getCaseInsensitiveProp(meta, accountNumberKeys);
   if (!rawBankCode) rawBankCode = Array.isArray(meta) ? extractFromMetaArray(meta, bankCodeKeys) : getCaseInsensitiveProp(meta, bankCodeKeys);
 
   // 3. Check top-level data
   if (!rawSenderName) rawSenderName = getCaseInsensitiveProp(data, senderNameKeys);
-  if (!rawBankName) rawBankName = getCaseInsensitiveProp(data, bankNameKeys);
+  if (!rawBankName) rawBankName = getCaseInsensitiveProp(data, topLevelBankNameKeys);
   if (!rawAccountNumber) rawAccountNumber = getCaseInsensitiveProp(data, accountNumberKeys);
   if (!rawBankCode) rawBankCode = getCaseInsensitiveProp(data, bankCodeKeys);
 
   // 4. Check nested source / entity / sender objects
-  if (!rawSenderName) rawSenderName = getCaseInsensitiveProp(source, senderNameKeys) || getCaseInsensitiveProp(entity, senderNameKeys) || getCaseInsensitiveProp(sender, senderNameKeys);
-  if (!rawBankName) rawBankName = getCaseInsensitiveProp(source, bankNameKeys) || getCaseInsensitiveProp(entity, bankNameKeys) || getCaseInsensitiveProp(sender, bankNameKeys);
+  if (!rawBankName) rawBankName = getCaseInsensitiveProp(source, nestedBankNameKeys) || getCaseInsensitiveProp(entity, nestedBankNameKeys) || getCaseInsensitiveProp(sender, nestedBankNameKeys);
   if (!rawAccountNumber) rawAccountNumber = getCaseInsensitiveProp(source, accountNumberKeys) || getCaseInsensitiveProp(entity, accountNumberKeys) || getCaseInsensitiveProp(sender, accountNumberKeys);
   if (!rawBankCode) rawBankCode = getCaseInsensitiveProp(source, bankCodeKeys) || getCaseInsensitiveProp(entity, bankCodeKeys) || getCaseInsensitiveProp(sender, bankCodeKeys);
 
