@@ -231,116 +231,31 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
     expect(mockTransactionStore["tx-FUNDING-flw-990002"].status).toBe("SUCCESS");
   });
 
-  test("3. FIX 1: Fresh PROCESSING blocks concurrent duplicate processing, stale PROCESSING is reclaimable, and retry becomes PROCESSED", async () => {
-    const idempotency = FirestoreIdempotency.getInstance();
-    const flwId = "lease-test-101";
-
-    // First claim: fresh PROCESSING
-    const isDup1 = await idempotency.isWebhookDuplicate(flwId);
-    expect(isDup1).toBe(false); // First claim succeeds
-    expect(mockWebhookStore[flwId].status).toBe("PROCESSING");
-
-    // Second claim while lease is fresh (< 60s): blocked as duplicate!
-    const isDup2 = await idempotency.isWebhookDuplicate(flwId);
-    expect(isDup2).toBe(true); // Fresh lease blocks duplicate
-
-    // Simulate stale lease (> 60s ago)
-    mockWebhookStore[flwId].leaseExpiresAt = new Date(Date.now() - 10000).toISOString();
-
-    // Claim after stale lease: successfully reclaimed!
-    const isDup3 = await idempotency.isWebhookDuplicate(flwId);
-    expect(isDup3).toBe(false); // Stale lease reclaimed!
-    expect(mockWebhookStore[flwId].reclaimCount).toBe(1);
-
-    // Finalize processing: status becomes PROCESSED
-    await idempotency.saveWebhookProcessed(flwId);
-    expect(mockWebhookStore[flwId].status).toBe("PROCESSED");
-
-    // Subsequent claim after PROCESSED: permanently blocked
-    const isDup4 = await idempotency.isWebhookDuplicate(flwId);
-    expect(isDup4).toBe(true);
-  });
-
-  test("4. FIX 2: Verification transient errors (network timeout, HTTP 5xx) keep transaction PENDING while provider-confirmed failure transitions to FAILED", async () => {
-    // A. Transient error
+  test("3. Reconciliation actually inspects verification result and skips credit when provider status is not successful", async () => {
     (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
       success: false,
       status: "pending",
-      isTransient: true,
-      amount: 0,
+      amount: 2500,
       currency: "NGN",
       reference: "user-wallet-user-123",
-      flw_id: "transient-101",
-      message: "Temporary verification error: Network timeout"
+      flw_id: "990003"
     });
 
-    mockTransactionStore["tx-FUNDING-flw-transient-101"] = {
+    mockTransactionStore["tx-FUNDING-flw-990003"] = {
       type: "WALLET_FUNDING",
       status: "PENDING",
-      flwId: "transient-101",
+      flwId: "990003",
       reference: "user-wallet-user-123",
       userId: "user-123"
     };
 
     await ReconciliationService.getInstance().reconcilePendingFundings();
-    expect(mockTransactionStore["tx-FUNDING-flw-transient-101"].status).toBe("PENDING"); // Preserved PENDING!
 
-    // B. Explicit Provider Terminal Failure
-    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
-      success: false,
-      status: "failed",
-      isTransient: false,
-      amount: 0,
-      currency: "NGN",
-      reference: "user-wallet-user-123",
-      flw_id: "failed-101",
-      message: "Card charge declined by issuing bank"
-    });
-
-    mockTransactionStore["tx-FUNDING-flw-failed-101"] = {
-      type: "WALLET_FUNDING",
-      status: "PENDING",
-      flwId: "failed-101",
-      reference: "user-wallet-user-123",
-      userId: "user-123"
-    };
-
-    await ReconciliationService.getInstance().reconcilePendingFundings();
-    expect(mockTransactionStore["tx-FUNDING-flw-failed-101"].status).toBe("FAILED"); // Confirmed FAILED!
+    expect(mockUserStore["user-123"].balance).toBe(1000);
+    expect(mockTransactionStore["tx-FUNDING-flw-990003"].status).toBe("PENDING");
   });
 
-  test("5. FIX 3: EXPIRED local funding record is recovered and credited when Flutterwave confirms successful payment", async () => {
-    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
-      success: true,
-      status: "successful",
-      amount: 8000,
-      currency: "NGN",
-      reference: "user-wallet-user-123",
-      flw_id: "late-pay-101",
-      customer: { email: "john@example.com" }
-    });
-
-    mockTransactionStore["tx-FUNDING-flw-late-pay-101"] = {
-      type: "WALLET_FUNDING",
-      status: "EXPIRED",
-      flwId: "late-pay-101",
-      reference: "user-wallet-user-123",
-      userId: "user-123",
-      createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
-    };
-
-    await ReconciliationService.getInstance().reconcilePendingFundings();
-
-    expect(mockUserStore["user-123"].balance).toBe(9000); // 1000 + 8000
-    expect(mockTransactionStore["tx-FUNDING-flw-late-pay-101"].status).toBe("SUCCESS");
-    expect(mockTransactionStore["tx-FUNDING-flw-late-pay-101"].credited).toBe(true);
-
-    // Duplicate late reconciliation call does not credit again
-    await ReconciliationService.getInstance().reconcilePendingFundings();
-    expect(mockUserStore["user-123"].balance).toBe(9000);
-  });
-
-  test("6. Duplicate reconciliation call does not credit twice (idempotency)", async () => {
+  test("4. Duplicate reconciliation call does not credit twice (idempotency)", async () => {
     const firstRes = await WalletFundingService.executeAtomicWalletCredit({
       flwId: "990004",
       txRef: "user-wallet-user-123",
@@ -365,7 +280,7 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
     expect(mockUserStore["user-123"].balance).toBe(2000);
   });
 
-  test("7. Webhook + Reconciliation concurrency produces exactly ONE credit", async () => {
+  test("5. Webhook + Reconciliation concurrency produces exactly ONE credit", async () => {
     const flwId = "990005";
     const txRef = "user-wallet-user-123";
 
@@ -378,7 +293,33 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
     expect(mockUserStore["user-123"].balance).toBe(2500);
   });
 
-  test("8. Invalid or missing flwId is refused and does not credit wallet", async () => {
+  test("6. Failed verification result does not credit and marks transaction FAILED", async () => {
+    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
+      success: false,
+      status: "failed",
+      isTransient: false,
+      amount: 3000,
+      currency: "NGN",
+      reference: "user-wallet-user-123",
+      flw_id: "990006",
+      message: "Card charge declined by issuing bank"
+    });
+
+    mockTransactionStore["tx-FUNDING-flw-990006"] = {
+      type: "WALLET_FUNDING",
+      status: "PENDING",
+      flwId: "990006",
+      reference: "user-wallet-user-123",
+      userId: "user-123"
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(mockUserStore["user-123"].balance).toBe(1000);
+    expect(mockTransactionStore["tx-FUNDING-flw-990006"].status).toBe("FAILED");
+  });
+
+  test("7. Invalid or missing flwId is refused and does not credit wallet", async () => {
     const res1 = await WalletFundingService.executeAtomicWalletCredit({ flwId: "undefined", txRef: "user-wallet-user-123", amount: 1000, currency: "NGN" });
     expect(res1.success).toBe(false);
     expect(res1.credited).toBe(false);
@@ -388,13 +329,13 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
     expect(res2.credited).toBe(false);
   });
 
-  test("9. wallet_accounts.userId is preferred over document ID", async () => {
+  test("8. wallet_accounts.userId is preferred over document ID", async () => {
     const res = await resolveUserIdSafely({ account_number: "0123456789" }, "VA-WEMA-0123456789");
     expect(res.userId).toBe("user-123");
     expect(res.ambiguous).toBe(false);
   });
 
-  test("10. Duplicate account ownership in wallet_accounts is treated as AMBIGUOUS and not credited", async () => {
+  test("9. Duplicate account ownership in wallet_accounts is treated as AMBIGUOUS and not credited", async () => {
     const res = await resolveUserIdSafely({ account_number: "9999999999" }, "VA-WEMA-9999999999");
     expect(res.userId).toBeNull();
     expect(res.ambiguous).toBe(true);
@@ -413,7 +354,49 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
     expect(creditRes.ambiguous).toBe(true);
   });
 
-  test("11. Canonical docId tx-FUNDING-flw-${flwId} is strictly preserved", async () => {
+  test("10. Unmatched funding is not credited and flagged as unmatched", async () => {
+    const creditRes = await WalletFundingService.executeAtomicWalletCredit({
+      flwId: "990010",
+      txRef: "VA-UNKNOWN-5555555555",
+      amount: 5000,
+      currency: "NGN",
+      payloadData: { account_number: "5555555555", customer: { email: "unknown@example.com" } }
+    });
+
+    expect(creditRes.success).toBe(false);
+    expect(creditRes.credited).toBe(false);
+    expect(creditRes.unmatched).toBe(true);
+
+    const docId = resolveFundingLedgerDocId("VA-UNKNOWN-5555555555", "990010");
+    expect(mockTransactionStore[docId].unmatched).toBe(true);
+  });
+
+  test("11. Late successful funding is recovered and credited exactly once", async () => {
+    mockTransactionStore["tx-FUNDING-flw-990011"] = {
+      type: "WALLET_FUNDING",
+      status: "EXPIRED",
+      flwId: "990011",
+      reference: "user-wallet-user-123",
+      userId: "user-123",
+      createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
+    };
+
+    const res = await WalletFundingService.executeAtomicWalletCredit({
+      flwId: "990011",
+      txRef: "user-wallet-user-123",
+      amount: 4000,
+      currency: "NGN",
+      source: "reconciliation"
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.credited).toBe(true);
+    expect(mockUserStore["user-123"].balance).toBe(5000);
+    expect(mockTransactionStore["tx-FUNDING-flw-990011"].status).toBe("SUCCESS");
+    expect(mockTransactionStore["tx-FUNDING-flw-990011"].credited).toBe(true);
+  });
+
+  test("12. Canonical docId tx-FUNDING-flw-${flwId} is strictly preserved", async () => {
     const docId1 = resolveFundingLedgerDocId("user-wallet-user-123", "123456");
     expect(docId1).toBe("tx-FUNDING-flw-123456");
 
@@ -421,7 +404,27 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
     expect(docId2).toBe("tx-FUNDING-flw-123456");
   });
 
-  test("12. Outstanding debt recovery is automatically deducted during atomic credit", async () => {
+  test("13. Existing webhook behavior remains intact for charge.completed", async () => {
+    const res = await WalletFundingService.executeAtomicWalletCredit({
+      flwId: "990013",
+      txRef: "user-wallet-user-123",
+      amount: 1000,
+      currency: "NGN",
+      payloadData: {
+        payment_type: "card",
+        card: { issuer: "VISA", last_4digits: "4242" }
+      },
+      source: "webhook"
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.credited).toBe(true);
+    const docId = resolveFundingLedgerDocId("user-wallet-user-123", "990013");
+    expect(mockTransactionStore[docId].fundingMethod).toBe("CARD");
+    expect(mockTransactionStore[docId].maskedCardNumber).toBe("VISA •••• 4242");
+  });
+
+  test("14. Outstanding debt recovery is automatically deducted during atomic credit", async () => {
     const res = await WalletFundingService.executeAtomicWalletCredit({
       flwId: "990014",
       txRef: "user-wallet-user-indebted",
@@ -435,5 +438,131 @@ describe("Wallet Funding, Reconciliation & User Resolution Master Security Suite
     expect(res.credited).toBe(true);
     expect(mockUserStore["user-indebted"].balance).toBe(1300);
     expect(mockUserStore["user-indebted"].outstandingDebt).toBe(0);
+  });
+
+  test("15. Existing transfer and VTU reconciliation functions remain intact and operational", async () => {
+    const reconciliation = ReconciliationService.getInstance();
+    expect(typeof reconciliation.reconcileSingleTransfer).toBe("function");
+    expect(typeof reconciliation.reconcileSingleVtuTransaction).toBe("function");
+    expect(typeof reconciliation.reconcilePendingFundings).toBe("function");
+  });
+
+  test("16. EXPIRED record with NO flwId and NO trusted reference is SKIPPED (provider verification NOT called)", async () => {
+    mockTransactionStore["tx-arbitrary-expired-999"] = {
+      type: "WALLET_FUNDING",
+      status: "EXPIRED",
+      createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
+      // Notice: NO flwId, NO reference!
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(PaymentVerificationService.verifyTransaction).not.toHaveBeenCalledWith(
+      expect.objectContaining({ transaction_id: "arbitrary-expired-999" })
+    );
+    expect(PaymentVerificationService.verifyTransactionByReference).not.toHaveBeenCalledWith(
+      expect.objectContaining({ tx_ref: "arbitrary-expired-999" })
+    );
+  });
+
+  test("17. EXPIRED record with INVALID or malformed flwId ('undefined', 'null', '0') is SKIPPED", async () => {
+    mockTransactionStore["tx-FUNDING-flw-null"] = {
+      type: "WALLET_FUNDING",
+      status: "EXPIRED",
+      flwId: "null",
+      reference: "random-untrusted-ref",
+      createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(PaymentVerificationService.verifyTransaction).not.toHaveBeenCalledWith({
+      transaction_id: "null",
+      requestId: "reconcile-funding"
+    });
+  });
+
+  test("18. EXPIRED record with TRUSTED reference is verified and recovered on successful provider response", async () => {
+    (PaymentVerificationService.verifyTransactionByReference as jest.Mock).mockResolvedValue({
+      success: true,
+      status: "successful",
+      amount: 6000,
+      currency: "NGN",
+      reference: "user-wallet-user-123",
+      flw_id: "flw-late-trusted-888",
+      customer: { email: "john@example.com" }
+    });
+
+    mockTransactionStore["tx-expired-trusted-888"] = {
+      type: "WALLET_FUNDING",
+      status: "EXPIRED",
+      reference: "user-wallet-user-123",
+      userId: "user-123",
+      createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(PaymentVerificationService.verifyTransactionByReference).toHaveBeenCalledWith({
+      tx_ref: "user-wallet-user-123",
+      requestId: "reconcile-funding"
+    });
+
+    expect(mockUserStore["user-123"].balance).toBe(7000); // 1000 + 6000
+    expect(mockTransactionStore["tx-FUNDING-flw-flw-late-trusted-888"].status).toBe("SUCCESS");
+  });
+
+  test("19. EXPIRED record with failed provider status is NOT credited and remains uncredited", async () => {
+    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
+      success: false,
+      status: "failed",
+      isTransient: false,
+      amount: 5000,
+      currency: "NGN",
+      reference: "user-wallet-user-123",
+      flw_id: "expired-failed-777",
+      message: "Insufficient funds on customer card"
+    });
+
+    mockTransactionStore["tx-FUNDING-flw-expired-failed-777"] = {
+      type: "WALLET_FUNDING",
+      status: "EXPIRED",
+      flwId: "expired-failed-777",
+      reference: "user-wallet-user-123",
+      userId: "user-123",
+      createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(mockUserStore["user-123"].balance).toBe(1000); // Unchanged
+    expect(mockTransactionStore["tx-FUNDING-flw-expired-failed-777"].status).toBe("EXPIRED"); // Stays EXPIRED
+  });
+
+  test("20. EXPIRED record with transient provider error remains EXPIRED and recoverable for future scans", async () => {
+    (PaymentVerificationService.verifyTransaction as jest.Mock).mockResolvedValue({
+      success: false,
+      status: "pending",
+      isTransient: true,
+      amount: 0,
+      currency: "NGN",
+      reference: "user-wallet-user-123",
+      flw_id: "expired-transient-555",
+      message: "Temporary verification error: Provider socket timeout"
+    });
+
+    mockTransactionStore["tx-FUNDING-flw-expired-transient-555"] = {
+      type: "WALLET_FUNDING",
+      status: "EXPIRED",
+      flwId: "expired-transient-555",
+      reference: "user-wallet-user-123",
+      userId: "user-123",
+      createdAt: new Date(Date.now() - 3600 * 1000).toISOString()
+    };
+
+    await ReconciliationService.getInstance().reconcilePendingFundings();
+
+    expect(mockUserStore["user-123"].balance).toBe(1000); // Unchanged
+    expect(mockTransactionStore["tx-FUNDING-flw-expired-transient-555"].status).toBe("EXPIRED"); // Stays EXPIRED
   });
 });

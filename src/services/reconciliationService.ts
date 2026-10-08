@@ -609,16 +609,42 @@ export class ReconciliationService {
         .limit(50)
         .get();
 
+      const { isValidFlwId, parseUserIdFromTxRef } = require("../utils/userIdParser");
+
+      const isTrustworthyRef = (ref?: string | null): boolean => {
+        if (!ref || typeof ref !== "string") return false;
+        const cleanRef = ref.trim();
+        if (!cleanRef) return false;
+
+        return (
+          parseUserIdFromTxRef(cleanRef) !== null ||
+          cleanRef.startsWith("user-wallet-") ||
+          cleanRef.startsWith("flw-tx-") ||
+          cleanRef.startsWith("VA-") ||
+          cleanRef.startsWith("DEP-") ||
+          cleanRef.startsWith("FLW-") ||
+          cleanRef.startsWith("tx-FUNDING-flw-")
+        );
+      };
+
       const candidateDocs = [
         ...pendingFundingSnap.docs,
         ...expiredFundingSnap.docs.filter(d => {
           const data = d.data() || {};
-          return !data.credited && data.status !== "SUCCESS";
+          if (data.credited || data.status === "SUCCESS") return false;
+
+          const flwId = data.flwId || data.providerTransactionId;
+          const ref = data.reference || data.transactionNumber;
+
+          const hasValidFlwId = flwId && isValidFlwId(String(flwId));
+          const hasTrustedRef = isTrustworthyRef(ref);
+
+          return Boolean(hasValidFlwId || hasTrustedRef);
         })
       ];
 
       if (candidateDocs.length === 0) {
-        logger.info("[Deposit Reconciliation] No pending or expired wallet funding transactions found to reconcile.");
+        logger.info("[Deposit Reconciliation] No pending or recoverable expired wallet funding transactions found to reconcile.");
         return;
       }
 
@@ -626,18 +652,28 @@ export class ReconciliationService {
 
       for (const docSnap of candidateDocs) {
         const txData = docSnap.data() || {};
+        const isExpiredRecord = txData.status === "EXPIRED";
         const flwId = txData.flwId || txData.providerTransactionId;
-        const ref = txData.reference || txData.transactionNumber || docSnap.id.replace(/^tx-FUNDING-/, "");
+
+        // For EXPIRED records, never derive provider reference from arbitrary docSnap.id
+        const ref = txData.reference || txData.transactionNumber || (isExpiredRecord ? undefined : docSnap.id.replace(/^tx-FUNDING-/, ""));
+
+        const hasValidFlwId = flwId && isValidFlwId(String(flwId));
+        const hasTrustedRef = isTrustworthyRef(ref);
+
+        if (isExpiredRecord && !hasValidFlwId && !hasTrustedRef) {
+          logger.info(`[Deposit Reconciliation] Skipping EXPIRED doc ${docSnap.id}: no trustworthy provider flwId or reference.`);
+          continue;
+        }
 
         if (flwId || ref) {
           try {
             const { PaymentVerificationService } = require("./paymentVerificationService");
             const { WalletFundingService } = require("./walletFundingService");
-            const { isValidFlwId } = require("../utils/userIdParser");
 
             let verificationResult: any = null;
 
-            if (flwId && isValidFlwId(flwId)) {
+            if (hasValidFlwId) {
               verificationResult = await PaymentVerificationService.verifyTransaction({
                 transaction_id: String(flwId),
                 requestId: "reconcile-funding",
