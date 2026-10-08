@@ -589,6 +589,50 @@ export class ReconciliationService {
   }
 
   /**
+   * Scans and reconciles all pending and unmatched wallet funding deposit transactions.
+   */
+  public async reconcilePendingFundings(): Promise<void> {
+    if (!adminDb) return;
+
+    try {
+      const pendingFundingSnap = await adminDb
+        .collection("transactions")
+        .where("type", "==", "WALLET_FUNDING")
+        .where("status", "==", "PENDING")
+        .get();
+
+      if (pendingFundingSnap.empty) {
+        logger.info("[Deposit Reconciliation] No pending wallet funding transactions found to reconcile.");
+        return;
+      }
+
+      logger.info(`[Deposit Reconciliation] Found ${pendingFundingSnap.size} pending funding transactions. Starting verification...`);
+
+      for (const docSnap of pendingFundingSnap.docs) {
+        const txData = docSnap.data() || {};
+        const flwId = txData.flwId || txData.providerTransactionId;
+        const ref = txData.reference || txData.transactionNumber;
+
+        if (flwId || ref) {
+          try {
+            const { PaymentVerificationService } = require("./paymentVerificationService");
+            const { isValidFlwId } = require("../utils/userIdParser");
+            if (flwId && isValidFlwId(flwId)) {
+              await PaymentVerificationService.verifyTransaction({ transaction_id: String(flwId), requestId: "reconcile-funding" });
+            } else if (ref) {
+              await PaymentVerificationService.verifyTransactionByReference({ tx_ref: String(ref), requestId: "reconcile-funding" });
+            }
+          } catch (vErr: any) {
+            logger.warn(`[Deposit Reconciliation] Verification check for deposit ref=${ref} failed: ${vErr.message}`);
+          }
+        }
+      }
+    } catch (err: any) {
+      logger.error(`[Deposit Reconciliation] Error scanning pending fundings: ${err.message}`);
+    }
+  }
+
+  /**
    * Scans and reconciles all pending VTU transactions.
    */
   public async reconcilePendingVtuTransactions(): Promise<void> {
@@ -645,7 +689,8 @@ export class ReconciliationService {
           logger.info("[Reconciliation Service] No pending transfers found to reconcile.");
         }
 
-        // Reconcile pending VTU transactions
+        // Reconcile pending wallet funding deposits and VTU transactions
+        await this.reconcilePendingFundings();
         await this.reconcilePendingVtuTransactions();
         await this.expireStalePendingFundings();
 

@@ -121,17 +121,56 @@ async function resolveUserIdFromPayload(data: any, txRef: string): Promise<strin
   if (parsedUid) {
     return parsedUid;
   }
-  const email = data?.customer?.email;
-  if (email && adminDb) {
-    try {
-      const snap = await adminDb.collection("users").where("email", "==", email).get();
-      if (!snap.empty) {
-        return snap.docs[0].id;
+
+  if (adminDb) {
+    // 1. Virtual Account Number Lookup in wallet_accounts & users collections
+    const rawAcc = data?.account_number || data?.virtual_account_number || data?.meta?.account_number || data?.customer?.account_number;
+    if (rawAcc) {
+      const cleanAcc = String(rawAcc).trim().replace(/\D/g, "");
+      if (cleanAcc.length >= 8) {
+        try {
+          // Query wallet_accounts collection
+          const waSnap = await adminDb.collection("wallet_accounts").where("accountNumber", "==", cleanAcc).limit(1).get();
+          if (!waSnap.empty) {
+            const matchedUid = waSnap.docs[0].id || waSnap.docs[0].data()?.userId;
+            if (matchedUid) {
+              logger.info(`[resolveUserIdFromPayload] Successfully resolved userId=${matchedUid} from wallet_accounts via virtual account number ${cleanAcc}`);
+              return matchedUid;
+            }
+          }
+
+          // Query users collection by virtual account number or account number
+          const uSnap1 = await adminDb.collection("users").where("virtualAccountNumber", "==", cleanAcc).limit(1).get();
+          if (!uSnap1.empty) {
+            logger.info(`[resolveUserIdFromPayload] Successfully resolved userId=${uSnap1.docs[0].id} from users via virtualAccountNumber ${cleanAcc}`);
+            return uSnap1.docs[0].id;
+          }
+
+          const uSnap2 = await adminDb.collection("users").where("accountNumber", "==", cleanAcc).limit(1).get();
+          if (!uSnap2.empty) {
+            logger.info(`[resolveUserIdFromPayload] Successfully resolved userId=${uSnap2.docs[0].id} from users via accountNumber ${cleanAcc}`);
+            return uSnap2.docs[0].id;
+          }
+        } catch (vAccErr: any) {
+          logger.error(`[resolveUserIdFromPayload] Virtual account lookup failed for ${cleanAcc}: ${vAccErr.message}`);
+        }
       }
-    } catch (err: any) {
-      logger.error(`[resolveUserIdFromPayload] Email lookup failed for ${email}: ${err.message}`);
+    }
+
+    // 2. Email lookup fallback
+    const email = data?.customer?.email;
+    if (email) {
+      try {
+        const snap = await adminDb.collection("users").where("email", "==", email).get();
+        if (!snap.empty) {
+          return snap.docs[0].id;
+        }
+      } catch (err: any) {
+        logger.error(`[resolveUserIdFromPayload] Email lookup failed for ${email}: ${err.message}`);
+      }
     }
   }
+
   return null;
 }
 
