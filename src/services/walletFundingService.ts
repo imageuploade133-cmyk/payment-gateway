@@ -5,6 +5,7 @@ import { extractSenderInfo } from "../utils/senderExtractor";
 import { parseUserIdFromTxRef, isValidFlwId, resolveFundingLedgerDocId } from "../utils/userIdParser";
 import { NotificationService } from "./notificationService";
 import { FirestoreIdempotency } from "./firestoreIdempotency";
+import { PaymentVerificationService } from "./paymentVerificationService";
 
 const idempotency = FirestoreIdempotency.getInstance();
 
@@ -483,14 +484,61 @@ export class WalletFundingService {
         }
 
         // Extract metadata and sender details
-        const extractedSender = extractSenderInfo(payloadData || {});
+        let extractedSender = extractSenderInfo(payloadData || {});
+
+        // Verification Enrichment if sender info is missing and valid flwId is available
+        if (
+          (!extractedSender.senderName || !extractedSender.senderBankName || !extractedSender.senderAccountNumber) &&
+          isValidFlwId(cleanFlwId) &&
+          source !== "verify"
+        ) {
+          try {
+            logger.info(`[WalletFundingService] Sender information incomplete. Attempting Flutterwave transaction verification for flwId=${cleanFlwId}`);
+            const verifyRes = await PaymentVerificationService.verifyTransaction({
+              transaction_id: cleanFlwId,
+              requestId: requestId || "enrichment-verify",
+            });
+
+            if (verifyRes && verifyRes.rawTxData) {
+              const verifiedSender = extractSenderInfo(verifyRes.rawTxData);
+              extractedSender = {
+                senderName: extractedSender.senderName || verifiedSender.senderName,
+                senderBankName: extractedSender.senderBankName || verifiedSender.senderBankName,
+                senderAccountNumber: extractedSender.senderAccountNumber || verifiedSender.senderAccountNumber,
+                senderBankCode: extractedSender.senderBankCode || verifiedSender.senderBankCode,
+              };
+            }
+          } catch (verifyErr: any) {
+            logger.warn(`[WalletFundingService] Verification enrichment failed for flwId=${cleanFlwId}: ${verifyErr.message}`);
+          }
+        }
+
         const existingData = ledgerSnap.exists ? ledgerSnap.data() : {};
 
         const senderName = extractedSender.senderName || existingData?.senderName || null;
         const senderBankName = extractedSender.senderBankName || existingData?.senderBankName || null;
+        const senderBankCode = extractedSender.senderBankCode || existingData?.senderBankCode || null;
         const senderAccountNumber = maskAccount(extractedSender.senderAccountNumber) || existingData?.senderAccountNumber || null;
-        const virtualAccountNumber = maskAccount(payloadData?.account_number || payloadData?.virtual_account_number) || existingData?.virtualAccountNumber || null;
-        const virtualAccountBankName = payloadData?.bank_name || payloadData?.virtual_account_bank || existingData?.virtualAccountBankName || null;
+
+        // Resolve user's permanent virtual account if receiving account info is incomplete
+        let rawVirtualAccountNumber = payloadData?.account_number || payloadData?.virtual_account_number;
+        let rawVirtualAccountBank = payloadData?.bank_name || payloadData?.virtual_account_bank;
+
+        if ((!rawVirtualAccountNumber || !rawVirtualAccountBank) && targetUid) {
+          try {
+            const waDoc = await db.collection("wallet_accounts").doc(targetUid).get();
+            if (waDoc.exists) {
+              const waData = waDoc.data() || {};
+              rawVirtualAccountNumber = rawVirtualAccountNumber || waData.accountNumber;
+              rawVirtualAccountBank = rawVirtualAccountBank || waData.bankName;
+            }
+          } catch (waErr: any) {
+            logger.warn(`[WalletFundingService] Wallet account lookup failed for UID ${targetUid}: ${waErr.message}`);
+          }
+        }
+
+        const virtualAccountNumber = maskAccount(rawVirtualAccountNumber) || existingData?.virtualAccountNumber || null;
+        const virtualAccountBankName = rawVirtualAccountBank || existingData?.virtualAccountBankName || null;
 
         const paymentType = String(payloadData?.payment_type || payloadData?.type || "").toLowerCase();
         const cardData = payloadData?.card || {};
@@ -546,6 +594,7 @@ export class WalletFundingService {
           ussdBankName,
           senderName,
           senderBankName,
+          senderBankCode,
           senderAccountNumber,
           virtualAccountNumber,
           virtualAccountBankName,

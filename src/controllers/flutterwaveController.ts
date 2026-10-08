@@ -1231,12 +1231,17 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
 
       if (canonicalStatus === "SUCCESS") {
         const amount = Number(payload.data?.amount) || 0;
+        const combinedPayloadData = {
+          ...payload.data,
+          meta_data: payload.data?.meta_data || payload.meta_data || payload.data?.metadata || payload.metadata,
+          meta: payload.data?.meta || payload.meta,
+        };
         const creditResult = await WalletFundingService.executeAtomicWalletCredit({
           flwId: transactionId,
           txRef,
           amount,
           currency: payload.data?.currency || "NGN",
-          payloadData: payload.data,
+          payloadData: combinedPayloadData,
           requestId: reqId,
           source: "webhook",
         });
