@@ -1241,6 +1241,11 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
           source: "webhook",
         });
 
+        if (!creditResult.success && !creditResult.alreadyCredited && !creditResult.unmatched) {
+          // Release processing lease on temporary credit error so webhook can be retried by provider
+          await idempotency.releaseWebhookProcessing(transactionId);
+        }
+
         res.status(200).json({
           success: true,
           message: creditResult.message || "Webhook payload verified",

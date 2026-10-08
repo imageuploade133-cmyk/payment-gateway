@@ -35,6 +35,7 @@ export interface VerifyPaymentParams {
 export interface VerificationResult {
   success: boolean;
   status: "successful" | "failed" | "pending";
+  isTransient?: boolean;
   amount: number;
   currency: string;
   reference: string;
@@ -231,12 +232,13 @@ export class PaymentVerificationService {
       return {
         success: false,
         status: "pending",
+        isTransient: true,
         amount: 0,
         currency: "NGN",
         reference: "",
         flw_id: transaction_id,
         customer: { name: "", email: "" },
-        message: "The payment verification payload returned unexpected results.",
+        message: "The payment verification payload returned unexpected or transient results.",
       };
 
     } catch (error: any) {
@@ -246,13 +248,14 @@ export class PaymentVerificationService {
       );
       return {
         success: false,
-        status: "failed",
+        status: "pending",
+        isTransient: true,
         amount: 0,
         currency: "NGN",
         reference: "",
         flw_id: transaction_id,
         customer: { name: "", email: "" },
-        message: "Failed to verify transaction reference with payment provider.",
+        message: `Temporary verification error: ${errorMsg}`,
       };
     }
   }
@@ -328,12 +331,13 @@ export class PaymentVerificationService {
       return {
         success: false,
         status: "pending",
+        isTransient: true,
         amount: 0,
         currency: "NGN",
         reference: tx_ref,
         flw_id: "",
         customer: { name: "", email: "" },
-        message: "The payment verification payload returned unexpected results.",
+        message: "The payment verification payload returned unexpected or transient results.",
       };
 
     } catch (error: any) {
@@ -343,13 +347,14 @@ export class PaymentVerificationService {
       );
       return {
         success: false,
-        status: "failed",
+        status: "pending",
+        isTransient: true,
         amount: 0,
         currency: "NGN",
         reference: tx_ref,
         flw_id: "",
         customer: { name: "", email: "" },
-        message: "Failed to verify transaction reference with payment provider.",
+        message: `Temporary verification error: ${errorMsg}`,
       };
     }
   }

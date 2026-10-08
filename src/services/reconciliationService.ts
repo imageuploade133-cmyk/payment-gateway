@@ -602,14 +602,29 @@ export class ReconciliationService {
         .limit(50)
         .get();
 
-      if (pendingFundingSnap.empty) {
-        logger.info("[Deposit Reconciliation] No pending wallet funding transactions found to reconcile.");
+      const expiredFundingSnap = await adminDb
+        .collection("transactions")
+        .where("type", "==", "WALLET_FUNDING")
+        .where("status", "==", "EXPIRED")
+        .limit(50)
+        .get();
+
+      const candidateDocs = [
+        ...pendingFundingSnap.docs,
+        ...expiredFundingSnap.docs.filter(d => {
+          const data = d.data() || {};
+          return !data.credited && data.status !== "SUCCESS";
+        })
+      ];
+
+      if (candidateDocs.length === 0) {
+        logger.info("[Deposit Reconciliation] No pending or expired wallet funding transactions found to reconcile.");
         return;
       }
 
-      logger.info(`[Deposit Reconciliation] Found ${pendingFundingSnap.size} pending funding transactions. Starting verification...`);
+      logger.info(`[Deposit Reconciliation] Found ${candidateDocs.length} funding transactions to reconcile. Starting verification...`);
 
-      for (const docSnap of pendingFundingSnap.docs) {
+      for (const docSnap of candidateDocs) {
         const txData = docSnap.data() || {};
         const flwId = txData.flwId || txData.providerTransactionId;
         const ref = txData.reference || txData.transactionNumber || docSnap.id.replace(/^tx-FUNDING-/, "");
@@ -657,14 +672,18 @@ export class ReconciliationService {
               logger.info(
                 `[Deposit Reconciliation] Reconciled deposit ref=${targetTxRef}: credited=${creditResult.credited}, alreadyCredited=${creditResult.alreadyCredited}, success=${creditResult.success}`
               );
-            } else if (verificationResult && verificationResult.status === "failed") {
+            } else if (verificationResult && verificationResult.status === "failed" && !verificationResult.isTransient) {
               const ledgerDocId = docSnap.id;
-              await adminDb.collection("transactions").doc(ledgerDocId).set({
-                status: "FAILED",
-                credited: false,
-                reason: verificationResult.message || "Payment failed or declined on provider rails",
-                updatedAt: new Date().toISOString(),
-              }, { merge: true });
+              if (txData.status === "PENDING") {
+                await adminDb.collection("transactions").doc(ledgerDocId).set({
+                  status: "FAILED",
+                  credited: false,
+                  reason: verificationResult.message || "Payment failed or declined on provider rails",
+                  updatedAt: new Date().toISOString(),
+                }, { merge: true });
+              }
+            } else {
+              logger.info(`[Deposit Reconciliation] Verification for deposit ref=${ref} returned transient error or pending status. Keeping transaction recoverable.`);
             }
           } catch (vErr: any) {
             logger.warn(`[Deposit Reconciliation] Verification check for deposit ref=${ref} failed: ${vErr.message}`);
