@@ -14,6 +14,23 @@ jest.mock("../providers/flutterwave", () => {
   };
 });
 
+jest.mock("../services/firestoreIdempotency", () => {
+  const mCache = new Set<string>();
+  return {
+    FirestoreIdempotency: {
+      getInstance: jest.fn().mockReturnValue({
+        isDuplicate: jest.fn().mockImplementation(async (ref: string) => mCache.has(ref)),
+        saveReference: jest.fn().mockImplementation(async (ref: string) => { mCache.add(ref); }),
+        claimReference: jest.fn().mockImplementation(async (ref: string) => {
+          if (mCache.has(ref)) return false;
+          mCache.add(ref);
+          return true;
+        }),
+      }),
+    },
+  };
+});
+
 const mockFlwClient = getFlutterwaveClient() as jest.Mocked<any>;
 const testApiKey = env.GATEWAY_API_KEYS[0];
 
@@ -125,6 +142,30 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       });
     });
 
+    it("should explicitly persist custom narration and remark on transfer documents", async () => {
+      mockFlwClient.request.mockResolvedValue({
+        status: "success",
+        message: "Transfer queued",
+        data: {
+          id: 998877,
+          status: "NEW",
+          amount: 5000,
+          reference: validPayload.reference,
+        },
+      });
+
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
+        .send({
+          ...validPayload,
+          narration: "Monthly Consulting Fee Payment",
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+
     it("should reject with duplicate reference warning if reference is sent twice (Idempotency check)", async () => {
       mockFlwClient.request.mockResolvedValue({
         status: "success",
@@ -159,7 +200,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Transfer could not be processed");
+      expect(res.body.message).toContain("Unable to execute transfer");
     });
   });
 
