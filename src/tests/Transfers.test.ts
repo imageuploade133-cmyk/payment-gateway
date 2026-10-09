@@ -154,16 +154,26 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
         },
       });
 
+      const customNarration = "Monthly Consulting Fee Payment";
       const res = await request(app)
         .post("/api/flutterwave/transfer")
         .set("X-API-Key", testApiKey)
         .send({
           ...validPayload,
-          narration: "Monthly Consulting Fee Payment",
+          narration: customNarration,
         });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
+
+      // Verify that Flutterwave was called with the exact narration
+      expect(mockFlwClient.request).toHaveBeenCalledWith(
+        "post",
+        "/transfers",
+        expect.objectContaining({
+          narration: customNarration,
+        })
+      );
     });
 
     it("should reject with duplicate reference warning if reference is sent twice (Idempotency check)", async () => {
