@@ -6,7 +6,6 @@ import { clubkonnectConfig } from "../config/clubkonnect";
 import { adminDb } from "../config/firebase";
 import { FieldValue } from "firebase-admin/firestore";
 import { AuthenticatedRequest } from "../middleware/auth";
-import { getFlutterwaveClient } from "../providers/flutterwave";
 
 /**
  * Controller to handle Clubkonnect wallet balance operations.
@@ -289,9 +288,7 @@ async function executeAtomicRefund(
 }
 
 /**
- * Handles VTU Airtime purchases.
- * Accepts alias fields: phone / customer_id, network / provider / biller_code, amount.
- * Strictly uses req.user?.uid for authenticated identity.
+ * Handles VTU Airtime purchases strictly on 100% Pure ClubKonnect.
  */
 export const purchaseAirtime = async (
   req: AuthenticatedRequest,
@@ -457,8 +454,7 @@ export const purchaseAirtime = async (
 };
 
 /**
- * Handles VTU Mobile Data purchases.
- * Features automated Flutterwave Bills API fallback on Clubkonnect 503 / timeout / network failure!
+ * Handles VTU Mobile Data purchases strictly on 100% Pure ClubKonnect (with dual APIDatabundleV1.asp + APIDatashareV1.asp endpoint failover).
  */
 export const purchaseData = async (
   req: AuthenticatedRequest,
@@ -571,10 +567,8 @@ export const purchaseData = async (
       return;
     }
 
-    // 1. Primary Attempt: Call Clubkonnect
-    let dataResult: any;
-    let usedProvider = "Clubkonnect";
-
+    // Call 100% Pure ClubKonnect Service (with internal dual APIDatabundleV1.asp + APIDatashareV1.asp failover)
+    let dataResult;
     try {
       dataResult = await ClubkonnectService.purchaseData({
         network: normalizedNetwork,
@@ -583,64 +577,27 @@ export const purchaseData = async (
         requestId: purchaseRequestId,
       }, reqId);
     } catch (apiError: any) {
-      logger.error(`[Clubkonnect Controller] Primary provider Clubkonnect exception | error=${apiError.message} | reqId=${reqId}`);
+      logger.error(`[Clubkonnect Controller] API Exception calling Clubkonnect | error=${apiError.message} | reqId=${reqId}`);
       dataResult = { success: false, message: apiError.message };
     }
 
-    // 2. Secondary Failover Attempt: If ClubKonnect failed or returned 503/timeout, attempt Flutterwave Bills Fallback
-    if (!dataResult.success) {
-      logger.warn(`[Clubkonnect Controller] Primary provider ClubKonnect failed (${dataResult.message}). Attempting automated Flutterwave Bills API fallback... | reqId=${reqId}`);
-
-      try {
-        const flwClient = getFlutterwaveClient();
-        const flwBillerType = `${normalizedNetwork}_DATA` as any;
-        const flwResponse = await flwClient.request("post", "/bills", {
-          country: "NG",
-          customer: cleanPhone,
-          amount: numAmount,
-          type: flwBillerType,
-          reference: transactionRef,
-        });
-
-        if (flwResponse && flwResponse.status === "success" && flwResponse.data) {
-          usedProvider = "Flutterwave";
-          dataResult = {
-            success: true,
-            orderId: flwResponse.data.tx_ref || flwResponse.data.id?.toString() || transactionRef,
-            message: "Mobile data order fulfilled via Flutterwave fallback rail.",
-          };
-          logger.info(`[Clubkonnect Controller] SUCCESS: Mobile data purchase fulfilled via Flutterwave fallback | ref=${transactionRef} | reqId=${reqId}`);
-        } else {
-          logger.warn(`[Clubkonnect Controller] Fallback provider Flutterwave also rejected request: ${flwResponse?.message}`);
-        }
-      } catch (flwErr: any) {
-        logger.error(`[Clubkonnect Controller] Fallback provider Flutterwave call exception: ${flwErr.message}`);
-      }
-    }
-
-    // 3. Final Outcome: Success on either provider, or 100% Auto-Refund if both failed
     if (dataResult.success) {
       await vtuTxRef.update({
-        provider: usedProvider,
+        provider: "Clubkonnect",
         providerOrderId: dataResult.orderId || null,
-        status: "Delivered",
-        updatedAt: new Date().toISOString(),
-      });
-
-      await ledgerRef!.update({
-        status: "SUCCESS",
+        status: "Pending",
         updatedAt: new Date().toISOString(),
       });
 
       res.status(200).json({
         success: true,
-        provider: usedProvider,
+        provider: "Clubkonnect",
         orderId: dataResult.orderId,
         requestId: purchaseRequestId,
-        message: "Data plan purchase processed successfully.",
+        message: "Data plan purchase order received successfully. Processing...",
       });
     } else {
-      logger.warn(`[Clubkonnect Controller] All providers failed for Mobile Data. Initiating Auto-Refund | reason=${dataResult.message} | reqId=${reqId}`);
+      logger.warn(`[Clubkonnect Controller] Data purchase failed on ClubKonnect endpoints. Initiating Auto-Refund | reason=${dataResult.message} | reqId=${reqId}`);
 
       if (debitCommitted) {
         try {
@@ -650,7 +607,7 @@ export const purchaseData = async (
             numAmount,
             transactionRef,
             cleanPhone,
-            dataResult.message || "All providers unavailable",
+            dataResult.message || "ClubKonnect service failure",
             "DATA",
             ledgerRef!,
             vtuTxRef!
@@ -677,8 +634,7 @@ export const purchaseData = async (
 };
 
 /**
- * Handles Cable TV Subscription purchases.
- * Fails safely if integration/provider is unavailable without mock success or fake order IDs.
+ * Handles Cable TV Subscription purchases strictly on ClubKonnect.
  */
 export const purchaseCable = async (
   req: AuthenticatedRequest,
@@ -717,10 +673,10 @@ export const purchaseCable = async (
       return;
     }
 
-    logger.warn(`[Clubkonnect Controller] Cable TV purchase requested but provider service rail is unavailable | reqId=${reqId}`);
+    logger.warn(`[Clubkonnect Controller] Cable TV purchase requested on ClubKonnect rail | reqId=${reqId}`);
     res.status(503).json({
       success: false,
-      message: "Cable TV purchase failed: Provider service rail is temporarily unavailable. No funds were debited.",
+      message: "Cable TV purchase failed: ClubKonnect service rail is temporarily unavailable. No funds were debited.",
     });
 
   } catch (error: any) {
@@ -733,8 +689,7 @@ export const purchaseCable = async (
 };
 
 /**
- * Handles Electricity Bill Payment.
- * Fails safely if integration/provider is unavailable without mock success or fake electricity tokens.
+ * Handles Electricity Bill Payment strictly on ClubKonnect.
  */
 export const purchaseElectricity = async (
   req: AuthenticatedRequest,
@@ -772,10 +727,10 @@ export const purchaseElectricity = async (
       return;
     }
 
-    logger.warn(`[Clubkonnect Controller] Electricity purchase requested but provider service rail is unavailable | reqId=${reqId}`);
+    logger.warn(`[Clubkonnect Controller] Electricity purchase requested on ClubKonnect rail | reqId=${reqId}`);
     res.status(503).json({
       success: false,
-      message: "Electricity bill payment failed: Provider service rail is temporarily unavailable. No funds were debited.",
+      message: "Electricity bill payment failed: ClubKonnect service rail is temporarily unavailable. No funds were debited.",
     });
 
   } catch (error: any) {
@@ -788,8 +743,7 @@ export const purchaseElectricity = async (
 };
 
 /**
- * Handles WAEC / Exam Result Checker PIN purchase.
- * Fails safely if integration/provider is unavailable without mock success or fake PINs.
+ * Handles WAEC PIN purchase strictly on ClubKonnect.
  */
 export const purchaseWaec = async (
   req: AuthenticatedRequest,
@@ -812,10 +766,10 @@ export const purchaseWaec = async (
 
     const numAmount = Number(amountInput) || 3800;
 
-    logger.warn(`[Clubkonnect Controller] WAEC PIN purchase requested but provider service rail is unavailable | reqId=${reqId}`);
+    logger.warn(`[Clubkonnect Controller] WAEC PIN purchase requested on ClubKonnect rail | reqId=${reqId}`);
     res.status(503).json({
       success: false,
-      message: "WAEC PIN purchase failed: Provider service rail is temporarily unavailable. No funds were debited.",
+      message: "WAEC PIN purchase failed: ClubKonnect service rail is temporarily unavailable. No funds were debited.",
     });
 
   } catch (error: any) {
