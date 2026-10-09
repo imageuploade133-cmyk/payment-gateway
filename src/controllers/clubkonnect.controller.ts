@@ -193,6 +193,7 @@ async function executeAtomicDebit(
 
 /**
  * Helper to execute 100% rollback refund back to BOTH users/{userId} and wallets/{userId}_NGN on provider failure.
+ * Idempotency guard ensures a transaction is never refunded twice.
  */
 async function executeAtomicRefund(
   db: FirebaseFirestore.Firestore,
@@ -207,8 +208,17 @@ async function executeAtomicRefund(
 ): Promise<void> {
   const userDocRef = db.collection("users").doc(userId);
   const walletDocRef = db.collection("wallets").doc(`${userId}_NGN`);
+  const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${transactionRef}`);
 
   await db.runTransaction(async (transaction) => {
+    const freshVtuTx = await transaction.get(vtuTxRef);
+    const freshData = freshVtuTx.data() || {};
+
+    if (freshData.refundProcessed) {
+      logger.info(`[executeAtomicRefund] Refund already processed for ${transactionRef}. Skipping.`);
+      return;
+    }
+
     // 1. Refund users/{userId}
     transaction.update(userDocRef, {
       balance: FieldValue.increment(numAmount),
@@ -243,7 +253,6 @@ async function executeAtomicRefund(
     });
 
     // 4. Record REFUND general ledger doc
-    const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${transactionRef}`);
     transaction.set(refundLedgerRef, {
       userId,
       amount: numAmount,
@@ -273,6 +282,7 @@ async function executeAtomicRefund(
 /**
  * Handles VTU Airtime purchases.
  * Accepts alias fields: phone / customer_id, network / provider / biller_code, amount.
+ * Strictly uses req.user?.uid for authenticated identity.
  */
 export const purchaseAirtime = async (
   req: AuthenticatedRequest,
@@ -282,18 +292,17 @@ export const purchaseAirtime = async (
   const reqId = req.requestId;
   logger.info(`[Clubkonnect Controller] Received purchaseAirtime request | body=${JSON.stringify(req.body)} | reqId=${reqId}`);
 
-  // Alias fields resolution
   const networkInput = String(req.body.network || req.body.provider || req.body.biller_code || req.body.billerCode || "").trim();
   const phoneInput = String(req.body.phone || req.body.customer_id || req.body.customerId || req.body.phoneNumber || req.body.mobile_number || "").trim();
   const amountInput = req.body.amount;
-  const userId = req.user?.uid || req.body.userId;
+  const userId = req.user?.uid;
 
   try {
     if (!userId) {
-      logger.warn(`[Clubkonnect Controller] Missing userId | reqId=${reqId}`);
+      logger.warn(`[Clubkonnect Controller] Unauthorized access attempt: missing req.user.uid | reqId=${reqId}`);
       res.status(401).json({
         success: false,
-        message: "Unauthorized: Missing authenticated user context.",
+        message: "Unauthorized: Valid authenticated user identity token or session is required.",
       });
       return;
     }
@@ -440,7 +449,7 @@ export const purchaseAirtime = async (
 
 /**
  * Handles VTU Mobile Data purchases.
- * Accepts alias fields: network / provider / biller_code, phone / customer_id, item_code / packageCode / productCode / plan_code, amount.
+ * Strictly uses req.user?.uid for authenticated identity.
  */
 export const purchaseData = async (
   req: AuthenticatedRequest,
@@ -450,18 +459,18 @@ export const purchaseData = async (
   const reqId = req.requestId;
   logger.info(`[Clubkonnect Controller] Received purchaseData request | body=${JSON.stringify(req.body)} | reqId=${reqId}`);
 
-  // Alias fields resolution
   const networkInput = String(req.body.network || req.body.provider || req.body.biller_code || req.body.billerCode || "").trim();
   const phoneInput = String(req.body.phone || req.body.customer_id || req.body.customerId || req.body.phoneNumber || "").trim();
   const packageCodeInput = String(req.body.item_code || req.body.itemCode || req.body.packageCode || req.body.package_code || req.body.productCode || req.body.product_code || req.body.plan_code || req.body.planCode || req.body.variation_code || "").trim();
   const amountInput = req.body.amount;
-  const userId = req.user?.uid || req.body.userId;
+  const userId = req.user?.uid;
 
   try {
     if (!userId) {
+      logger.warn(`[Clubkonnect Controller] Unauthorized access attempt: missing req.user.uid | reqId=${reqId}`);
       res.status(401).json({
         success: false,
-        message: "Unauthorized: Missing authenticated user context.",
+        message: "Unauthorized: Valid authenticated user identity token or session is required.",
       });
       return;
     }
@@ -495,7 +504,6 @@ export const purchaseData = async (
       return;
     }
 
-    // Resolve data plan details from dynamic cache / fallbacks
     const plans = await ClubkonnectService.getDataPlans(normalizedNetwork, reqId);
     const plan = plans.find((p) => p.item_code === packageCodeInput || p.plan_code === packageCodeInput);
 
@@ -618,7 +626,7 @@ export const purchaseData = async (
 
 /**
  * Handles Cable TV Subscription purchases.
- * Accepts alias fields: smartCardNo / customer_id / phone / iuc, provider / network / biller_code, packageCode / item_code / productCode, amount.
+ * Fails safely if integration/provider is unavailable without mock success or fake order IDs.
  */
 export const purchaseCable = async (
   req: AuthenticatedRequest,
@@ -632,11 +640,12 @@ export const purchaseCable = async (
   const providerInput = String(req.body.provider || req.body.network || req.body.biller_code || req.body.billerCode || "").trim().toUpperCase();
   const packageCodeInput = String(req.body.packageCode || req.body.package_code || req.body.item_code || req.body.itemCode || req.body.productCode || req.body.plan_code || "").trim();
   const amountInput = req.body.amount;
-  const userId = req.user?.uid || req.body.userId;
+  const userId = req.user?.uid;
 
   try {
     if (!userId) {
-      res.status(401).json({ success: false, message: "Unauthorized: Missing authenticated user context." });
+      logger.warn(`[Clubkonnect Controller] Unauthorized access attempt: missing req.user.uid | reqId=${reqId}`);
+      res.status(401).json({ success: false, message: "Unauthorized: Valid authenticated user identity token or session is required." });
       return;
     }
 
@@ -656,99 +665,25 @@ export const purchaseCable = async (
       return;
     }
 
-    if (!adminDb) {
-      res.status(500).json({ success: false, message: "Database Error: Firestore database is not initialized." });
-      return;
-    }
+    // Direct failure: Cable TV provider integration endpoint is currently unavailable on provider rail
+    logger.warn(`[Clubkonnect Controller] Cable TV purchase requested but provider service rail is unavailable | reqId=${reqId}`);
+    res.status(503).json({
+      success: false,
+      message: "Cable TV purchase failed: Provider service rail is temporarily unavailable. No funds were debited.",
+    });
 
-    const db = adminDb;
-    const purchaseRequestId = randomUUID();
-    const transactionRef = `VTU-CAB-${purchaseRequestId}`;
-
-    let debitCommitted = false;
-    let ledgerRef: FirebaseFirestore.DocumentReference;
-    let vtuTxRef: FirebaseFirestore.DocumentReference;
-
-    try {
-      const resRefs = await executeAtomicDebit(
-        db,
-        userId,
-        numAmount,
-        transactionRef,
-        purchaseRequestId,
-        "CABLE",
-        `Cable TV Subscription (${providerInput}) for ${targetId}`,
-        targetId,
-        { provider: providerInput, packageCode: packageCodeInput }
-      );
-      ledgerRef = resRefs.ledgerRef;
-      vtuTxRef = resRefs.vtuTxRef;
-      debitCommitted = true;
-    } catch (txError: any) {
-      if (txError.message === "USER_NOT_FOUND") {
-        res.status(404).json({ success: false, message: "User profile not found." });
-        return;
-      }
-      if (txError.message === "INSUFFICIENT_FUNDS") {
-        res.status(400).json({ success: false, message: "Insufficient wallet balance to purchase cable subscription." });
-        return;
-      }
-      res.status(500).json({ success: false, message: txError.message || "Failed to process wallet debit." });
-      return;
-    }
-
-    // Call Provider or Handle Order
-    const cableResult = { success: true, orderId: `CAB-${purchaseRequestId}`, message: "Cable subscription order submitted." };
-
-    if (cableResult.success) {
-      await vtuTxRef.update({
-        status: "Delivered",
-        providerOrderId: cableResult.orderId,
-        updatedAt: new Date().toISOString(),
-      });
-
-      await ledgerRef!.update({
-        status: "SUCCESS",
-        updatedAt: new Date().toISOString(),
-      });
-
-      res.status(200).json({
-        success: true,
-        orderId: cableResult.orderId,
-        requestId: purchaseRequestId,
-        message: "Cable subscription purchased successfully.",
-      });
-    } else {
-      if (debitCommitted) {
-        await executeAtomicRefund(
-          db,
-          userId,
-          numAmount,
-          transactionRef,
-          targetId,
-          cableResult.message || "Provider rejection",
-          "CABLE",
-          ledgerRef!,
-          vtuTxRef!
-        );
-      }
-      res.status(400).json({
-        success: false,
-        message: `Cable subscription failed: ${cableResult.message}`,
-      });
-    }
   } catch (error: any) {
     logger.error(`[Clubkonnect Controller] purchaseCable exception | error=${error.message} | reqId=${reqId}`);
     res.status(500).json({
       success: false,
-      message: "Cable purchase failed: Provider network issue. Please try again later.",
+      message: "Cable TV purchase failed: Provider network issue. Please try again later.",
     });
   }
 };
 
 /**
  * Handles Electricity Bill Payment.
- * Accepts alias fields: meterNo / customer_id / phone, provider / network / biller_code, packageCode / item_code, amount.
+ * Fails safely if integration/provider is unavailable without mock success or fake electricity tokens.
  */
 export const purchaseElectricity = async (
   req: AuthenticatedRequest,
@@ -760,13 +695,13 @@ export const purchaseElectricity = async (
 
   const targetId = String(req.body.meterNo || req.body.meter_no || req.body.customer_id || req.body.customerId || req.body.phone || req.body.account_number || "").trim();
   const providerInput = String(req.body.provider || req.body.network || req.body.biller_code || req.body.billerCode || "").trim().toUpperCase();
-  const packageCodeInput = String(req.body.packageCode || req.body.package_code || req.body.item_code || req.body.itemCode || req.body.plan_code || "PREPAID").trim().toUpperCase();
   const amountInput = req.body.amount;
-  const userId = req.user?.uid || req.body.userId;
+  const userId = req.user?.uid;
 
   try {
     if (!userId) {
-      res.status(401).json({ success: false, message: "Unauthorized: Missing authenticated user context." });
+      logger.warn(`[Clubkonnect Controller] Unauthorized access attempt: missing req.user.uid | reqId=${reqId}`);
+      res.status(401).json({ success: false, message: "Unauthorized: Valid authenticated user identity token or session is required." });
       return;
     }
 
@@ -786,100 +721,25 @@ export const purchaseElectricity = async (
       return;
     }
 
-    if (!adminDb) {
-      res.status(500).json({ success: false, message: "Database Error: Firestore database is not initialized." });
-      return;
-    }
+    // Direct failure: Electricity provider integration endpoint is currently unavailable on provider rail
+    logger.warn(`[Clubkonnect Controller] Electricity purchase requested but provider service rail is unavailable | reqId=${reqId}`);
+    res.status(503).json({
+      success: false,
+      message: "Electricity bill payment failed: Provider service rail is temporarily unavailable. No funds were debited.",
+    });
 
-    const db = adminDb;
-    const purchaseRequestId = randomUUID();
-    const transactionRef = `VTU-ELE-${purchaseRequestId}`;
-
-    let debitCommitted = false;
-    let ledgerRef: FirebaseFirestore.DocumentReference;
-    let vtuTxRef: FirebaseFirestore.DocumentReference;
-
-    try {
-      const resRefs = await executeAtomicDebit(
-        db,
-        userId,
-        numAmount,
-        transactionRef,
-        purchaseRequestId,
-        "ELECTRICITY",
-        `Electricity Bill (${providerInput} ${packageCodeInput}) for ${targetId}`,
-        targetId,
-        { provider: providerInput, packageCode: packageCodeInput }
-      );
-      ledgerRef = resRefs.ledgerRef;
-      vtuTxRef = resRefs.vtuTxRef;
-      debitCommitted = true;
-    } catch (txError: any) {
-      if (txError.message === "USER_NOT_FOUND") {
-        res.status(404).json({ success: false, message: "User profile not found." });
-        return;
-      }
-      if (txError.message === "INSUFFICIENT_FUNDS") {
-        res.status(400).json({ success: false, message: "Insufficient wallet balance to pay electricity bill." });
-        return;
-      }
-      res.status(500).json({ success: false, message: txError.message || "Failed to process wallet debit." });
-      return;
-    }
-
-    const eleResult = { success: true, orderId: `ELE-${purchaseRequestId}`, token: "1234-5678-9012-3456-7890", message: "Electricity token generated." };
-
-    if (eleResult.success) {
-      await vtuTxRef.update({
-        status: "Delivered",
-        providerOrderId: eleResult.orderId,
-        token: eleResult.token,
-        updatedAt: new Date().toISOString(),
-      });
-
-      await ledgerRef!.update({
-        status: "SUCCESS",
-        updatedAt: new Date().toISOString(),
-      });
-
-      res.status(200).json({
-        success: true,
-        orderId: eleResult.orderId,
-        token: eleResult.token,
-        requestId: purchaseRequestId,
-        message: "Electricity bill paid successfully.",
-      });
-    } else {
-      if (debitCommitted) {
-        await executeAtomicRefund(
-          db,
-          userId,
-          numAmount,
-          transactionRef,
-          targetId,
-          eleResult.message || "Provider rejection",
-          "ELECTRICITY",
-          ledgerRef!,
-          vtuTxRef!
-        );
-      }
-      res.status(400).json({
-        success: false,
-        message: `Electricity purchase failed: ${eleResult.message}`,
-      });
-    }
   } catch (error: any) {
     logger.error(`[Clubkonnect Controller] purchaseElectricity exception | error=${error.message} | reqId=${reqId}`);
     res.status(500).json({
       success: false,
-      message: "Electricity purchase failed: Provider network issue. Please try again later.",
+      message: "Electricity bill payment failed: Provider network issue. Please try again later.",
     });
   }
 };
 
 /**
  * Handles WAEC / Exam Result Checker PIN purchase.
- * Accepts alias fields: customer_id / phone, provider / network / biller_code, packageCode / item_code, amount.
+ * Fails safely if integration/provider is unavailable without mock success or fake PINs.
  */
 export const purchaseWaec = async (
   req: AuthenticatedRequest,
@@ -890,103 +750,25 @@ export const purchaseWaec = async (
   logger.info(`[Clubkonnect Controller] Received purchaseWaec request | body=${JSON.stringify(req.body)} | reqId=${reqId}`);
 
   const targetId = String(req.body.customer_id || req.body.customerId || req.body.phone || req.body.smartCardNo || req.body.meterNo || "").trim();
-  const providerInput = String(req.body.provider || req.body.network || req.body.biller_code || req.body.billerCode || "WAEC").trim().toUpperCase();
-  const packageCodeInput = String(req.body.packageCode || req.body.package_code || req.body.item_code || req.body.itemCode || "RESULT_CHECKER").trim();
   const amountInput = req.body.amount;
-  const userId = req.user?.uid || req.body.userId;
+  const userId = req.user?.uid;
 
   try {
     if (!userId) {
-      res.status(401).json({ success: false, message: "Unauthorized: Missing authenticated user context." });
+      logger.warn(`[Clubkonnect Controller] Unauthorized access attempt: missing req.user.uid | reqId=${reqId}`);
+      res.status(401).json({ success: false, message: "Unauthorized: Valid authenticated user identity token or session is required." });
       return;
     }
 
-    const numAmount = Number(amountInput) || 3800; // Standard WAEC Result Checker PIN price fallback
+    const numAmount = Number(amountInput) || 3800;
 
-    if (!adminDb) {
-      res.status(500).json({ success: false, message: "Database Error: Firestore database is not initialized." });
-      return;
-    }
+    // Direct failure: WAEC PIN provider integration endpoint is currently unavailable on provider rail
+    logger.warn(`[Clubkonnect Controller] WAEC PIN purchase requested but provider service rail is unavailable | reqId=${reqId}`);
+    res.status(503).json({
+      success: false,
+      message: "WAEC PIN purchase failed: Provider service rail is temporarily unavailable. No funds were debited.",
+    });
 
-    const db = adminDb;
-    const purchaseRequestId = randomUUID();
-    const transactionRef = `VTU-WEC-${purchaseRequestId}`;
-
-    let debitCommitted = false;
-    let ledgerRef: FirebaseFirestore.DocumentReference;
-    let vtuTxRef: FirebaseFirestore.DocumentReference;
-
-    try {
-      const resRefs = await executeAtomicDebit(
-        db,
-        userId,
-        numAmount,
-        transactionRef,
-        purchaseRequestId,
-        "WAEC",
-        `WAEC Result Checker PIN purchase for ${targetId || userId}`,
-        targetId || userId,
-        { provider: providerInput, packageCode: packageCodeInput }
-      );
-      ledgerRef = resRefs.ledgerRef;
-      vtuTxRef = resRefs.vtuTxRef;
-      debitCommitted = true;
-    } catch (txError: any) {
-      if (txError.message === "USER_NOT_FOUND") {
-        res.status(404).json({ success: false, message: "User profile not found." });
-        return;
-      }
-      if (txError.message === "INSUFFICIENT_FUNDS") {
-        res.status(400).json({ success: false, message: "Insufficient wallet balance to purchase WAEC PIN." });
-        return;
-      }
-      res.status(500).json({ success: false, message: txError.message || "Failed to process wallet debit." });
-      return;
-    }
-
-    const waecResult = { success: true, orderId: `WEC-${purchaseRequestId}`, pin: "123456789012", serial: "WEC2025-00123", message: "WAEC PIN generated successfully." };
-
-    if (waecResult.success) {
-      await vtuTxRef.update({
-        status: "Delivered",
-        providerOrderId: waecResult.orderId,
-        pin: waecResult.pin,
-        serial: waecResult.serial,
-        updatedAt: new Date().toISOString(),
-      });
-
-      await ledgerRef!.update({
-        status: "SUCCESS",
-        updatedAt: new Date().toISOString(),
-      });
-
-      res.status(200).json({
-        success: true,
-        orderId: waecResult.orderId,
-        pin: waecResult.pin,
-        serial: waecResult.serial,
-        requestId: purchaseRequestId,
-        message: "WAEC Result Checker PIN purchased successfully.",
-      });
-    } else {
-      if (debitCommitted) {
-        await executeAtomicRefund(
-          db,
-          userId,
-          numAmount,
-          transactionRef,
-          targetId || userId,
-          waecResult.message || "Provider rejection",
-          "WAEC",
-          ledgerRef!,
-          vtuTxRef!
-        );
-      }
-      res.status(400).json({
-        success: false,
-        message: `WAEC PIN purchase failed: ${waecResult.message}`,
-      });
-    }
   } catch (error: any) {
     logger.error(`[Clubkonnect Controller] purchaseWaec exception | error=${error.message} | reqId=${reqId}`);
     res.status(500).json({
@@ -997,7 +779,7 @@ export const purchaseWaec = async (
 };
 
 /**
- * Handles Clubkonnect callback notifications.
+ * Handles Clubkonnect callback notifications with strict double-refund guards.
  */
 export const handleCallback = async (
   req: Request,
