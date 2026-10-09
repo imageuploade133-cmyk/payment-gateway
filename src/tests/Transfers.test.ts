@@ -4,6 +4,46 @@ import { getFlutterwaveClient } from "../providers/flutterwave";
 import { InMemoryIdempotency } from "../services/transferService";
 import { env } from "../config/env";
 
+// Mock Firebase Admin SDK to capture Firestore writes
+const mockFirestoreStore: Record<string, any> = {};
+
+jest.mock("../config/firebase", () => ({
+  adminDb: {
+    collection: (colName: string) => ({
+      doc: (docId: string) => ({
+        get: jest.fn().mockImplementation(async () => {
+          const data = mockFirestoreStore[`${colName}/${docId}`];
+          return {
+            exists: !!data,
+            data: () => data,
+          };
+        }),
+        set: jest.fn().mockImplementation(async (data: any, opts: any) => {
+          if (opts?.merge && mockFirestoreStore[`${colName}/${docId}`]) {
+            mockFirestoreStore[`${colName}/${docId}`] = { ...mockFirestoreStore[`${colName}/${docId}`], ...data };
+          } else {
+            mockFirestoreStore[`${colName}/${docId}`] = data;
+          }
+        }),
+        update: jest.fn().mockImplementation(async (data: any) => {
+          mockFirestoreStore[`${colName}/${docId}`] = { ...mockFirestoreStore[`${colName}/${docId}`], ...data };
+        }),
+      }),
+      where: () => ({
+        get: jest.fn().mockResolvedValue({ empty: true, docs: [] }),
+      }),
+    }),
+    runTransaction: jest.fn().mockImplementation(async (cb: any) => {
+      const fakeTx = {
+        get: async (docRef: any) => docRef.get(),
+        set: async (docRef: any, data: any, opts: any) => docRef.set(data, opts),
+        update: async (docRef: any, data: any) => docRef.update(data),
+      };
+      return cb(fakeTx);
+    }),
+  },
+}));
+
 // Mock the Flutterwave client singleton helper
 jest.mock("../providers/flutterwave", () => {
   const mClient = {
@@ -174,6 +214,22 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
           narration: customNarration,
         })
       );
+
+      // Inspect mock Firestore store for transfers and transactions
+      const transferDoc = mockFirestoreStore[`transfers/${validPayload.reference}`];
+      const transactionDoc = mockFirestoreStore[`transactions/tx-${validPayload.reference}`];
+
+      if (transferDoc) {
+        expect(transferDoc.narration).toBe(customNarration);
+        expect(transferDoc.remark).toBe(customNarration);
+        expect(transferDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
+      }
+
+      if (transactionDoc) {
+        expect(transactionDoc.narration).toBe(customNarration);
+        expect(transactionDoc.remark).toBe(customNarration);
+        expect(transactionDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
+      }
     });
 
     it("should reject with duplicate reference warning if reference is sent twice (Idempotency check)", async () => {
