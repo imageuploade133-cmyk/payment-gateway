@@ -83,8 +83,8 @@ export function extractSanitizedAxiosError(err: any) {
 }
 
 const DEFAULT_CLUBKONNECT_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Accept": "application/json, text/javascript, */*; q=0.01",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/html, */*",
   "Accept-Language": "en-US,en;q=0.9",
   "Connection": "keep-alive",
 };
@@ -166,7 +166,6 @@ export class ClubkonnectService {
 
     const code = networkCache.mappings[normalizedInput];
     if (!code) {
-      // Fallback clean numeric mappings
       if (normalizedInput.includes("MTN") || normalizedInput === "01") return "01";
       if (normalizedInput.includes("GLO") || normalizedInput === "02") return "02";
       if (normalizedInput.includes("9MOBILE") || normalizedInput.includes("ETISALAT") || normalizedInput === "03") return "03";
@@ -195,7 +194,6 @@ export class ClubkonnectService {
       if (!response) {
         throw new Error("Empty response received from Clubkonnect API");
       }
-      logger.info(`[Clubkonnect Service] Dynamic data plans response received | status=${response.status} | reqId=${requestId}`);
 
       let data = response.data;
       if (typeof data === "string") {
@@ -494,8 +492,9 @@ export class ClubkonnectService {
   }
 
   /**
-   * Executes a mobile data plan purchase on Clubkonnect API.
-   * Calls: GET https://www.nellobytesystems.com/APIDatabundleV1.asp
+   * Executes a mobile data plan purchase on Clubkonnect API with dual endpoint failover:
+   * Attempt 1: APIDatabundleV1.asp
+   * Attempt 2 (Failover on 503 / HTTP Error): APIDatashareV1.asp
    */
   static async purchaseData(params: PurchaseDataParams, requestId?: string): Promise<DataResponse> {
     const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
@@ -506,56 +505,60 @@ export class ClubkonnectService {
 
     const networkCode = await this.getNetworkCode(params.network, requestId);
     const cbParam = params.callbackUrl ? `&CallBackURL=${encodeURIComponent(params.callbackUrl)}` : "";
-    const url = `${BASE_URL}/APIDatabundleV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
+
+    const primaryUrl = `${BASE_URL}/APIDatabundleV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
+    const failoverUrl = `${BASE_URL}/APIDatashareV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
 
     const timeout = 10000;
-    const maxRetries = 2;
+    const endpointsToTry = [
+      { name: "APIDatabundleV1.asp", url: primaryUrl },
+      { name: "APIDatashareV1.asp", url: failoverUrl },
+    ];
 
-    let attempt = 0;
-    while (true) {
-      let response: AxiosResponse;
+    let lastErrorMessage = "";
 
+    for (const endpoint of endpointsToTry) {
       try {
         const maskedKey = API_KEY.length > 5 ? `${API_KEY.slice(0, 3)}***${API_KEY.slice(-2)}` : "***";
         logger.info(
-          `[Clubkonnect Service] Sending mobile data purchase request | URL=${BASE_URL}/APIDatabundleV1.asp?UserID=${USER_ID}&APIKey=${maskedKey}&MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | attempt=${attempt + 1}/${maxRetries + 1} | reqId=${requestId}`
+          `[Clubkonnect Service] Sending mobile data purchase request via ${endpoint.name} | MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | reqId=${requestId}`
         );
 
-        response = await axios.get(url, {
+        const response: AxiosResponse = await axios.get(endpoint.url, {
           timeout,
           headers: DEFAULT_CLUBKONNECT_HEADERS,
         });
-      } catch (requestError: any) {
-        attempt++;
-        const errStatus = requestError.response?.status || "NO_STATUS";
 
-        if (attempt > maxRetries) {
-          throw new Error(`Failed to complete mobile data purchase from Clubkonnect after ${attempt} attempts. Provider status: ${errStatus}. Original error: ${requestError.message}`);
+        const data = response.data;
+        if (data && typeof data === "object") {
+          const status = String(data.status || "").trim().toUpperCase();
+          if (status === "ORDER_RECEIVED") {
+            logger.info(`[Clubkonnect Service] Mobile data order received successfully via ${endpoint.name} | orderId=${data.orderid}`);
+            return {
+              success: true,
+              orderId: data.orderid ? String(data.orderid) : undefined,
+              status: "Pending",
+              message: data.remark || "Data order accepted successfully.",
+            };
+          } else {
+            lastErrorMessage = data.remark || data.remark_desc || `Rejected by ${endpoint.name} with status: ${data.status}`;
+            logger.warn(`[Clubkonnect Service] ${endpoint.name} returned status: ${status} | message=${lastErrorMessage}`);
+          }
         }
-        continue;
+      } catch (requestError: any) {
+        const errStatus = requestError.response?.status || "NO_STATUS";
+        lastErrorMessage = `HTTP ${errStatus}: ${requestError.message}`;
+        logger.error(
+          `[Clubkonnect Service] Error calling ${endpoint.name} | HTTP Status=${errStatus} | error=${requestError.message}. Attempting failover if available...`
+        );
       }
-
-      const data = response.data;
-      if (!data || typeof data !== "object") {
-        throw new Error("Invalid response format received from Clubkonnect API during data purchase.");
-      }
-
-      const status = String(data.status || "").trim().toUpperCase();
-      if (status === "ORDER_RECEIVED") {
-        return {
-          success: true,
-          orderId: data.orderid ? String(data.orderid) : undefined,
-          status: "Pending",
-          message: data.remark || "Data order accepted successfully.",
-        };
-      }
-
-      return {
-        success: false,
-        status: "Failed",
-        message: data.remark || data.remark_desc || `Clubkonnect rejected request with status: ${data.status}`,
-      };
     }
+
+    return {
+      success: false,
+      status: "Failed",
+      message: lastErrorMessage || "All Clubkonnect mobile data endpoints failed.",
+    };
   }
 
   /**
@@ -582,7 +585,6 @@ export class ClubkonnectService {
     const timeout = 10000;
 
     try {
-      const maskedKey = API_KEY.length > 5 ? `${API_KEY.slice(0, 3)}***${API_KEY.slice(-2)}` : "***";
       const response: AxiosResponse = await axios.get(url, {
         timeout,
         headers: DEFAULT_CLUBKONNECT_HEADERS,
