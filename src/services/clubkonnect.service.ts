@@ -492,9 +492,7 @@ export class ClubkonnectService {
   }
 
   /**
-   * Executes a mobile data plan purchase on Clubkonnect API with dual endpoint failover:
-   * Attempt 1: APIDatabundleV1.asp
-   * Attempt 2 (Failover on 503 / HTTP Error): APIDatashareV1.asp
+   * Executes a mobile data plan purchase on Clubkonnect API with exponential backoff retries on APIDatabundleV1.asp:
    */
   static async purchaseData(params: PurchaseDataParams, requestId?: string): Promise<DataResponse> {
     const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
@@ -506,26 +504,20 @@ export class ClubkonnectService {
     const networkCode = await this.getNetworkCode(params.network, requestId);
     const cbParam = params.callbackUrl ? `&CallBackURL=${encodeURIComponent(params.callbackUrl)}` : "";
 
-    const primaryUrl = `${BASE_URL}/APIDatabundleV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
-    const failoverUrl = `${BASE_URL}/APIDatashareV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
+    const url = `${BASE_URL}/APIDatabundleV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
 
-    const timeout = 10000;
-    const endpointsToTry = [
-      { name: "APIDatabundleV1.asp", url: primaryUrl },
-      { name: "APIDatashareV1.asp", url: failoverUrl },
-    ];
-
+    const maxRetries = 2;
     let lastErrorMessage = "";
 
-    for (const endpoint of endpointsToTry) {
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
       try {
         const maskedKey = API_KEY.length > 5 ? `${API_KEY.slice(0, 3)}***${API_KEY.slice(-2)}` : "***";
         logger.info(
-          `[Clubkonnect Service] Sending mobile data purchase request via ${endpoint.name} | MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | reqId=${requestId}`
+          `[Clubkonnect Service] Sending mobile data purchase request via APIDatabundleV1.asp (attempt ${attempt}/${maxRetries + 1}) | MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | reqId=${requestId}`
         );
 
-        const response: AxiosResponse = await axios.get(endpoint.url, {
-          timeout,
+        const response: AxiosResponse = await axios.get(url, {
+          timeout: 12000,
           headers: DEFAULT_CLUBKONNECT_HEADERS,
         });
 
@@ -533,7 +525,7 @@ export class ClubkonnectService {
         if (data && typeof data === "object") {
           const status = String(data.status || "").trim().toUpperCase();
           if (status === "ORDER_RECEIVED") {
-            logger.info(`[Clubkonnect Service] Mobile data order received successfully via ${endpoint.name} | orderId=${data.orderid}`);
+            logger.info(`[Clubkonnect Service] Mobile data order received successfully via APIDatabundleV1.asp | orderId=${data.orderid}`);
             return {
               success: true,
               orderId: data.orderid ? String(data.orderid) : undefined,
@@ -541,23 +533,28 @@ export class ClubkonnectService {
               message: data.remark || "Data order accepted successfully.",
             };
           } else {
-            lastErrorMessage = data.remark || data.remark_desc || `Rejected by ${endpoint.name} with status: ${data.status}`;
-            logger.warn(`[Clubkonnect Service] ${endpoint.name} returned status: ${status} | message=${lastErrorMessage}`);
+            lastErrorMessage = data.remark || data.remark_desc || `Rejected by APIDatabundleV1.asp with status: ${data.status}`;
+            logger.warn(`[Clubkonnect Service] APIDatabundleV1.asp returned status: ${status} | message=${lastErrorMessage}`);
           }
         }
       } catch (requestError: any) {
         const errStatus = requestError.response?.status || "NO_STATUS";
         lastErrorMessage = `HTTP ${errStatus}: ${requestError.message}`;
         logger.error(
-          `[Clubkonnect Service] Error calling ${endpoint.name} | HTTP Status=${errStatus} | error=${requestError.message}. Attempting failover if available...`
+          `[Clubkonnect Service] Error calling APIDatabundleV1.asp (attempt ${attempt}/${maxRetries + 1}) | HTTP Status=${errStatus} | error=${requestError.message}`
         );
+
+        if (attempt <= maxRetries) {
+          const backoffMs = attempt * 1000;
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        }
       }
     }
 
     return {
       success: false,
       status: "Failed",
-      message: lastErrorMessage || "All Clubkonnect mobile data endpoints failed.",
+      message: lastErrorMessage || "All Clubkonnect mobile data requests failed.",
     };
   }
 
