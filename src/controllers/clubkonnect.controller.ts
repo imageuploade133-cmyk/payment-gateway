@@ -6,6 +6,7 @@ import { clubkonnectConfig } from "../config/clubkonnect";
 import { adminDb } from "../config/firebase";
 import { FieldValue } from "firebase-admin/firestore";
 import { AuthenticatedRequest } from "../middleware/auth";
+import { getFlutterwaveClient } from "../providers/flutterwave";
 
 /**
  * Controller to handle Clubkonnect wallet balance operations.
@@ -288,7 +289,9 @@ async function executeAtomicRefund(
 }
 
 /**
- * Handles VTU Airtime purchases strictly on 100% Pure ClubKonnect.
+ * Handles VTU Airtime purchases.
+ * Accepts alias fields: phone / customer_id, network / provider / biller_code, amount.
+ * Strictly uses req.user?.uid for authenticated identity.
  */
 export const purchaseAirtime = async (
   req: AuthenticatedRequest,
@@ -454,7 +457,7 @@ export const purchaseAirtime = async (
 };
 
 /**
- * Handles VTU Mobile Data purchases strictly on 100% Pure ClubKonnect (with dual APIDatabundleV1.asp + APIDatashareV1.asp endpoint failover).
+ * Handles VTU Mobile Data purchases with multi-endpoint Nellobytesystems failover AND automated Flutterwave Bills API failover!
  */
 export const purchaseData = async (
   req: AuthenticatedRequest,
@@ -567,8 +570,10 @@ export const purchaseData = async (
       return;
     }
 
-    // Call 100% Pure ClubKonnect Service (with internal dual APIDatabundleV1.asp + APIDatashareV1.asp failover)
-    let dataResult;
+    // 1. Primary Attempt: Multi-endpoint Nellobytesystems execution
+    let dataResult: any;
+    let usedProvider = "Clubkonnect";
+
     try {
       dataResult = await ClubkonnectService.purchaseData({
         network: normalizedNetwork,
@@ -577,27 +582,64 @@ export const purchaseData = async (
         requestId: purchaseRequestId,
       }, reqId);
     } catch (apiError: any) {
-      logger.error(`[Clubkonnect Controller] API Exception calling Clubkonnect | error=${apiError.message} | reqId=${reqId}`);
+      logger.error(`[Clubkonnect Controller] Primary provider Clubkonnect exception | error=${apiError.message} | reqId=${reqId}`);
       dataResult = { success: false, message: apiError.message };
     }
 
+    // 2. Secondary Failover Attempt: Flutterwave Bills API
+    if (!dataResult.success) {
+      logger.warn(`[Clubkonnect Controller] All Nellobytesystems endpoints failed (${dataResult.message}). Attempting automated Flutterwave Bills API fallback... | reqId=${reqId}`);
+
+      try {
+        const flwClient = getFlutterwaveClient();
+        const flwBillerType = `${normalizedNetwork}_DATA` as any;
+        const flwResponse = await flwClient.request("post", "/bills", {
+          country: "NG",
+          customer: cleanPhone,
+          amount: numAmount,
+          type: flwBillerType,
+          reference: transactionRef,
+        });
+
+        if (flwResponse && flwResponse.status === "success" && flwResponse.data) {
+          usedProvider = "Flutterwave";
+          dataResult = {
+            success: true,
+            orderId: flwResponse.data.tx_ref || flwResponse.data.id?.toString() || transactionRef,
+            message: "Mobile data order fulfilled via Flutterwave fallback rail.",
+          };
+          logger.info(`[Clubkonnect Controller] SUCCESS: Mobile data purchase fulfilled via Flutterwave fallback | ref=${transactionRef} | reqId=${reqId}`);
+        } else {
+          logger.warn(`[Clubkonnect Controller] Fallback provider Flutterwave also rejected request: ${flwResponse?.message}`);
+        }
+      } catch (flwErr: any) {
+        logger.error(`[Clubkonnect Controller] Fallback provider Flutterwave call exception: ${flwErr.message}`);
+      }
+    }
+
+    // 3. Final Outcome: Success on either provider, or 100% Auto-Refund if all providers fail
     if (dataResult.success) {
       await vtuTxRef.update({
-        provider: "Clubkonnect",
+        provider: usedProvider,
         providerOrderId: dataResult.orderId || null,
-        status: "Pending",
+        status: "Delivered",
+        updatedAt: new Date().toISOString(),
+      });
+
+      await ledgerRef!.update({
+        status: "SUCCESS",
         updatedAt: new Date().toISOString(),
       });
 
       res.status(200).json({
         success: true,
-        provider: "Clubkonnect",
+        provider: usedProvider,
         orderId: dataResult.orderId,
         requestId: purchaseRequestId,
-        message: "Data plan purchase order received successfully. Processing...",
+        message: "Data plan purchase processed successfully.",
       });
     } else {
-      logger.warn(`[Clubkonnect Controller] Data purchase failed on ClubKonnect endpoints. Initiating Auto-Refund | reason=${dataResult.message} | reqId=${reqId}`);
+      logger.warn(`[Clubkonnect Controller] All providers failed for Mobile Data. Initiating Auto-Refund | reason=${dataResult.message} | reqId=${reqId}`);
 
       if (debitCommitted) {
         try {
@@ -607,7 +649,7 @@ export const purchaseData = async (
             numAmount,
             transactionRef,
             cleanPhone,
-            dataResult.message || "ClubKonnect service failure",
+            dataResult.message || "All provider endpoints failed",
             "DATA",
             ledgerRef!,
             vtuTxRef!
