@@ -219,17 +219,15 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       const transferDoc = mockFirestoreStore[`transfers/${validPayload.reference}`];
       const transactionDoc = mockFirestoreStore[`transactions/tx-${validPayload.reference}`];
 
-      if (transferDoc) {
-        expect(transferDoc.narration).toBe(customNarration);
-        expect(transferDoc.remark).toBe(customNarration);
-        expect(transferDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
-      }
+      expect(transferDoc).toBeDefined();
+      expect(transferDoc.narration).toBe(customNarration);
+      expect(transferDoc.remark).toBe(customNarration);
+      expect(transferDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
 
-      if (transactionDoc) {
-        expect(transactionDoc.narration).toBe(customNarration);
-        expect(transactionDoc.remark).toBe(customNarration);
-        expect(transactionDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
-      }
+      expect(transactionDoc).toBeDefined();
+      expect(transactionDoc.narration).toBe(customNarration);
+      expect(transactionDoc.remark).toBe(customNarration);
+      expect(transactionDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
     });
 
     it("should reject with duplicate reference warning if reference is sent twice (Idempotency check)", async () => {
