@@ -9,6 +9,23 @@ import { AuthenticatedRequest } from "../middleware/auth";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 
 /**
+ * Maps standard mobile network names to valid Flutterwave Bill Biller Codes for Mobile Data.
+ * Flutterwave Biller Codes for Data:
+ * MTN -> BIL108
+ * AIRTEL -> BIL109
+ * GLO -> BIL110
+ * 9MOBILE / ETISALAT -> BIL111
+ */
+export function getFlutterwaveBillerCode(network: string): string {
+  const norm = String(network || "").trim().toUpperCase();
+  if (norm.includes("MTN")) return "BIL108";
+  if (norm.includes("AIRTEL")) return "BIL109";
+  if (norm.includes("GLO")) return "BIL110";
+  if (norm.includes("9MOBILE") || norm.includes("ETISALAT") || norm.includes("T2MOBILE")) return "BIL111";
+  return "BIL108"; // Fallback to MTN
+}
+
+/**
  * Controller to handle Clubkonnect wallet balance operations.
  * Performs validation of system configurations before executing the request.
  */
@@ -457,7 +474,7 @@ export const purchaseAirtime = async (
 };
 
 /**
- * Handles VTU Mobile Data purchases with multi-endpoint Nellobytesystems failover AND automated Flutterwave Bills API failover!
+ * Handles VTU Mobile Data purchases with multi-endpoint Nellobytesystems execution AND automated Flutterwave Bills API failover.
  */
 export const purchaseData = async (
   req: AuthenticatedRequest,
@@ -570,7 +587,7 @@ export const purchaseData = async (
       return;
     }
 
-    // 1. Primary Attempt: Multi-endpoint Nellobytesystems execution
+    // 1. Primary Attempt: Call Nellobytesystems API
     let dataResult: any;
     let usedProvider = "Clubkonnect";
 
@@ -586,19 +603,23 @@ export const purchaseData = async (
       dataResult = { success: false, message: apiError.message };
     }
 
-    // 2. Secondary Failover Attempt: Flutterwave Bills API
+    // 2. Secondary Failover Attempt: Flutterwave Bills API with exact Biller Code mapping
     if (!dataResult.success) {
-      logger.warn(`[Clubkonnect Controller] All Nellobytesystems endpoints failed (${dataResult.message}). Attempting automated Flutterwave Bills API fallback... | reqId=${reqId}`);
+      logger.warn(`[Clubkonnect Controller] Primary provider Clubkonnect failed (${dataResult.message}). Attempting automated Flutterwave Bills API fallback... | reqId=${reqId}`);
 
       try {
         const flwClient = getFlutterwaveClient();
-        const flwBillerType = `${normalizedNetwork}_DATA` as any;
+        const flwBillerCode = getFlutterwaveBillerCode(normalizedNetwork);
+
+        logger.info(`[Clubkonnect Controller] Executing Flutterwave fallback with biller_code=${flwBillerCode} | network=${normalizedNetwork} | reqId=${reqId}`);
+
         const flwResponse = await flwClient.request("post", "/bills", {
           country: "NG",
           customer: cleanPhone,
           amount: numAmount,
-          type: flwBillerType,
+          type: flwBillerCode,
           reference: transactionRef,
+          biller_code: flwBillerCode,
         });
 
         if (flwResponse && flwResponse.status === "success" && flwResponse.data) {
