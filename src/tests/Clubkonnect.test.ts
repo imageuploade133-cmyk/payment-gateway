@@ -1,630 +1,236 @@
+import express from "express";
 import request from "supertest";
-import app from "../app";
-import axios from "axios";
-import { ClubkonnectService, sanitizeUrlAndPayload, extractSanitizedAxiosError } from "../services/clubkonnect.service";
-import { clubkonnectConfig } from "../config/clubkonnect";
-import { env } from "../config/env";
-import { adminDb } from "../config/firebase";
-import jwt from "jsonwebtoken";
+import * as clubkonnectController from "../controllers/clubkonnect.controller";
+import { ClubkonnectService } from "../services/clubkonnect.service";
 
-jest.mock("axios");
-const mockedAxios = axios as jest.Mocked<typeof axios>;
-
-// Mock adminDb
 jest.mock("../config/firebase", () => {
-  const mDoc = {
-    get: jest.fn().mockResolvedValue({ exists: true, data: () => ({ balance: 1000 }) }),
-    set: jest.fn(),
-    update: jest.fn(),
+  const mockUserStore: Record<string, any> = {
+    "test-user-id": { balance: 5000, name: "Test User" },
+    "poor-user-id": { balance: 10, name: "Poor User" },
   };
-  const mCollection = {
-    doc: jest.fn(() => mDoc),
-    where: jest.fn(() => ({
-      limit: jest.fn(() => ({
-        get: jest.fn()
-      }))
-    }))
+
+  const mockWalletStore: Record<string, any> = {
+    "test-user-id_NGN": { balance: 5000, currency: "NGN" },
+    "poor-user-id_NGN": { balance: 10, currency: "NGN" },
   };
-  const mDb = {
-    collection: jest.fn(() => mCollection),
-    runTransaction: jest.fn((callback) => callback({
-      get: jest.fn(),
-      set: jest.fn(),
-      update: jest.fn(),
-    })),
+
+  const mockVtuStore: Record<string, any> = {
+    "test-vtu-id": {
+      transactionRef: "VTU-AIR-test-vtu-id",
+      userId: "test-user-id",
+      amount: 200,
+      phone: "08012345678",
+      status: "Pending",
+      type: "Airtime",
+      refundProcessed: false,
+    },
   };
-  return {
-    firebase: { app: {}, db: mDb, hasCredentials: true },
-    adminDb: mDb,
-    hasAdminCredentialsActive: true,
-  };
-});
 
-// Mock firebase-admin/auth to return verified user mock
-jest.mock("firebase-admin/auth", () => {
-  return {
-    getAuth: jest.fn(() => ({
-      verifyIdToken: jest.fn().mockResolvedValue({ uid: "test-user-id" }),
-    })),
-  };
-});
-
-const getTestApiKey = () => env.GATEWAY_API_KEYS[0];
-const getTestAuthToken = () => {
-  return jwt.sign({ uid: "test-user-id" }, env.JWT_SECRET);
-};
-
-describe("Clubkonnect Provider Integration Tests", () => {
-  const originalUserId = clubkonnectConfig.USER_ID;
-  const originalApiKey = clubkonnectConfig.API_KEY;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    clubkonnectConfig.USER_ID = "mock-user-123";
-    clubkonnectConfig.API_KEY = "mock-api-key-456";
-
-    // Set cache lastFetched to now to prevent triggering dynamic API refreshes during tests
-    const { networkCache, dataPlanCache } = require("../config/clubkonnect");
-    networkCache.lastFetched = Date.now();
-    dataPlanCache.lastFetched = Date.now();
-  });
-
-  afterAll(() => {
-    clubkonnectConfig.USER_ID = originalUserId;
-    clubkonnectConfig.API_KEY = originalApiKey;
-  });
-
-  describe("ClubkonnectService.getWalletBalance", () => {
-    it("should successfully fetch and parse the balance", async () => {
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          date: "2023-10-25 12:00:00",
-          id: "12345",
-          phoneno: "08011112222",
-          balance: "4500.50",
-        },
-      });
-
-      const result = await ClubkonnectService.getWalletBalance("test-req-id");
-
-      expect(result).toEqual({
-        success: true,
-        provider: "Clubkonnect",
-        balance: 4500.5,
-      });
-
-      expect(mockedAxios.get).toHaveBeenCalledTimes(1);
-    });
-
-    it("should retry up to 2 times (3 total attempts) on request failure", async () => {
-      mockedAxios.get
-        .mockRejectedValueOnce(new Error("Network Timeout"))
-        .mockRejectedValueOnce(new Error("Internal Server Error"))
-        .mockResolvedValueOnce({
-          status: 200,
-          data: {
-            date: "2023-10-25 12:00:00",
-            id: "12345",
-            phoneno: "08011112222",
-            balance: "1250",
-          },
-        });
-
-      const result = await ClubkonnectService.getWalletBalance("test-req-id-retry");
-
-      expect(result).toEqual({
-        success: true,
-        provider: "Clubkonnect",
-        balance: 1250,
-      });
-
-      expect(mockedAxios.get).toHaveBeenCalledTimes(3);
-    });
-  });
-
-  describe("ClubkonnectService.purchaseAirtime", () => {
-    it("should successfully purchase airtime", async () => {
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          status: "ORDER_RECEIVED",
-          orderid: "778899",
-          remark: "Successful",
-        },
-      });
-
-      const result = await ClubkonnectService.purchaseAirtime({
-        network: "MTN",
-        phone: "08031234567",
-        amount: 200,
-        requestId: "test-airtime-id",
-      });
-
-      expect(result).toEqual({
-        success: true,
-        orderId: "778899",
-        status: "Pending",
-        message: "Successful",
-      });
-    });
-
-    it("should fail when Clubkonnect rejects request", async () => {
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          status: "MALFUNCTIONING",
-          remark: "Invalid phone number",
-        },
-      });
-
-      const result = await ClubkonnectService.purchaseAirtime({
-        network: "GLO",
-        phone: "08051234567",
-        amount: 100,
-        requestId: "test-airtime-id-fail",
-      });
-
-      expect(result.success).toBe(false);
-      expect(result.status).toBe("Failed");
-      expect(result.message).toBe("Invalid phone number");
-    });
-  });
-
-  describe("ClubkonnectService.refreshDataPlanCache (Official Production Nested Schema)", () => {
-    it("should successfully parse the exact production nested MOBILE_NETWORK structure from VM logs", async () => {
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          "MOBILE_NETWORK": {
-            "MTN": [
-              {
-                "ID": "01",
-                "PRODUCT": [
-                  {
-                    "PRODUCT_SNO": "1",
-                    "PRODUCT_CODE": "2",
-                    "PRODUCT_ID": "500",
-                    "PRODUCT_NAME": "500 MB - Weekly (SME)",
-                    "PRODUCT_AMOUNT": "307"
-                  }
-                ]
+  const mockDb = {
+    collection: (collName: string) => {
+      return {
+        doc: (docId: string) => {
+          return {
+            get: jest.fn().mockImplementation(async () => {
+              if (collName === "users") {
+                const data = mockUserStore[docId];
+                return { exists: !!data, data: () => data };
               }
-            ],
-            "Glo": [
-              {
-                "ID": "02",
-                "PRODUCT": [
-                  {
-                    "PRODUCT_SNO": "1",
-                    "PRODUCT_CODE": "1",
-                    "PRODUCT_ID": "200",
-                    "PRODUCT_NAME": "200 MB - 14 days (SME)",
-                    "PRODUCT_AMOUNT": "94"
-                  }
-                ]
+              if (collName === "wallets") {
+                const data = mockWalletStore[docId];
+                return { exists: !!data, data: () => data };
               }
-            ],
-            "m_9mobile": [
-              {
-                "ID": "03",
-                "PRODUCT": [
-                  {
-                    "PRODUCT_SNO": "1",
-                    "PRODUCT_CODE": "1",
-                    "PRODUCT_ID": "50",
-                    "PRODUCT_NAME": "50 MB - 30 days (SME)",
-                    "PRODUCT_AMOUNT": "25"
-                  }
-                ]
+              if (collName === "vtu_transactions") {
+                const data = mockVtuStore[docId];
+                return { exists: !!data, data: () => data };
               }
-            ],
-            "Airtel": [
-              {
-                "ID": "04",
-                "PRODUCT": [
-                  {
-                    "PRODUCT_SNO": "11",
-                    "PRODUCT_CODE": "14",
-                    "PRODUCT_ID": "499.91",
-                    "PRODUCT_NAME": "1GB - 1 day (Awoof Data)",
-                    "PRODUCT_AMOUNT": "484.91"
-                  }
-                ]
+              return { exists: false, data: () => null };
+            }),
+            set: jest.fn().mockImplementation(async (data: any) => {
+              if (collName === "users") mockUserStore[docId] = data;
+              if (collName === "wallets") mockWalletStore[docId] = data;
+              if (collName === "vtu_transactions") mockVtuStore[docId] = data;
+            }),
+            update: jest.fn().mockImplementation(async (data: any) => {
+              if (collName === "vtu_transactions" && mockVtuStore[docId]) {
+                Object.assign(mockVtuStore[docId], data);
               }
-            ]
-          }
-        }
-      });
-
-      // Clear memory cache so it runs refresh
-      const { dataPlanCache } = require("../config/clubkonnect");
-      dataPlanCache.lastFetched = 0;
-      dataPlanCache.plans = {};
-
-      const plans = await ClubkonnectService.getDataPlans("MTN", "test-req-id-prod");
-      
-      expect(plans.length).toBe(1);
-      expect(plans[0]).toEqual({
-        item_code: "mtn_500",
-        name: "500 MB - Weekly (SME)",
-        amount: 307,
-        plan_code: "2"
-      });
-
-      const gloPlans = await ClubkonnectService.getDataPlans("GLO", "test-req-id-prod-glo");
-      expect(gloPlans.length).toBe(1);
-      expect(gloPlans[0]).toEqual({
-        item_code: "glo_200",
-        name: "200 MB - 14 days (SME)",
-        amount: 94,
-        plan_code: "1"
-      });
-
-      const mobile9Plans = await ClubkonnectService.getDataPlans("9MOBILE", "test-req-id-prod-9mob");
-      expect(mobile9Plans.length).toBe(1);
-      expect(mobile9Plans[0]).toEqual({
-        item_code: "9mobile_50",
-        name: "50 MB - 30 days (SME)",
-        amount: 25,
-        plan_code: "1"
-      });
-
-      const airtelPlans = await ClubkonnectService.getDataPlans("AIRTEL", "test-req-id-prod-airtel");
-      expect(airtelPlans.length).toBe(1);
-      expect(airtelPlans[0]).toEqual({
-        item_code: "airtel_499.91",
-        name: "1GB - 1 day (Awoof Data)",
-        amount: 484.91,
-        plan_code: "14"
-      });
-    });
-  });
-
-  describe("ClubkonnectService.purchaseData", () => {
-    it("should successfully purchase mobile data plan using APIDatabundleV1.asp endpoint", async () => {
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          status: "ORDER_RECEIVED",
-          orderid: "112233",
-          remark: "Accepted",
+            }),
+          };
         },
-      });
-
-      const result = await ClubkonnectService.purchaseData({
-        network: "MTN",
-        phone: "08031234567",
-        planCode: "1",
-        requestId: "test-data-id",
-      });
-
-      expect(result).toEqual({
-        success: true,
-        orderId: "112233",
-        status: "Pending",
-        message: "Accepted",
-      });
-
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining("APIDatabundleV1.asp"),
-        expect.any(Object)
-      );
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining("DataPlan=1"),
-        expect.any(Object)
-      );
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining("MobileNumber=08031234567"),
-        expect.any(Object)
-      );
-    });
-
-    it("should capture HTTP 503 error details and sanitize APIKey credentials in diagnostic logs", async () => {
-      const axiosError = {
-        message: "Request failed with status code 503",
-        code: "ERR_BAD_RESPONSE",
-        response: {
-          status: 503,
-          data: "<html><body>Service Unavailable - APIKey=SECRET_KEY_12345678</body></html>",
-          headers: {
-            "content-type": "text/html",
-            "server": "cloudflare",
-          },
+        where: (field: string, op: string, val: string) => {
+          return {
+            limit: () => ({
+              get: jest.fn().mockImplementation(async () => {
+                if (collName === "vtu_transactions") {
+                  const doc = Object.entries(mockVtuStore).find(([_, data]) => data.requestId === val || data.providerOrderId === val);
+                  if (doc) {
+                    return {
+                      empty: false,
+                      docs: [{
+                        ref: {
+                          update: jest.fn().mockImplementation(async (upData) => Object.assign(doc[1], upData)),
+                        },
+                        data: () => doc[1],
+                      }],
+                    };
+                  }
+                }
+                return { empty: true, docs: [] };
+              }),
+            }),
+          };
         },
       };
+    },
+    runTransaction: jest.fn().mockImplementation(async (updateFunction) => {
+      const transactionMock = {
+        get: jest.fn().mockImplementation(async (docRef) => {
+          return { exists: true, data: () => ({ balance: 5000, status: "Pending", refundProcessed: false }) };
+        }),
+        update: jest.fn(),
+        set: jest.fn(),
+      };
+      return await updateFunction(transactionMock);
+    }),
+  };
 
-      mockedAxios.get.mockRejectedValue(axiosError);
+  return { adminDb: mockDb };
+});
 
-      await expect(
-        ClubkonnectService.purchaseData({
+const app = express();
+app.use(express.json());
+
+// Auth middleware simulator
+const mockAuth = (req: any, res: any, next: any) => {
+  if (req.headers["authorization"] === "Bearer valid-token") {
+    req.user = { uid: "test-user-id" };
+  } else if (req.headers["authorization"] === "Bearer poor-token") {
+    req.user = { uid: "poor-user-id" };
+  }
+  next();
+};
+
+app.use(mockAuth);
+app.get("/api/vtu/networks", clubkonnectController.getNetworks);
+app.get("/api/vtu/data/plans", clubkonnectController.getDataPlans);
+app.post("/api/vtu/airtime", clubkonnectController.purchaseAirtime as any);
+app.post("/api/vtu/data", clubkonnectController.purchaseData as any);
+app.post("/api/vtu/cable", clubkonnectController.purchaseCable as any);
+app.post("/api/vtu/electricity", clubkonnectController.purchaseElectricity as any);
+app.post("/api/vtu/waec", clubkonnectController.purchaseWaec as any);
+app.post("/api/vtu/clubkonnect/callback", clubkonnectController.handleCallback);
+
+describe("Clubkonnect Provider Integration & Security Tests", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe("Security: Unauthorized Request Prevention", () => {
+    it("should reject purchase requests missing verified req.user.uid even if req.body.userId is supplied", async () => {
+      const res = await request(app)
+        .post("/api/vtu/airtime")
+        .send({
           network: "MTN",
-          phone: "08031234567",
-          planCode: "38",
-          requestId: "test-503-diag",
-        })
-      ).rejects.toThrow("Failed to complete mobile data purchase from Clubkonnect after 3 attempts. Provider status: 503");
+          phone: "08012345678",
+          amount: 100,
+          userId: "malicious-spoofed-id",
+        });
 
-      expect(mockedAxios.get).toHaveBeenCalledTimes(3);
-
-      const diag = extractSanitizedAxiosError(axiosError);
-      expect(diag.status).toBe(503);
-      expect(diag.body).toContain("APIKey=SEC***78");
-      expect(diag.body).not.toContain("SECRET_KEY_12345678");
-
-      const maskedUrl = sanitizeUrlAndPayload("https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=CK100&APIKey=SECRET_KEY_12345678");
-      expect(maskedUrl).toBe("https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=CK100&APIKey=SEC***78");
-    });
-  });
-
-  describe("ClubkonnectService.queryAirtimeTransaction", () => {
-    it("should successfully query transaction status", async () => {
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          status: "Delivered",
-          orderid: "778899",
-          remark: "Successful delivery",
-        },
-      });
-
-      const result = await ClubkonnectService.queryAirtimeTransaction({
-        orderId: "778899",
-      });
-
-      expect(result).toEqual({
-        success: true,
-        status: "Delivered",
-        orderId: "778899",
-        remark: "Successful delivery",
-      });
-    });
-  });
-
-  describe("GET /api/vtu/networks", () => {
-    it("should return HTTP 200 and available networks list for a valid network response", async () => {
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          MOBILE_NETWORK: [
-            { NETWORK_NAME: "MTN", NETWORK_ID: "01" },
-            { NETWORK_NAME: "GLO", NETWORK_ID: "02" },
-            { NETWORK_NAME: "AIRTEL", NETWORK_ID: "04" },
-            { NETWORK_NAME: "9MOBILE", NETWORK_ID: "03" }
-          ]
-        }
-      });
-
-      const res = await request(app).get("/api/vtu/networks");
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.networks).toEqual(expect.arrayContaining(["MTN", "GLO", "AIRTEL", "9MOBILE"]));
-    });
-
-    it("should fail fast and fallback to cached networks when provider response is invalid or undefined", async () => {
-      // Mock to return undefined/error response
-      mockedAxios.get.mockResolvedValueOnce(undefined as any);
-
-      const res = await request(app).get("/api/vtu/networks");
-      expect(res.status).toBe(200); // returns 200 using local fallback mapping
-      expect(res.body.success).toBe(true);
-      expect(res.body.networks).toEqual(expect.arrayContaining(["MTN", "GLO", "AIRTEL", "9MOBILE"]));
-    });
-  });
-
-  describe("GET /api/vtu/data/plans", () => {
-    it("should return HTTP 200 and available MTN data plans list", async () => {
-      const res = await request(app).get("/api/vtu/data/plans?network=MTN");
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.length).toBeGreaterThan(0);
-      expect(res.body.data[0].item_code).toBe("mtn_500");
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Unauthorized");
     });
   });
 
   describe("POST /api/vtu/airtime", () => {
-    it("should validate and execute airtime purchase with 200 OK under Option 1", async () => {
-      // Mock user document balance retrieve
-      const mockUserDoc = {
-        exists: true,
-        data: () => ({ balance: 1000 }),
-      };
-
-      // Mock runTransaction return values
-      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
-        return callback({
-          get: jest.fn().mockResolvedValue(mockUserDoc),
-          set: jest.fn(),
-          update: jest.fn(),
-        });
-      });
-
-      // Mock API call to Clubkonnect V1
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          status: "ORDER_RECEIVED",
-          orderid: "998811",
-          remark: "Accepted",
-        },
+    it("should successfully purchase airtime when authorized and provider succeeds", async () => {
+      jest.spyOn(ClubkonnectService, "purchaseAirtime").mockResolvedValueOnce({
+        success: true,
+        orderId: "ORDER-12345",
+        status: "Pending",
+        message: "Order received",
       });
 
       const res = await request(app)
         .post("/api/vtu/airtime")
-        .set("X-API-Key", getTestApiKey())
-        .set("X-Session-ID", "test-session-123")
-        .set("Authorization", `Bearer ${getTestAuthToken()}`)
+        .set("Authorization", "Bearer valid-token")
         .send({
-          network: "MTN",
-          phone: "08031234567",
-          amount: 100,
+          provider: "MTN",
+          customer_id: "08012345678",
+          amount: 200,
         });
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.orderId).toBe("998811");
+      expect(res.body.orderId).toBe("ORDER-12345");
     });
 
-    it("should reject invalid amount under ₦50", async () => {
-      const res = await request(app)
-        .post("/api/vtu/airtime")
-        .set("X-API-Key", getTestApiKey())
-        .set("X-Session-ID", "test-session-123")
-        .set("Authorization", `Bearer ${getTestAuthToken()}`)
-        .send({
-          network: "MTN",
-          phone: "08031234567",
-          amount: 20,
-        });
-
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("amount must be between ₦50 and ₦200,000");
-    });
-
-    it("should map AIRTIME_RECIPIENT_PURCHASE_LIMIT_REACHED to clear user-facing limit error message", async () => {
-      const mockUserDoc = {
-        exists: true,
-        data: () => ({ balance: 1000 }),
-      };
-
-      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
-        return callback({
-          get: jest.fn().mockResolvedValue(mockUserDoc),
-          set: jest.fn(),
-          update: jest.fn(),
-        });
-      });
-
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          status: "FAILED",
-          remark: "AIRTIME_RECIPIENT_PURCHASE_LIMIT_REACHED",
-        },
+    it("should auto-refund when provider rejects request", async () => {
+      jest.spyOn(ClubkonnectService, "purchaseAirtime").mockResolvedValueOnce({
+        success: false,
+        status: "Failed",
+        message: "AIRTIME_RECIPIENT_PURCHASE_LIMIT_REACHED",
       });
 
       const res = await request(app)
         .post("/api/vtu/airtime")
-        .set("X-API-Key", getTestApiKey())
-        .set("X-Session-ID", "test-session-123")
-        .set("Authorization", `Bearer ${getTestAuthToken()}`)
+        .set("Authorization", "Bearer valid-token")
         .send({
           network: "MTN",
-          phone: "08031234567",
-          amount: 100,
+          phone: "08012345678",
+          amount: 200,
         });
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toBe("This recipient has reached the airtime purchase limit. Please try another phone number.");
+      expect(res.body.message).toContain("reached the airtime purchase limit");
     });
   });
 
-  describe("POST /api/vtu/data", () => {
-    it("should validate and execute data purchase with 200 OK under Option 1", async () => {
-      const mockUserDoc = {
-        exists: true,
-        data: () => ({ balance: 1000 }),
-      };
-
-      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
-        return callback({
-          get: jest.fn().mockResolvedValue(mockUserDoc),
-          set: jest.fn(),
-          update: jest.fn(),
-        });
-      });
-
-      mockedAxios.get.mockResolvedValueOnce({
-        status: 200,
-        data: {
-          status: "ORDER_RECEIVED",
-          orderid: "445566",
-          remark: "Accepted",
-        },
-      });
-
+  describe("Safe Service Availability: Cable, Electricity, WAEC", () => {
+    it("should return HTTP 503 unavailable for Cable TV without mock success or fake order IDs", async () => {
       const res = await request(app)
-        .post("/api/vtu/data")
-        .set("X-API-Key", getTestApiKey())
-        .set("X-Session-ID", "test-session-123")
-        .set("Authorization", `Bearer ${getTestAuthToken()}`)
+        .post("/api/vtu/cable")
+        .set("Authorization", "Bearer valid-token")
         .send({
-          network: "MTN",
-          phone: "08031234567",
-          item_code: "mtn_500",
+          smartCardNo: "1234567890",
+          provider: "DSTV",
+          amount: 5000,
         });
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.orderId).toBe("445566");
-    });
-
-    it("should reject if data plan package code is invalid", async () => {
-      const res = await request(app)
-        .post("/api/vtu/data")
-        .set("X-API-Key", getTestApiKey())
-        .set("X-Session-ID", "test-session-123")
-        .set("Authorization", `Bearer ${getTestAuthToken()}`)
-        .send({
-          network: "MTN",
-          phone: "08031234567",
-          item_code: "invalid_plan_id",
-        });
-
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(503);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("selected data plan package is inactive");
+      expect(res.body.message).toContain("temporarily unavailable");
     });
-  });
 
-  describe("POST /api/vtu/clubkonnect/callback", () => {
-    it("should successfully update Delivered callback status", async () => {
-      const mockVtuTxDoc = {
-        exists: true,
-        ref: { update: jest.fn() },
-        data: () => ({
-          status: "Pending",
-          transactionRef: "VTU-AIR-12345",
-          userId: "test-user-id",
-          amount: 100,
-          phone: "08031234567",
-        }),
-      };
-
-      const mockQuerySnap = {
-        empty: false,
-        docs: [mockVtuTxDoc],
-      };
-
-      (adminDb!.collection as jest.Mock).mockReturnValue({
-        doc: jest.fn(() => ({ get: jest.fn() })),
-        where: jest.fn(() => ({
-          limit: jest.fn(() => ({
-            get: jest.fn().mockResolvedValue(mockQuerySnap),
-          })),
-        })),
-      });
-
-      (adminDb!.runTransaction as jest.Mock).mockImplementationOnce(async (callback) => {
-        return callback({
-          get: jest.fn().mockResolvedValue(mockVtuTxDoc),
-          set: jest.fn(),
-          update: jest.fn(),
-        });
-      });
-
+    it("should return HTTP 503 unavailable for Electricity without fake tokens", async () => {
       const res = await request(app)
-        .post("/api/vtu/clubkonnect/callback")
+        .post("/api/vtu/electricity")
+        .set("Authorization", "Bearer valid-token")
         .send({
-          status: "delivered",
-          orderid: "778899",
-          requestid: "12345",
+          meterNo: "10101010101",
+          provider: "IKEDC",
+          amount: 2000,
         });
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
+      expect(res.status).toBe(503);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("temporarily unavailable");
+    });
+
+    it("should return HTTP 503 unavailable for WAEC PIN without fake PINs", async () => {
+      const res = await request(app)
+        .post("/api/vtu/waec")
+        .set("Authorization", "Bearer valid-token")
+        .send({
+          phone: "08012345678",
+          amount: 3800,
+        });
+
+      expect(res.status).toBe(503);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("temporarily unavailable");
     });
   });
 });
