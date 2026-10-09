@@ -6,6 +6,7 @@ import { clubkonnectConfig } from "../config/clubkonnect";
 import { adminDb } from "../config/firebase";
 import { FieldValue } from "firebase-admin/firestore";
 import { AuthenticatedRequest } from "../middleware/auth";
+import { getFlutterwaveClient } from "../providers/flutterwave";
 
 /**
  * Controller to handle Clubkonnect wallet balance operations.
@@ -119,7 +120,7 @@ async function executeAtomicDebit(
   const vtuTxRef = db.collection("vtu_transactions").doc(transactionRef);
 
   await db.runTransaction(async (transaction) => {
-    // READ PHASE: Execute all gets BEFORE any writes!
+    // READ PHASE
     const userDoc = await transaction.get(userDocRef);
     const walletDoc = await transaction.get(walletDocRef);
 
@@ -134,7 +135,7 @@ async function executeAtomicDebit(
       throw new Error("INSUFFICIENT_FUNDS");
     }
 
-    // WRITE PHASE: Now execute all updates/sets
+    // WRITE PHASE
     // 1. Deduct balance from users/{userId}
     transaction.update(userDocRef, {
       balance: FieldValue.increment(-numAmount),
@@ -216,7 +217,7 @@ async function executeAtomicRefund(
   const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${transactionRef}`);
 
   await db.runTransaction(async (transaction) => {
-    // READ PHASE: Execute all gets BEFORE any writes!
+    // READ PHASE
     const freshVtuTx = await transaction.get(vtuTxRef);
     const walletDoc = await transaction.get(walletDocRef);
 
@@ -227,7 +228,7 @@ async function executeAtomicRefund(
       return;
     }
 
-    // WRITE PHASE: Now execute all updates/sets
+    // WRITE PHASE
     // 1. Refund users/{userId}
     transaction.update(userDocRef, {
       balance: FieldValue.increment(numAmount),
@@ -457,7 +458,7 @@ export const purchaseAirtime = async (
 
 /**
  * Handles VTU Mobile Data purchases.
- * Strictly uses req.user?.uid for authenticated identity.
+ * Features automated Flutterwave Bills API fallback on Clubkonnect 503 / timeout / network failure!
  */
 export const purchaseData = async (
   req: AuthenticatedRequest,
@@ -570,7 +571,10 @@ export const purchaseData = async (
       return;
     }
 
-    let dataResult;
+    // 1. Primary Attempt: Call Clubkonnect
+    let dataResult: any;
+    let usedProvider = "Clubkonnect";
+
     try {
       dataResult = await ClubkonnectService.purchaseData({
         network: normalizedNetwork,
@@ -579,24 +583,64 @@ export const purchaseData = async (
         requestId: purchaseRequestId,
       }, reqId);
     } catch (apiError: any) {
-      logger.error(`[Clubkonnect Controller] API Exception calling Clubkonnect | error=${apiError.message} | reqId=${reqId}`);
+      logger.error(`[Clubkonnect Controller] Primary provider Clubkonnect exception | error=${apiError.message} | reqId=${reqId}`);
       dataResult = { success: false, message: apiError.message };
     }
 
+    // 2. Secondary Failover Attempt: If ClubKonnect failed or returned 503/timeout, attempt Flutterwave Bills Fallback
+    if (!dataResult.success) {
+      logger.warn(`[Clubkonnect Controller] Primary provider ClubKonnect failed (${dataResult.message}). Attempting automated Flutterwave Bills API fallback... | reqId=${reqId}`);
+
+      try {
+        const flwClient = getFlutterwaveClient();
+        const flwBillerType = `${normalizedNetwork}_DATA` as any;
+        const flwResponse = await flwClient.request("post", "/bills", {
+          country: "NG",
+          customer: cleanPhone,
+          amount: numAmount,
+          type: flwBillerType,
+          reference: transactionRef,
+        });
+
+        if (flwResponse && flwResponse.status === "success" && flwResponse.data) {
+          usedProvider = "Flutterwave";
+          dataResult = {
+            success: true,
+            orderId: flwResponse.data.tx_ref || flwResponse.data.id?.toString() || transactionRef,
+            message: "Mobile data order fulfilled via Flutterwave fallback rail.",
+          };
+          logger.info(`[Clubkonnect Controller] SUCCESS: Mobile data purchase fulfilled via Flutterwave fallback | ref=${transactionRef} | reqId=${reqId}`);
+        } else {
+          logger.warn(`[Clubkonnect Controller] Fallback provider Flutterwave also rejected request: ${flwResponse?.message}`);
+        }
+      } catch (flwErr: any) {
+        logger.error(`[Clubkonnect Controller] Fallback provider Flutterwave call exception: ${flwErr.message}`);
+      }
+    }
+
+    // 3. Final Outcome: Success on either provider, or 100% Auto-Refund if both failed
     if (dataResult.success) {
       await vtuTxRef.update({
+        provider: usedProvider,
         providerOrderId: dataResult.orderId || null,
+        status: "Delivered",
+        updatedAt: new Date().toISOString(),
+      });
+
+      await ledgerRef!.update({
+        status: "SUCCESS",
         updatedAt: new Date().toISOString(),
       });
 
       res.status(200).json({
         success: true,
+        provider: usedProvider,
         orderId: dataResult.orderId,
         requestId: purchaseRequestId,
-        message: "Data plan purchase order received successfully. Processing...",
+        message: "Data plan purchase processed successfully.",
       });
     } else {
-      logger.warn(`[Clubkonnect Controller] Data purchase failed, initiating Auto-Refund | reason=${dataResult.message} | reqId=${reqId}`);
+      logger.warn(`[Clubkonnect Controller] All providers failed for Mobile Data. Initiating Auto-Refund | reason=${dataResult.message} | reqId=${reqId}`);
 
       if (debitCommitted) {
         try {
@@ -606,7 +650,7 @@ export const purchaseData = async (
             numAmount,
             transactionRef,
             cleanPhone,
-            dataResult.message || "Provider rejection",
+            dataResult.message || "All providers unavailable",
             "DATA",
             ledgerRef!,
             vtuTxRef!
@@ -673,7 +717,6 @@ export const purchaseCable = async (
       return;
     }
 
-    // Direct failure: Cable TV provider integration endpoint is currently unavailable on provider rail
     logger.warn(`[Clubkonnect Controller] Cable TV purchase requested but provider service rail is unavailable | reqId=${reqId}`);
     res.status(503).json({
       success: false,
@@ -729,7 +772,6 @@ export const purchaseElectricity = async (
       return;
     }
 
-    // Direct failure: Electricity provider integration endpoint is currently unavailable on provider rail
     logger.warn(`[Clubkonnect Controller] Electricity purchase requested but provider service rail is unavailable | reqId=${reqId}`);
     res.status(503).json({
       success: false,
@@ -770,7 +812,6 @@ export const purchaseWaec = async (
 
     const numAmount = Number(amountInput) || 3800;
 
-    // Direct failure: WAEC PIN provider integration endpoint is currently unavailable on provider rail
     logger.warn(`[Clubkonnect Controller] WAEC PIN purchase requested but provider service rail is unavailable | reqId=${reqId}`);
     res.status(503).json({
       success: false,
@@ -857,7 +898,7 @@ export const handleCallback = async (
     const ledgerRef = db.collection("transactions").doc(`tx-${transactionRef}`);
 
     await db.runTransaction(async (transaction) => {
-      // READ PHASE: Execute all gets BEFORE any writes!
+      // READ PHASE
       const freshVtuTx = await transaction.get(vtuTxRef);
       const walletDoc = await transaction.get(walletDocRef);
 
@@ -874,7 +915,7 @@ export const handleCallback = async (
         updatedAt: new Date().toISOString(),
       };
 
-      // WRITE PHASE: Now execute all updates/sets
+      // WRITE PHASE
       if (isFailure && !freshData.refundProcessed) {
         // Re-credit users/{userId}
         transaction.update(userDocRef, {
