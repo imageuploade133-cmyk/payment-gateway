@@ -100,6 +100,7 @@ export const getDataPlans = async (
 
 /**
  * Helper to perform atomic balance verification & debit on BOTH users/{userId} and wallets/{userId}_NGN collections.
+ * IMPORTANT: All Firestore transaction.get calls MUST be executed BEFORE any transaction.update or transaction.set calls!
  */
 async function executeAtomicDebit(
   db: FirebaseFirestore.Firestore,
@@ -118,7 +119,10 @@ async function executeAtomicDebit(
   const vtuTxRef = db.collection("vtu_transactions").doc(transactionRef);
 
   await db.runTransaction(async (transaction) => {
+    // READ PHASE: Execute all gets BEFORE any writes!
     const userDoc = await transaction.get(userDocRef);
+    const walletDoc = await transaction.get(walletDocRef);
+
     if (!userDoc.exists) {
       throw new Error("USER_NOT_FOUND");
     }
@@ -130,6 +134,7 @@ async function executeAtomicDebit(
       throw new Error("INSUFFICIENT_FUNDS");
     }
 
+    // WRITE PHASE: Now execute all updates/sets
     // 1. Deduct balance from users/{userId}
     transaction.update(userDocRef, {
       balance: FieldValue.increment(-numAmount),
@@ -137,7 +142,6 @@ async function executeAtomicDebit(
     });
 
     // 2. Deduct balance from wallets/{userId}_NGN
-    const walletDoc = await transaction.get(walletDocRef);
     if (walletDoc.exists) {
       transaction.update(walletDocRef, {
         balance: FieldValue.increment(-numAmount),
@@ -194,6 +198,7 @@ async function executeAtomicDebit(
 /**
  * Helper to execute 100% rollback refund back to BOTH users/{userId} and wallets/{userId}_NGN on provider failure.
  * Idempotency guard ensures a transaction is never refunded twice.
+ * IMPORTANT: All Firestore transaction.get calls MUST be executed BEFORE any transaction.update or transaction.set calls!
  */
 async function executeAtomicRefund(
   db: FirebaseFirestore.Firestore,
@@ -211,7 +216,10 @@ async function executeAtomicRefund(
   const refundLedgerRef = db.collection("transactions").doc(`tx-REFUND-${transactionRef}`);
 
   await db.runTransaction(async (transaction) => {
+    // READ PHASE: Execute all gets BEFORE any writes!
     const freshVtuTx = await transaction.get(vtuTxRef);
+    const walletDoc = await transaction.get(walletDocRef);
+
     const freshData = freshVtuTx.data() || {};
 
     if (freshData.refundProcessed) {
@@ -219,6 +227,7 @@ async function executeAtomicRefund(
       return;
     }
 
+    // WRITE PHASE: Now execute all updates/sets
     // 1. Refund users/{userId}
     transaction.update(userDocRef, {
       balance: FieldValue.increment(numAmount),
@@ -226,7 +235,6 @@ async function executeAtomicRefund(
     });
 
     // 2. Refund wallets/{userId}_NGN
-    const walletDoc = await transaction.get(walletDocRef);
     if (walletDoc.exists) {
       transaction.update(walletDocRef, {
         balance: FieldValue.increment(numAmount),
@@ -780,6 +788,7 @@ export const purchaseWaec = async (
 
 /**
  * Handles Clubkonnect callback notifications with strict double-refund guards.
+ * IMPORTANT: All Firestore transaction.get calls MUST be executed BEFORE any transaction.update or transaction.set calls!
  */
 export const handleCallback = async (
   req: Request,
@@ -848,7 +857,10 @@ export const handleCallback = async (
     const ledgerRef = db.collection("transactions").doc(`tx-${transactionRef}`);
 
     await db.runTransaction(async (transaction) => {
+      // READ PHASE: Execute all gets BEFORE any writes!
       const freshVtuTx = await transaction.get(vtuTxRef);
+      const walletDoc = await transaction.get(walletDocRef);
+
       const freshData = freshVtuTx.data() || {};
       const freshStatus = String(freshData.status || "").trim().toUpperCase();
 
@@ -862,6 +874,7 @@ export const handleCallback = async (
         updatedAt: new Date().toISOString(),
       };
 
+      // WRITE PHASE: Now execute all updates/sets
       if (isFailure && !freshData.refundProcessed) {
         // Re-credit users/{userId}
         transaction.update(userDocRef, {
@@ -870,7 +883,6 @@ export const handleCallback = async (
         });
 
         // Re-credit wallets/{userId}_NGN
-        const walletDoc = await transaction.get(walletDocRef);
         if (walletDoc.exists) {
           transaction.update(walletDocRef, {
             balance: FieldValue.increment(amount),
