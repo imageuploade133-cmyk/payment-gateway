@@ -105,6 +105,7 @@ describe("Flutterwave Payment Lifecycle Endpoints (Phase 5)", () => {
         phonenumber: validVirtualAccountPayload.phonenumber,
         firstname: validVirtualAccountPayload.firstname,
         lastname: validVirtualAccountPayload.lastname,
+        narration: `${validVirtualAccountPayload.firstname} ${validVirtualAccountPayload.lastname} - E-Tech`,
       }, undefined);
     });
   });

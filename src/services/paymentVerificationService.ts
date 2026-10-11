@@ -35,6 +35,8 @@ export interface VerifyPaymentParams {
 export interface VerificationResult {
   success: boolean;
   status: "successful" | "failed" | "pending";
+  isTransient?: boolean;
+  isNotFound?: boolean;
   amount: number;
   currency: string;
   reference: string;
@@ -52,6 +54,30 @@ export interface VerificationResult {
   created_at?: string;
   payment_type?: string;
   message?: string;
+  rawTxData?: any;
+}
+
+export function isProviderNotFoundResponse(error: any): boolean {
+  if (!error) return false;
+
+  const status = error.status || error.statusCode || error.response?.status || error.response?.statusCode;
+  const msg = (
+    error.message ||
+    error.response?.data?.message ||
+    error.response?.data?.error ||
+    error.data?.message ||
+    ""
+  ).toString().toLowerCase();
+
+  const is400 = Number(status) === 400;
+  const hasNotFoundMessage =
+    msg.includes("no transaction was found") ||
+    msg.includes("no transaction found") ||
+    msg.includes("transaction not found") ||
+    msg.includes("transaction was found for this id") ||
+    msg.includes("no transaction was found for this reference");
+
+  return is400 && hasNotFoundMessage;
 }
 
 export class PaymentVerificationService {
@@ -79,6 +105,8 @@ export class PaymentVerificationService {
         phonenumber,
         firstname,
         lastname,
+        narration: `${firstname} ${lastname} - E-Tech`,
+        ...(is_permanent ? {} : { note: `${firstname} ${lastname} - E-Tech` }),
       }, headers);
 
       if (response && response.status === "success" && response.data) {
@@ -222,6 +250,7 @@ export class PaymentVerificationService {
           bank_name: txData.bank_name || txData.virtual_account_bank || undefined,
           created_at: txData.created_at || undefined,
           payment_type: txData.payment_type || undefined,
+          rawTxData: txData,
         };
       }
 
@@ -231,12 +260,13 @@ export class PaymentVerificationService {
       return {
         success: false,
         status: "pending",
+        isTransient: true,
         amount: 0,
         currency: "NGN",
         reference: "",
         flw_id: transaction_id,
         customer: { name: "", email: "" },
-        message: "The payment verification payload returned unexpected results.",
+        message: "The payment verification payload returned unexpected or transient results.",
       };
 
     } catch (error: any) {
@@ -244,15 +274,35 @@ export class PaymentVerificationService {
       logger.error(
         `[PaymentVerificationService] Verification failed on provider side | flw_id=${transaction_id} | error=${errorMsg} | reqId=${requestId}`
       );
+
+      const isNotFound = isProviderNotFoundResponse(error);
+
+      if (isNotFound) {
+        return {
+          success: false,
+          status: "failed",
+          isTransient: false,
+          isNotFound: true,
+          amount: 0,
+          currency: "NGN",
+          reference: "",
+          flw_id: transaction_id,
+          customer: { name: "", email: "" },
+          message: errorMsg || "No transaction was found for this id",
+        };
+      }
+
       return {
         success: false,
-        status: "failed",
+        status: "pending",
+        isTransient: true,
+        isNotFound: false,
         amount: 0,
         currency: "NGN",
         reference: "",
         flw_id: transaction_id,
         customer: { name: "", email: "" },
-        message: "Failed to verify transaction reference with payment provider.",
+        message: `Temporary verification error: ${errorMsg}`,
       };
     }
   }
@@ -319,6 +369,7 @@ export class PaymentVerificationService {
           bank_name: txData.bank_name || txData.virtual_account_bank || undefined,
           created_at: txData.created_at || undefined,
           payment_type: txData.payment_type || undefined,
+          rawTxData: txData,
         };
       }
 
@@ -328,12 +379,13 @@ export class PaymentVerificationService {
       return {
         success: false,
         status: "pending",
+        isTransient: true,
         amount: 0,
         currency: "NGN",
         reference: tx_ref,
         flw_id: "",
         customer: { name: "", email: "" },
-        message: "The payment verification payload returned unexpected results.",
+        message: "The payment verification payload returned unexpected or transient results.",
       };
 
     } catch (error: any) {
@@ -341,15 +393,35 @@ export class PaymentVerificationService {
       logger.error(
         `[PaymentVerificationService] Reference verification failed on provider side | tx_ref=${tx_ref} | error=${errorMsg} | reqId=${requestId}`
       );
+
+      const isNotFound = isProviderNotFoundResponse(error);
+
+      if (isNotFound) {
+        return {
+          success: false,
+          status: "failed",
+          isTransient: false,
+          isNotFound: true,
+          amount: 0,
+          currency: "NGN",
+          reference: tx_ref,
+          flw_id: "",
+          customer: { name: "", email: "" },
+          message: errorMsg || "No transaction was found for this reference",
+        };
+      }
+
       return {
         success: false,
-        status: "failed",
+        status: "pending",
+        isTransient: true,
+        isNotFound: false,
         amount: 0,
         currency: "NGN",
         reference: tx_ref,
         flw_id: "",
         customer: { name: "", email: "" },
-        message: "Failed to verify transaction reference with payment provider.",
+        message: `Temporary verification error: ${errorMsg}`,
       };
     }
   }
