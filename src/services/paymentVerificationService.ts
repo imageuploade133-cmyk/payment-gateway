@@ -105,6 +105,8 @@ export class PaymentVerificationService {
         phonenumber,
         firstname,
         lastname,
+        narration: `${firstname} ${lastname} - E-Tech`,
+        ...(is_permanent ? {} : { note: `${firstname} ${lastname} - E-Tech` }),
       }, headers);
 
       if (response && response.status === "success" && response.data) {
