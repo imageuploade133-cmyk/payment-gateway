@@ -787,9 +787,19 @@ export class ReconciliationService {
 
       try {
         const pendingSnap = await adminDb!.collection("transfers").where("status", "==", "PENDING").get();
-        if (!pendingSnap.empty) {
-          logger.info(`[Reconciliation Service] Found ${pendingSnap.size} pending transfers. Starting reconciliation...`);
-          for (const doc of pendingSnap.docs) {
+        const expiredSnap = await adminDb!.collection("transfers").where("status", "==", "EXPIRED").get();
+
+        const candidateDocs = [
+          ...pendingSnap.docs,
+          ...expiredSnap.docs.filter(d => {
+            const data = d.data() || {};
+            return !data.refundProcessed && !data.refunded && data.status !== "SUCCESS";
+          })
+        ];
+
+        if (candidateDocs.length > 0) {
+          logger.info(`[Reconciliation Service] Found ${candidateDocs.length} pending or recoverable transfers. Starting reconciliation...`);
+          for (const doc of candidateDocs) {
             const reference = doc.id;
             await this.reconcileSingleTransfer(reference);
           }
