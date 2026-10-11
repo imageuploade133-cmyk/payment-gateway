@@ -52,48 +52,7 @@ export class ReconciliationService {
 
   private constructor() {}
 
-  private async expireTransferIfStale(
-    reference: string,
-    transferRef: DocumentReference,
-    expiresAt: string
-  ): Promise<boolean> {
-    const db = adminDb;
-    if (!db) return false;
 
-    const nowIso = new Date().toISOString();
-    return db.runTransaction(async (transaction) => {
-      const freshTransfer = await transaction.get(transferRef);
-      if (!freshTransfer.exists) return false;
-
-      const freshData = freshTransfer.data() || {};
-      if (freshData.status !== "PENDING") return false;
-
-      const effectiveExpiresAt = freshData.expiresAt || expiresAt;
-      if (!effectiveExpiresAt || nowIso < effectiveExpiresAt) return false;
-
-      // Firestore requires all transaction reads to happen before any writes.
-      const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
-      const unifiedTxDoc = await transaction.get(unifiedTxRef);
-
-      transaction.set(transferRef, {
-        status: "EXPIRED",
-        expiredAt: nowIso,
-        updatedAt: nowIso,
-        reason: "Transfer remained pending beyond the maximum pending period.",
-      }, { merge: true });
-
-      if (unifiedTxDoc.exists) {
-        transaction.set(unifiedTxRef, {
-          status: "EXPIRED",
-          expiredAt: nowIso,
-          updatedAt: nowIso,
-          reason: "Transfer remained pending beyond the maximum pending period.",
-        }, { merge: true });
-      }
-
-      return true;
-    });
-  }
 
   public static getInstance(): ReconciliationService {
     if (!ReconciliationService.instance) {
@@ -161,7 +120,8 @@ export class ReconciliationService {
         return { success: true, status: currentStatus, refunded: true, message: "Refund already processed. Skipping." };
       }
 
-      if (currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED" || currentStatus === "EXPIRED") {
+      const isTerminal = currentStatus === "SUCCESS" || currentStatus === "FAILED" || currentStatus === "REVERSED" || (currentStatus === "EXPIRED" && (transferData.refundProcessed || transferData.refunded));
+      if (isTerminal) {
         logger.info(`[Reconciliation Service] Transfer ${reference} is already in a terminal state: ${currentStatus}. Skipping.`);
         return { success: true, status: currentStatus, message: `Already in terminal state: ${currentStatus}` };
       }
@@ -787,9 +747,23 @@ export class ReconciliationService {
 
       try {
         const pendingSnap = await adminDb!.collection("transfers").where("status", "==", "PENDING").get();
-        if (!pendingSnap.empty) {
-          logger.info(`[Reconciliation Service] Found ${pendingSnap.size} pending transfers. Starting reconciliation...`);
-          for (const doc of pendingSnap.docs) {
+        const expiredSnap = await adminDb!.collection("transfers").where("status", "==", "EXPIRED").get();
+
+        const candidateDocs = [
+          ...pendingSnap.docs,
+          ...expiredSnap.docs.filter(d => {
+            const data = d.data() || {};
+            if (data.refundProcessed || data.refunded || data.status === "SUCCESS") return false;
+            const hasProviderId = Boolean(
+              data.flutterwaveTransferId || data.providerTransferId || data.providerReference || data.flwId || data.reference
+            );
+            return hasProviderId;
+          })
+        ];
+
+        if (candidateDocs.length > 0) {
+          logger.info(`[Reconciliation Service] Found ${candidateDocs.length} pending or recoverable transfers. Starting reconciliation...`);
+          for (const doc of candidateDocs) {
             const reference = doc.id;
             await this.reconcileSingleTransfer(reference);
           }
