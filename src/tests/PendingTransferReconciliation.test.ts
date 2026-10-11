@@ -94,7 +94,7 @@ jest.mock("../config/firebase", () => {
       where: jest.fn(() => ({
         get: jest.fn(async () => {
           const list = Object.entries(mockTransfers)
-            .filter(([_, v]) => v.status === "PENDING")
+            .filter(([_, v]) => v.status === "PENDING" || v.status === "EXPIRED")
             .map(([k]) => getMockDoc("transfers", k));
           return {
             empty: list.length === 0,
@@ -235,7 +235,29 @@ describe("Pending Transfer Reconciliation & History Visibility Tests", () => {
     expect(txDoc.createdAt).toBeDefined();
   });
 
-  it("3. Should update both transfers and transactions to SUCCESS when provider confirms eventual success", async () => {
+  it("3. Should reject transfer initiation if userId is unauthenticated or missing", async () => {
+    const transferService = new TransferService({
+      isDuplicate: jest.fn().mockResolvedValue(false),
+      saveReference: jest.fn().mockResolvedValue(undefined),
+    } as any);
+
+    const result = await transferService.executeTransfer({
+      amount: 1000,
+      account_number: "0123456789",
+      bank_code: "044",
+      account_name: "Test Recipient",
+      currency: "NGN",
+      narration: "Missing User ID",
+      reference: "trf-no-user",
+      requestId: "req-2",
+      userId: "N/A",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("userId is required");
+  });
+
+  it("4. Should update both transfers and transactions to SUCCESS when provider confirms eventual success", async () => {
     const reference = "trf-eventual-success-100";
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
@@ -267,7 +289,7 @@ describe("Pending Transfer Reconciliation & History Visibility Tests", () => {
     expect(mockTransactions[`tx-${reference}`].status).toBe("SUCCESS");
   });
 
-  it("4. Should update both transfers and transactions to FAILED and execute single atomic refund when provider confirms failure", async () => {
+  it("5. Should update both transfers and transactions to FAILED and execute single atomic refund when provider confirms failure", async () => {
     const reference = "trf-eventual-failure-200";
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
@@ -308,5 +330,32 @@ describe("Pending Transfer Reconciliation & History Visibility Tests", () => {
     const result2 = await reconService.reconcileSingleTransfer(reference);
     expect(result2.success).toBe(true);
     expect(mockUsers["user-200"].balance).toBe(30025); // balance stays unchanged
+  });
+
+  it("6. Should safely reconcile existing EXPIRED transfers with trustworthy provider identifiers without initiating new payouts", async () => {
+    const reference = "trf-1791663087371-3HaWM2";
+    mockTransfers[reference] = {
+      reference,
+      flutterwaveTransferId: "118053889",
+      userId: "user-300",
+      amount: 20000,
+      fee: 25,
+      totalDebited: 20025,
+      status: "EXPIRED",
+      refunded: false,
+    };
+
+    mockUsers["user-300"] = { balance: 5000 };
+
+    // Provider confirms SUCCESSFUL for ID 118053889
+    mockFlwResponseData = [{ status: "SUCCESSFUL", id: "118053889" }];
+
+    const reconService = ReconciliationService.getInstance();
+    const result = await reconService.reconcileSingleTransfer(reference);
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe("SUCCESS");
+    expect(mockTransfers[reference].status).toBe("SUCCESS");
+    expect(mockUsers["user-300"].balance).toBe(5000); // Balance unchanged because transfer succeeded
   });
 });
