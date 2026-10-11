@@ -188,19 +188,6 @@ export class ReconciliationService {
       }
 
       if (!flwStatus) {
-        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
-        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
-          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
-          : "";
-        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
-
-        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
-          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
-          if (expired) {
-            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
-          }
-        }
-
         return { success: true, status: "PENDING", message: "Status not found on Flutterwave rails yet." };
       }
 
@@ -217,19 +204,6 @@ export class ReconciliationService {
       logger.info(`[Reconciliation Service] Status mapped for ${reference}: ${currentStatus} -> ${mappedStatus}`);
 
       if (mappedStatus === "PENDING") {
-        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
-        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
-          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
-          : "";
-        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
-
-        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
-          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
-          if (expired) {
-            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
-          }
-        }
-
         return { success: true, status: "PENDING", message: "Transfer is still pending on Flutterwave rails." };
       }
 
@@ -364,6 +338,29 @@ export class ReconciliationService {
               failureReason: failureReason || null,
               updatedAt: new Date().toISOString()
             });
+          } else {
+            transaction.set(unifiedTxRef, {
+              userId: freshData.userId || "N/A",
+              amount: Number(freshData.amount) || 0,
+              currency: freshData.currency || "NGN",
+              reference,
+              transactionNumber: reference,
+              type: "TRANSFER",
+              category: "transfer",
+              direction: "outgoing",
+              title: "Transfer To",
+              description: freshData.description || `Transfer to ${freshData.recipientName || "Recipient"}`,
+              recipientName: freshData.recipientName || "",
+              recipientBankName: freshData.recipientBankName || freshData.bankName || null,
+              recipientAccountNumber: freshData.recipientAccountNumber || freshData.accountNumber || "",
+              fee: Number(freshData.fee) || 0,
+              status: mappedStatus,
+              providerStatus: flwStatus || null,
+              providerReference: freshData.providerReference || flwId || null,
+              failureReason: failureReason || null,
+              createdAt: freshData.createdAt || new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }, { merge: true });
           }
         });
 

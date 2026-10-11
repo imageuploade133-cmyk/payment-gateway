@@ -288,6 +288,9 @@ export class TransferService {
 
             const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
             await unifiedTxRef.set({
+              userId: userId || "N/A",
+              createdAt: createdAtIso,
+              reference,
               providerReference: flwId || null,
               providerTransactionId: flwId || null,
               transactionNumber: reference,
