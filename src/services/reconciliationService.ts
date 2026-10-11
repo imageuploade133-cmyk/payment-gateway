@@ -188,19 +188,6 @@ export class ReconciliationService {
       }
 
       if (!flwStatus) {
-        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
-        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
-          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
-          : "";
-        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
-
-        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
-          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
-          if (expired) {
-            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
-          }
-        }
-
         return { success: true, status: "PENDING", message: "Status not found on Flutterwave rails yet." };
       }
 
@@ -217,19 +204,6 @@ export class ReconciliationService {
       logger.info(`[Reconciliation Service] Status mapped for ${reference}: ${currentStatus} -> ${mappedStatus}`);
 
       if (mappedStatus === "PENDING") {
-        const createdAt = transferData.createdAt ? new Date(transferData.createdAt) : null;
-        const fallbackExpiresAt = createdAt && !Number.isNaN(createdAt.getTime())
-          ? new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
-          : "";
-        const effectiveExpiresAt = transferData.expiresAt || fallbackExpiresAt;
-
-        if (effectiveExpiresAt && new Date() >= new Date(effectiveExpiresAt)) {
-          const expired = await this.expireTransferIfStale(reference, transferRef, effectiveExpiresAt);
-          if (expired) {
-            return { success: true, status: "EXPIRED", message: "Transfer expired after remaining pending beyond the maximum pending period." };
-          }
-        }
-
         return { success: true, status: "PENDING", message: "Transfer is still pending on Flutterwave rails." };
       }
 
@@ -364,6 +338,29 @@ export class ReconciliationService {
               failureReason: failureReason || null,
               updatedAt: new Date().toISOString()
             });
+          } else {
+            transaction.set(unifiedTxRef, {
+              userId: freshData.userId || "N/A",
+              amount: Number(freshData.amount) || 0,
+              currency: freshData.currency || "NGN",
+              reference,
+              transactionNumber: reference,
+              type: "TRANSFER",
+              category: "transfer",
+              direction: "outgoing",
+              title: "Transfer To",
+              description: freshData.description || `Transfer to ${freshData.recipientName || "Recipient"}`,
+              recipientName: freshData.recipientName || "",
+              recipientBankName: freshData.recipientBankName || freshData.bankName || null,
+              recipientAccountNumber: freshData.recipientAccountNumber || freshData.accountNumber || "",
+              fee: Number(freshData.fee) || 0,
+              status: mappedStatus,
+              providerStatus: flwStatus || null,
+              providerReference: freshData.providerReference || flwId || null,
+              failureReason: failureReason || null,
+              createdAt: freshData.createdAt || new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }, { merge: true });
           }
         });
 
@@ -599,28 +596,139 @@ export class ReconciliationService {
         .collection("transactions")
         .where("type", "==", "WALLET_FUNDING")
         .where("status", "==", "PENDING")
+        .limit(50)
         .get();
 
-      if (pendingFundingSnap.empty) {
-        logger.info("[Deposit Reconciliation] No pending wallet funding transactions found to reconcile.");
+      const expiredFundingSnap = await adminDb
+        .collection("transactions")
+        .where("type", "==", "WALLET_FUNDING")
+        .where("status", "==", "EXPIRED")
+        .limit(50)
+        .get();
+
+      const { isValidFlwId, parseUserIdFromTxRef } = require("../utils/userIdParser");
+
+      const isTrustworthyRef = (ref?: string | null): boolean => {
+        if (!ref || typeof ref !== "string") return false;
+        const cleanRef = ref.trim();
+        if (!cleanRef) return false;
+
+        return (
+          parseUserIdFromTxRef(cleanRef) !== null ||
+          cleanRef.startsWith("user-wallet-") ||
+          cleanRef.startsWith("flw-tx-") ||
+          cleanRef.startsWith("VA-") ||
+          cleanRef.startsWith("DEP-") ||
+          cleanRef.startsWith("FLW-") ||
+          cleanRef.startsWith("tx-FUNDING-flw-")
+        );
+      };
+
+      const candidateDocs = [
+        ...pendingFundingSnap.docs,
+        ...expiredFundingSnap.docs.filter(d => {
+          const data = d.data() || {};
+          if (data.credited || data.status === "SUCCESS") return false;
+
+          const flwId = data.flwId || data.providerTransactionId;
+          const ref = data.reference || data.transactionNumber;
+
+          const hasValidFlwId = flwId && isValidFlwId(String(flwId));
+          const hasTrustedRef = isTrustworthyRef(ref);
+
+          return Boolean(hasValidFlwId || hasTrustedRef);
+        })
+      ];
+
+      if (candidateDocs.length === 0) {
+        logger.info("[Deposit Reconciliation] No pending or recoverable expired wallet funding transactions found to reconcile.");
         return;
       }
 
-      logger.info(`[Deposit Reconciliation] Found ${pendingFundingSnap.size} pending funding transactions. Starting verification...`);
+      logger.info(`[Deposit Reconciliation] Found ${candidateDocs.length} funding transactions to reconcile. Starting verification...`);
 
-      for (const docSnap of pendingFundingSnap.docs) {
+      for (const docSnap of candidateDocs) {
         const txData = docSnap.data() || {};
+        const isExpiredRecord = txData.status === "EXPIRED";
         const flwId = txData.flwId || txData.providerTransactionId;
-        const ref = txData.reference || txData.transactionNumber;
+
+        // For EXPIRED records, never derive provider reference from arbitrary docSnap.id
+        const ref = txData.reference || txData.transactionNumber || (isExpiredRecord ? undefined : docSnap.id.replace(/^tx-FUNDING-/, ""));
+
+        const hasValidFlwId = flwId && isValidFlwId(String(flwId));
+        const hasTrustedRef = isTrustworthyRef(ref);
+
+        if (isExpiredRecord && !hasValidFlwId && !hasTrustedRef) {
+          logger.info(`[Deposit Reconciliation] Skipping EXPIRED doc ${docSnap.id}: no trustworthy provider flwId or reference.`);
+          continue;
+        }
 
         if (flwId || ref) {
           try {
             const { PaymentVerificationService } = require("./paymentVerificationService");
-            const { isValidFlwId } = require("../utils/userIdParser");
-            if (flwId && isValidFlwId(flwId)) {
-              await PaymentVerificationService.verifyTransaction({ transaction_id: String(flwId), requestId: "reconcile-funding" });
+            const { WalletFundingService } = require("./walletFundingService");
+
+            let verificationResult: any = null;
+
+            if (hasValidFlwId) {
+              verificationResult = await PaymentVerificationService.verifyTransaction({
+                transaction_id: String(flwId),
+                requestId: "reconcile-funding",
+              });
             } else if (ref) {
-              await PaymentVerificationService.verifyTransactionByReference({ tx_ref: String(ref), requestId: "reconcile-funding" });
+              verificationResult = await PaymentVerificationService.verifyTransactionByReference({
+                tx_ref: String(ref),
+                requestId: "reconcile-funding",
+              });
+            }
+
+            // CRITICAL: Inspect verification result and only credit when provider confirms a successful transaction
+            if (verificationResult && (verificationResult.success || verificationResult.status === "successful")) {
+              const targetFlwId = verificationResult.flw_id || String(flwId || "");
+              const targetTxRef = verificationResult.reference || String(ref || "");
+
+              logger.info(
+                `[Deposit Reconciliation] Verified successful deposit for ref=${targetTxRef} | flwId=${targetFlwId} | amount=₦${verificationResult.amount}. Executing shared atomic credit...`
+              );
+
+              const creditResult = await WalletFundingService.executeAtomicWalletCredit({
+                flwId: targetFlwId,
+                txRef: targetTxRef,
+                amount: Number(verificationResult.amount) || 0,
+                currency: verificationResult.currency || "NGN",
+                payloadData: verificationResult,
+                explicitUserId: txData.userId || null,
+                requestId: "reconcile-funding",
+                source: "reconciliation",
+              });
+
+              logger.info(
+                `[Deposit Reconciliation] Reconciled deposit ref=${targetTxRef}: credited=${creditResult.credited}, alreadyCredited=${creditResult.alreadyCredited}, success=${creditResult.success}`
+              );
+            } else if (verificationResult && verificationResult.isNotFound) {
+              logger.info(`[Deposit Reconciliation] Provider confirmed transaction NOT_FOUND for ref=${ref || flwId}. Marking FAILED and excluding from future scans.`);
+              const ledgerDocId = docSnap.id;
+              await adminDb.collection("transactions").doc(ledgerDocId).set({
+                status: "FAILED",
+                credited: false,
+                reconciledNotFound: true,
+                reason: verificationResult.message || "No transaction found on provider rails",
+                reconciledAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }, { merge: true });
+            } else if (verificationResult && verificationResult.status === "failed" && !verificationResult.isTransient) {
+              const ledgerDocId = docSnap.id;
+              if (txData.status === "PENDING") {
+                await adminDb.collection("transactions").doc(ledgerDocId).set({
+                  status: "FAILED",
+                  credited: false,
+                  reason: verificationResult.message || "Payment failed or declined on provider rails",
+                  reconciledAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                }, { merge: true });
+              }
+            } else {
+              logger.info(`[Deposit Reconciliation] Verification for deposit ref=${ref} returned transient error or pending status. Keeping transaction recoverable.`);
             }
           } catch (vErr: any) {
             logger.warn(`[Deposit Reconciliation] Verification check for deposit ref=${ref} failed: ${vErr.message}`);
