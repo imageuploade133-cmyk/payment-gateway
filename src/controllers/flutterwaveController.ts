@@ -537,7 +537,7 @@ Received: ${issue.received || "undefined"}`);
       narration: payload.narration,
       reference: payload.reference,
       requestId: reqId,
-      userId: req.user?.uid || req.body.userId || "N/A",
+      userId: req.user?.uid || req.body.userId || req.body.uid || "SYSTEM",
 
       fee: typeof req.body.fee === "number"
         ? req.body.fee
