@@ -436,4 +436,40 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     // The request should pass session middleware and reach route handler (status not 401 REVOKED_SESSION)
     expect(resAllowlisted.body?.code).not.toBe("REVOKED_SESSION");
   });
+
+  it("13. Unknown routes under /api/auth/ and /auth/ (e.g. GET /api/auth/unknown, GET /auth/unknown) do NOT bypass authentication or active-session validation", async () => {
+    mockVerifyIdToken.mockResolvedValue({
+      uid: targetUid,
+    });
+
+    const unknownAuthRoutes = [
+      "/api/auth/unknown",
+      "/auth/unknown",
+    ];
+
+    for (const route of unknownAuthRoutes) {
+      for (const method of ["get", "post"] as const) {
+        // Unauthenticated request must return 401 Unauthorized
+        const resUnauth = await (request(app) as any)[method](route).send();
+        expect(resUnauth.status).toBe(401);
+
+        // Authenticated with Bearer token but missing session header must return 401 REVOKED_SESSION
+        const resMissingSession = await (request(app) as any)[method](route)
+          .set("Authorization", `Bearer ${mockFirebaseToken}`)
+          .send();
+
+        expect(resMissingSession.status).toBe(401);
+        expect(resMissingSession.body.code).toBe("REVOKED_SESSION");
+
+        // Authenticated with Bearer token but mismatched session header must return 401 REVOKED_SESSION
+        const resMismatchedSession = await (request(app) as any)[method](route)
+          .set("Authorization", `Bearer ${mockFirebaseToken}`)
+          .set("X-Session-ID", "attacker-mismatched-session-id")
+          .send();
+
+        expect(resMismatchedSession.status).toBe(401);
+        expect(resMismatchedSession.body.code).toBe("REVOKED_SESSION");
+      }
+    }
+  });
 });

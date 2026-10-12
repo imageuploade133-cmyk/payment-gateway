@@ -7,11 +7,14 @@ import logger from "../config/logger";
 
 const router = Router();
 
+// Router-wide gateway auth & session validation middleware
+router.use(gatewayAuthMiddleware);
+
 /**
  * Endpoint to generate and send a WhatsApp OTP
  * Protected via S2S gateway authentication
  */
-router.post("/send-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
+router.post("/send-otp", async (req: Request, res: Response) => {
   try {
     const { phoneNumber, type } = req.body;
 
@@ -37,7 +40,7 @@ router.post("/send-otp", gatewayAuthMiddleware, async (req: Request, res: Respon
  * Endpoint to verify a received WhatsApp OTP
  * Protected via S2S gateway authentication
  */
-router.post("/verify-otp", gatewayAuthMiddleware, async (req: Request, res: Response) => {
+router.post("/verify-otp", async (req: Request, res: Response) => {
   try {
     const { phoneNumber, otp, type } = req.body;
 
@@ -61,7 +64,7 @@ router.post("/verify-otp", gatewayAuthMiddleware, async (req: Request, res: Resp
  * Endpoint to trigger a PIN reset OTP based on user token
  * Authenticates user via Firebase ID Token, resolves phone/email, and dispatches OTP
  */
-router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
+router.post("/pin-reset-otp", async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
     const { channel } = req.body;
@@ -118,7 +121,7 @@ router.post("/pin-reset-otp", gatewayAuthMiddleware, async (req: any, res: Respo
  * Endpoint to verify PIN reset OTP based on user token
  * Authenticates user via Firebase ID Token, resolves session, and verifies OTP
  */
-router.post("/pin-verify-otp", gatewayAuthMiddleware, async (req: any, res: Response) => {
+router.post("/pin-verify-otp", async (req: any, res: Response) => {
   try {
     const uid = req.user?.uid;
     const { otpCode, channel } = req.body;
