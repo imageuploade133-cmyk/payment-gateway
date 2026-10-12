@@ -1,5 +1,5 @@
 import { mapProviderStatus } from "../utils/statusMapper";
-import { parseUserIdFromTxRef, resolveFundingLedgerDocId, isValidFlwId } from "../utils/userIdParser";
+import { parseUserIdFromTxRef, resolveFundingLedgerDocId } from "../utils/userIdParser";
 import { WalletFundingService } from "../services/walletFundingService";
 import { env } from "../config/env";
 import { Request, Response, NextFunction } from "express";
@@ -536,7 +536,6 @@ Received: ${issue.received || "undefined"}`);
     }
 
     const payload = validationResult.data;
-    const keyPrefix = env.FLW_SECRET_KEY ? env.FLW_SECRET_KEY.slice(0, 12) : "MISSING";
     logger.info(`[Flutterwave Controller] Sending to Flutterwave (Transfer Payload). Payload:`, payload);
 
     const result = await transferService.executeTransfer({
