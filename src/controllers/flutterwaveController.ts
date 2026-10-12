@@ -1350,6 +1350,66 @@ export const initiateBulkTransfer = async (req: AuthenticatedRequest, res: Respo
   }
 };
 
+function isBlockedProxyEndpoint(rawEndpoint: string): boolean {
+  if (!rawEndpoint || typeof rawEndpoint !== "string") return true;
+
+  let normalized = rawEndpoint;
+
+  // 1. Unescape / URL decode repeatedly (up to 5 passes to resolve multi-layer URL encoding)
+  for (let i = 0; i < 5; i++) {
+    try {
+      const decoded = decodeURIComponent(normalized);
+      if (decoded === normalized) break;
+      normalized = decoded;
+    } catch {
+      break;
+    }
+  }
+
+  // 2. Normalize backslashes to forward slashes
+  normalized = normalized.replace(/\\/g, "/");
+
+  // 3. Collapse multiple leading slashes into a single slash so //transfers becomes /transfers
+  normalized = normalized.replace(/^\/+/, "/");
+
+  // 4. Extract path from absolute URL if full URL with scheme is provided (e.g., https://api.flutterwave.com/v3/transfers)
+  if (normalized.includes("://")) {
+    try {
+      const parsedUrl = new URL(normalized);
+      normalized = parsedUrl.pathname;
+    } catch {
+      const schemeEnd = normalized.indexOf("://");
+      const pathStart = normalized.indexOf("/", schemeEnd + 3);
+      normalized = pathStart !== -1 ? normalized.substring(pathStart) : "/";
+    }
+  }
+
+  // 5. Strip query parameters and hash fragments
+  normalized = normalized.split("?")[0].split("#")[0];
+
+  // 6. Ensure leading slash and remove trailing slashes
+  if (!normalized.startsWith("/")) {
+    normalized = "/" + normalized;
+  }
+  normalized = normalized.replace(/\/+$/, "");
+
+  const lowerPath = normalized.toLowerCase();
+
+  // 7. Check against blocked payout & transfer endpoint patterns
+  const blockedPatterns = [
+    "/transfer",
+    "/transfers",
+    "/bulk-transfer",
+    "/bulk-transfers",
+    "/payout",
+    "/payouts",
+  ];
+
+  return blockedPatterns.some((pattern) => {
+    return lowerPath === pattern || lowerPath.includes(pattern + "/") || lowerPath.endsWith(pattern);
+  });
+}
+
 export const proxy = async (req: Request, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received proxy request | reqId=${reqId}`);
@@ -1364,21 +1424,18 @@ export const proxy = async (req: Request, res: Response, next: NextFunction) => 
       return;
     }
 
-    let targetUrl = endpoint;
-    if (!targetUrl.startsWith("/")) {
-      targetUrl = "/" + targetUrl;
-    }
-
-    const lowerEndpoint = targetUrl.toLowerCase();
-    const isPayoutEndpoint = lowerEndpoint.includes("/transfer") || lowerEndpoint.includes("/bulk-transfer") || lowerEndpoint.includes("/transfers") || lowerEndpoint.includes("/payout");
-
-    if (isPayoutEndpoint) {
+    if (isBlockedProxyEndpoint(String(endpoint))) {
       logger.warn(`[Flutterwave Controller] Blocked unauthorized payout dispatch attempt through proxy | endpoint=${endpoint} | reqId=${reqId}`);
       res.status(403).json({
         success: false,
         message: "Forbidden: Direct payout and transfer operations are prohibited through the proxy endpoint. Use dedicated authenticated transfer routes.",
       });
       return;
+    }
+
+    let targetUrl = endpoint;
+    if (!targetUrl.startsWith("/")) {
+      targetUrl = "/" + targetUrl;
     }
 
     const client = getFlutterwaveClient();

@@ -332,4 +332,37 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.body.message).toContain("Forbidden");
     expect(mockFlwClient.request).not.toHaveBeenCalled();
   });
+
+  it("10. Proxy request attempting payout bypass via URL encoding, query string, backslashes, trailing slashes, or absolute URLs should be rejected with HTTP 403 Forbidden", async () => {
+    const bypassEndpoints = [
+      "%2Ftransfers",
+      "%2fbulk-transfers",
+      "%252Ftransfers",
+      "/transfers/",
+      "/transfers?amount=1000",
+      "\\transfers",
+      "\\\\transfers",
+      "https://api.flutterwave.com/v3/transfers",
+      "//api.flutterwave.com/v3/transfers",
+      "/v3/transfers",
+      "/transfers/fee/../",
+    ];
+
+    for (const endpoint of bypassEndpoints) {
+      const res = await request(app)
+        .post("/api/flutterwave/proxy")
+        .set("X-API-Key", testApiKey)
+        .send({
+          method: "POST",
+          endpoint,
+          body: validPayload,
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Forbidden");
+    }
+
+    expect(mockFlwClient.request).not.toHaveBeenCalled();
+  });
 });
