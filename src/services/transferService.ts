@@ -82,7 +82,7 @@ export class TransferService {
     const totalDebited = amount + fee + markup + vat;
     let localDebitPerformed = false;
 
-    if (!userId || typeof userId !== "string" || !userId.trim() || userId === "N/A") {
+    if (!userId || typeof userId !== "string" || !userId.trim() || userId === "N/A" || userId === "SYSTEM") {
       logger.error(`[TransferService] Aborting transfer: missing authenticated userId for reference=${reference}`);
       return {
         success: false,

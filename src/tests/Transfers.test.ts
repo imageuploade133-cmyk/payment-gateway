@@ -1,3 +1,18 @@
+
+jest.mock("../middleware/auth", () => {
+  const original = jest.requireActual("../middleware/auth");
+  return {
+    ...original,
+    gatewayAuthMiddleware: jest.fn((req, res, next) => {
+      const apiKey = req.headers["x-api-key"];
+      if (apiKey && !req.headers["x-unauthenticated"]) {
+        req.user = { uid: "test-user-id" };
+      }
+      return original.gatewayAuthMiddleware(req, res, next);
+    }),
+  };
+});
+
 import request from "supertest";
 import app from "../app";
 import { getFlutterwaveClient } from "../providers/flutterwave";
@@ -81,8 +96,6 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
     jest.clearAllMocks();
     mockFirestoreStore["users/test-user-id"] = { balance: 100000 };
     mockFirestoreStore["wallets/test-user-id_NGN"] = { balance: 100000 };
-    mockFirestoreStore["users/SYSTEM"] = { balance: 1000000 };
-    mockFirestoreStore["wallets/SYSTEM_NGN"] = { balance: 1000000 };
     // Clear in-memory idempotency cache for test isolation
     const idempotency = InMemoryIdempotency.getInstance();
     (idempotency as any).cache.clear();
@@ -98,6 +111,20 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       reference: uniqueRef,
     };
   });
+
+
+    it("should reject transfer and NEVER call Flutterwave provider when req.user.uid is missing (unauthenticated)", async () => {
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
+        .set("x-unauthenticated", "true")
+        .send(validPayload);
+
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toContain("Authentication Error");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
+    });
 
   describe("POST /api/flutterwave/transfer - Request Validation (Zod)", () => {
     it("should return HTTP 400 with a descriptive validation error if amount is missing", async () => {

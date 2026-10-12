@@ -488,6 +488,17 @@ export const initiateTransfer = async (req: AuthenticatedRequest, res: Response,
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId} | body:`, req.body);
 
+  const authenticatedUserId = req.user?.uid;
+  if (!authenticatedUserId || typeof authenticatedUserId !== "string" || !authenticatedUserId.trim()) {
+    logger.warn(`[Flutterwave Controller] Transfer rejected: unauthenticated request (missing req.user.uid) | reqId=${reqId}`);
+    res.status(401).json({
+      success: false,
+      message: "Authentication Error: Verified user authentication is required to execute transfers.",
+    });
+    return;
+  }
+  const userId = authenticatedUserId.trim();
+
   try {
     const body = {
       amount: typeof req.body.amount === "string" ? Number(req.body.amount) : req.body.amount,
@@ -537,7 +548,7 @@ Received: ${issue.received || "undefined"}`);
       narration: payload.narration,
       reference: payload.reference,
       requestId: reqId,
-      userId: req.user?.uid || req.body.userId || req.body.uid || "SYSTEM",
+      userId,
 
       fee: typeof req.body.fee === "number"
         ? req.body.fee
