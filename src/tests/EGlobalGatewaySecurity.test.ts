@@ -279,4 +279,41 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
       (firebase as any).app = originalFirebaseApp;
     }
   });
+
+  it("7. JWT fallback token signed with JWT_SECRET should be rejected for transfer route", async () => {
+    const jwt = require("jsonwebtoken");
+    const nonFirebaseJwt = jwt.sign({ uid: targetUid, sub: targetUid }, env.JWT_SECRET);
+
+    const res = await request(app)
+      .post("/api/flutterwave/transfer")
+      .set("Authorization", `Bearer ${nonFirebaseJwt}`)
+      .set("X-Session-ID", validSessionId)
+      .send(validPayload);
+
+    expect(res.status).toBe(401);
+    expect(mockFlwClient.request).not.toHaveBeenCalled();
+  });
+
+  it("8. User record with missing activeSessionId in Firestore should be rejected with HTTP 401 REVOKED_SESSION", async () => {
+    mockVerifyIdToken.mockResolvedValueOnce({
+      uid: targetUid,
+    });
+
+    // Remove activeSessionId from Firestore user record
+    mockFirestoreStore[`users/${targetUid}`] = {
+      uid: targetUid,
+      balance: 500000,
+      activeSessionId: null,
+    };
+
+    const res = await request(app)
+      .post("/api/flutterwave/transfer")
+      .set("Authorization", `Bearer ${mockFirebaseToken}`)
+      .set("X-Session-ID", validSessionId)
+      .send(validPayload);
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("REVOKED_SESSION");
+    expect(mockFlwClient.request).not.toHaveBeenCalled();
+  });
 });

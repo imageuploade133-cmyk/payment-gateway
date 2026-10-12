@@ -127,20 +127,30 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     return undefined;
   };
 
+  let fromExplicitOriginator = false;
+
   // 1. Check meta_data / metadata
   let rawSenderName = Array.isArray(metaData) ? extractFromMetaArray(metaData, senderNameKeys) : getCaseInsensitiveProp(metaData, senderNameKeys);
   let rawBankName = Array.isArray(metaData) ? extractFromMetaArray(metaData, metaBankNameKeys) : getCaseInsensitiveProp(metaData, metaBankNameKeys, ["bankname"]);
   let rawAccountNumber = Array.isArray(metaData) ? extractFromMetaArray(metaData, accountNumberKeys) : getCaseInsensitiveProp(metaData, accountNumberKeys);
   let rawBankCode = Array.isArray(metaData) ? extractFromMetaArray(metaData, bankCodeKeys) : getCaseInsensitiveProp(metaData, bankCodeKeys);
 
+  if (rawSenderName) fromExplicitOriginator = true;
+
   // 2. Check meta
-  if (!rawSenderName) rawSenderName = Array.isArray(meta) ? extractFromMetaArray(meta, senderNameKeys) : getCaseInsensitiveProp(meta, senderNameKeys);
+  if (!rawSenderName) {
+    rawSenderName = Array.isArray(meta) ? extractFromMetaArray(meta, senderNameKeys) : getCaseInsensitiveProp(meta, senderNameKeys);
+    if (rawSenderName) fromExplicitOriginator = true;
+  }
   if (!rawBankName) rawBankName = Array.isArray(meta) ? extractFromMetaArray(meta, metaBankNameKeys) : getCaseInsensitiveProp(meta, metaBankNameKeys, ["bankname"]);
   if (!rawAccountNumber) rawAccountNumber = Array.isArray(meta) ? extractFromMetaArray(meta, accountNumberKeys) : getCaseInsensitiveProp(meta, accountNumberKeys);
   if (!rawBankCode) rawBankCode = Array.isArray(meta) ? extractFromMetaArray(meta, bankCodeKeys) : getCaseInsensitiveProp(meta, bankCodeKeys);
 
   // 3. Check top-level data
-  if (!rawSenderName) rawSenderName = getCaseInsensitiveProp(data, senderNameKeys);
+  if (!rawSenderName) {
+    rawSenderName = getCaseInsensitiveProp(data, senderNameKeys);
+    if (rawSenderName) fromExplicitOriginator = true;
+  }
   if (!rawBankName) rawBankName = getCaseInsensitiveProp(data, topLevelBankNameKeys);
   if (!rawAccountNumber) rawAccountNumber = getCaseInsensitiveProp(data, accountNumberKeys);
   if (!rawBankCode) rawBankCode = getCaseInsensitiveProp(data, bankCodeKeys);

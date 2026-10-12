@@ -20,9 +20,12 @@ jest.mock("../services/firestoreIdempotency", () => ({
       isWebhookDuplicate: jest.fn().mockResolvedValue(false),
       saveWebhookProcessed: jest.fn().mockResolvedValue(undefined),
       saveReference: jest.fn().mockResolvedValue(undefined),
+      clearCache: jest.fn(),
     }),
   },
 }));
+
+import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 
 describe("Webhook Transfer Synchronization & Reconciliation Tests", () => {
   let req: any;
@@ -31,6 +34,7 @@ describe("Webhook Transfer Synchronization & Reconciliation Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    FirestoreIdempotency.getInstance().clearCache();
     req = {
       requestId: "test-req-id",
       headers: {

@@ -10,6 +10,8 @@ jest.mock("../config/firebase", () => ({
 
 jest.mock("../config/env", () => ({
   env: {
+    FLW_SECRET_KEY: "FLWSECK-mock-test-key",
+    FLW_PUBLIC_KEY: "FLWPUBK-mock-test-key",
     FLW_WEBHOOK_SECRET: "test-secret-hash",
   },
 }));
@@ -53,7 +55,7 @@ describe("Webhook Deposit & Virtual Account Tests", () => {
           bank_name: "Wema Bank",
           customer: {
             email: "test@example.com",
-            name: "John Sender",
+            name: "Test Wallet Owner",
           },
         },
       },

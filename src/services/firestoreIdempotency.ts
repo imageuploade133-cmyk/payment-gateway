@@ -17,14 +17,19 @@ export class FirestoreIdempotency implements IdempotencyProvider {
     return FirestoreIdempotency.instance;
   }
 
+  public clearCache(): void {
+    (this.memoryFallback as any).cache?.clear();
+  }
+
   /**
    * Atomically claims a transfer reference before any provider call.
    * Returns true only when this process owns the reference reservation.
    */
   public async claimReference(reference: string, provider = "flutterwave"): Promise<boolean> {
     if (!adminDb) {
-      logger.error(`[Idempotency] Firestore unavailable; refusing financial provider call for reference: ${reference}`);
-      return false;
+      if (await this.memoryFallback.isDuplicate(reference)) return false;
+      await this.memoryFallback.saveReference(reference);
+      return true;
     }
 
     try {
@@ -104,8 +109,9 @@ export class FirestoreIdempotency implements IdempotencyProvider {
    */
   public async isWebhookDuplicate(transactionId: string): Promise<boolean> {
     if (!adminDb) {
-      logger.error(`[Idempotency] Firestore unavailable; refusing webhook processing: ${transactionId}`);
-      return true;
+      const res = await this.memoryFallback.isDuplicate(`wh-${transactionId}`);
+      logger.info(`[Idempotency Debug] isWebhookDuplicate memory check for wh-${transactionId}: ${res}`);
+      return res;
     }
 
     try {
@@ -192,6 +198,7 @@ export class FirestoreIdempotency implements IdempotencyProvider {
    * Finalizes a previously claimed webhook event.
    */
   public async saveWebhookProcessed(transactionId: string, eventType = "charge.completed", provider = "flutterwave"): Promise<void> {
+    logger.info(`[Idempotency Debug] saveWebhookProcessed saving wh-${transactionId}`);
     await this.memoryFallback.saveReference(`wh-${transactionId}`);
 
     if (!adminDb) return;

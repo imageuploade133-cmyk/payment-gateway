@@ -8,8 +8,16 @@ import jwt from "jsonwebtoken";
 // Mock Firebase Admin SDK
 const mockFirestoreStore: Record<string, any> = {};
 
+const mockVerifyIdToken = jest.fn();
+
+jest.mock("firebase-admin/auth", () => ({
+  getAuth: jest.fn(() => ({
+    verifyIdToken: mockVerifyIdToken,
+  })),
+}));
+
 jest.mock("../config/firebase", () => ({
-  firebase: { app: null }, // Fallback to JWT verify in test environment
+  firebase: { app: { name: "[DEFAULT]" } },
   adminDb: {
     collection: (colName: string) => ({
       doc: (docId: string) => ({
@@ -82,14 +90,15 @@ describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", (
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockFirestoreStore["users/test-user-id"] = { balance: 100000 };
+    mockFirestoreStore["users/test-user-id"] = { balance: 100000, activeSessionId: "test-session-id-123" };
     mockFirestoreStore["wallets/test-user-id_NGN"] = { balance: 100000 };
 
-    validJwtToken = jwt.sign(
-      { sub: "test-user-id", uid: "test-user-id", email: "user@e-tech-hub.com" },
-      env.JWT_SECRET,
-      { expiresIn: "1h" }
-    );
+    mockVerifyIdToken.mockResolvedValue({
+      uid: "test-user-id",
+      email: "user@e-tech-hub.com",
+    });
+
+    validJwtToken = "header.payload.mock_firebase_id_token";
 
     const idempotency = InMemoryIdempotency.getInstance();
     (idempotency as any).cache.clear();
@@ -173,6 +182,7 @@ describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", (
       const res = await request(app)
         .post("/api/flutterwave/transfer")
         .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(validPayload);
 
       expect(res.status).toBe(200);
@@ -212,6 +222,7 @@ describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", (
       const res = await request(app)
         .post("/api/flutterwave/transfer")
         .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(invalidPayload);
 
       expect(res.status).toBe(400);
@@ -231,6 +242,7 @@ describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", (
       const res = await request(app)
         .post("/api/flutterwave/transfer")
         .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send({
           ...validPayload,
           narration: customNarration,
@@ -258,6 +270,7 @@ describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", (
       const res1 = await request(app)
         .post("/api/flutterwave/transfer")
         .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(validPayload);
       expect(res1.status).toBe(200);
 
@@ -265,6 +278,7 @@ describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", (
       const res2 = await request(app)
         .post("/api/flutterwave/transfer")
         .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(validPayload);
 
       expect(res2.status).toBe(400);
@@ -278,6 +292,7 @@ describe("Flutterwave Outward Bank Transfer Authentication & Execution Tests", (
       const res = await request(app)
         .post("/api/flutterwave/transfer")
         .set("Authorization", `Bearer ${validJwtToken}`)
+        .set("X-Session-ID", "test-session-id-123")
         .send(validPayload);
 
       expect(res.status).toBe(400);

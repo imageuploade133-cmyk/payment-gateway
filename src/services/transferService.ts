@@ -67,7 +67,6 @@ export interface TransferResult {
   flutterwaveStatus?: string;
 }
 
-
 export class TransferService {
   private idempotencyProvider: IdempotencyProvider;
 
