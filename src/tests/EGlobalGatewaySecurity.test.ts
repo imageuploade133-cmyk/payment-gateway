@@ -3,6 +3,8 @@ import app from "../app";
 import { getFlutterwaveClient } from "../providers/flutterwave";
 import { InMemoryIdempotency } from "../services/transferService";
 import { env } from "../config/env";
+import jwt from "jsonwebtoken";
+import { firebase } from "../config/firebase";
 
 // Mock Firebase Admin SDK
 const mockFirestoreStore: Record<string, any> = {};
@@ -67,6 +69,26 @@ jest.mock("../providers/flutterwave", () => {
   return {
     getFlutterwaveClient: () => mClient,
   };
+  it("8. JWT fallback must reject an invalid transfer session before any side effects", async () => {
+    const originalFirebaseApp = firebase.app;
+    (firebase as any).app = null;
+    try {
+      const jwtToken = jwt.sign({ uid: targetUid }, env.JWT_SECRET, { expiresIn: "1h" });
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("Authorization", `Bearer ${jwtToken}`)
+        .set("X-Session-ID", "invalid-mismatched-session-id")
+        .send(validPayload);
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("REVOKED_SESSION");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
+      expectNoTransferSideEffects(validPayload.reference);
+    } finally {
+      (firebase as any).app = originalFirebaseApp;
+    }
+  });
+
 });
 
 jest.mock("../services/firestoreIdempotency", () => {
@@ -146,6 +168,7 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
       .set("X-Session-ID", validSessionId)
       .set("X-User-UID", "attacker-controlled-uid")
       .set("X-Authenticated-User-ID", "attacker-controlled-uid")
+      .set("X-User-ID", "attacker-controlled-uid")
       .send({ ...validPayload, uid: "attacker-controlled-uid", userId: "attacker-controlled-uid" });
 
     expect(res.status).toBe(200);
