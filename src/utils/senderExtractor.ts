@@ -9,7 +9,7 @@ export interface ExtractedSenderInfo {
   * Safely retrieves property values from an object using a list of candidate keys,
   * using both direct key lookup and case-insensitive/separator-insensitive matching.
   */
-function getCaseInsensitiveProp(obj: any, keys: string[]): any {
+function getCaseInsensitiveProp(obj: any, keys: string[], exactKeysOnly: string[] = []): any {
   if (!obj || typeof obj !== "object") return undefined;
 
   // 1. Direct exact key match
@@ -19,9 +19,10 @@ function getCaseInsensitiveProp(obj: any, keys: string[]): any {
     }
   }
 
-  // 2. Case-insensitive / normalized key match
+  // 2. Case-insensitive / normalized key match (skipping exactKeysOnly targets)
   const objKeys = Object.keys(obj);
   for (const targetKey of keys) {
+    if (exactKeysOnly.includes(targetKey)) continue;
     const lowerTarget = targetKey.toLowerCase().replace(/[^a-z0-9]/g, "");
     const foundKey = objKeys.find(
       (k) => k.toLowerCase().replace(/[^a-z0-9]/g, "") === lowerTarget
@@ -67,7 +68,7 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     "senderAccountName",
   ];
 
-  const bankNameKeys = [
+  const topLevelBankNameKeys = [
     "originatorbankname",
     "originator_bank_name",
     "originator_bank",
@@ -76,7 +77,15 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     "sender_bank",
     "senderBankName",
     "senderBank",
+  ];
+
+  const metaBankNameKeys = [
     "bankname",
+    ...topLevelBankNameKeys,
+  ];
+
+  const nestedBankNameKeys = [
+    ...topLevelBankNameKeys,
   ];
 
   const accountNumberKeys = [
@@ -120,25 +129,24 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
 
   // 1. Check meta_data / metadata
   let rawSenderName = Array.isArray(metaData) ? extractFromMetaArray(metaData, senderNameKeys) : getCaseInsensitiveProp(metaData, senderNameKeys);
-  let rawBankName = Array.isArray(metaData) ? extractFromMetaArray(metaData, bankNameKeys) : getCaseInsensitiveProp(metaData, bankNameKeys);
+  let rawBankName = Array.isArray(metaData) ? extractFromMetaArray(metaData, metaBankNameKeys) : getCaseInsensitiveProp(metaData, metaBankNameKeys, ["bankname"]);
   let rawAccountNumber = Array.isArray(metaData) ? extractFromMetaArray(metaData, accountNumberKeys) : getCaseInsensitiveProp(metaData, accountNumberKeys);
   let rawBankCode = Array.isArray(metaData) ? extractFromMetaArray(metaData, bankCodeKeys) : getCaseInsensitiveProp(metaData, bankCodeKeys);
 
   // 2. Check meta
   if (!rawSenderName) rawSenderName = Array.isArray(meta) ? extractFromMetaArray(meta, senderNameKeys) : getCaseInsensitiveProp(meta, senderNameKeys);
-  if (!rawBankName) rawBankName = Array.isArray(meta) ? extractFromMetaArray(meta, bankNameKeys) : getCaseInsensitiveProp(meta, bankNameKeys);
+  if (!rawBankName) rawBankName = Array.isArray(meta) ? extractFromMetaArray(meta, metaBankNameKeys) : getCaseInsensitiveProp(meta, metaBankNameKeys, ["bankname"]);
   if (!rawAccountNumber) rawAccountNumber = Array.isArray(meta) ? extractFromMetaArray(meta, accountNumberKeys) : getCaseInsensitiveProp(meta, accountNumberKeys);
   if (!rawBankCode) rawBankCode = Array.isArray(meta) ? extractFromMetaArray(meta, bankCodeKeys) : getCaseInsensitiveProp(meta, bankCodeKeys);
 
   // 3. Check top-level data
   if (!rawSenderName) rawSenderName = getCaseInsensitiveProp(data, senderNameKeys);
-  if (!rawBankName) rawBankName = getCaseInsensitiveProp(data, bankNameKeys);
+  if (!rawBankName) rawBankName = getCaseInsensitiveProp(data, topLevelBankNameKeys);
   if (!rawAccountNumber) rawAccountNumber = getCaseInsensitiveProp(data, accountNumberKeys);
   if (!rawBankCode) rawBankCode = getCaseInsensitiveProp(data, bankCodeKeys);
 
   // 4. Check nested source / entity / sender objects
-  if (!rawSenderName) rawSenderName = getCaseInsensitiveProp(source, senderNameKeys) || getCaseInsensitiveProp(entity, senderNameKeys) || getCaseInsensitiveProp(sender, senderNameKeys);
-  if (!rawBankName) rawBankName = getCaseInsensitiveProp(source, bankNameKeys) || getCaseInsensitiveProp(entity, bankNameKeys) || getCaseInsensitiveProp(sender, bankNameKeys);
+  if (!rawBankName) rawBankName = getCaseInsensitiveProp(source, nestedBankNameKeys) || getCaseInsensitiveProp(entity, nestedBankNameKeys) || getCaseInsensitiveProp(sender, nestedBankNameKeys);
   if (!rawAccountNumber) rawAccountNumber = getCaseInsensitiveProp(source, accountNumberKeys) || getCaseInsensitiveProp(entity, accountNumberKeys) || getCaseInsensitiveProp(sender, accountNumberKeys);
   if (!rawBankCode) rawBankCode = getCaseInsensitiveProp(source, bankCodeKeys) || getCaseInsensitiveProp(entity, bankCodeKeys) || getCaseInsensitiveProp(sender, bankCodeKeys);
 
@@ -158,6 +166,25 @@ export function extractSenderInfo(data: any): ExtractedSenderInfo {
     const trimmed = String(rawSenderName.name).trim();
     if (!isInvalidSentinel(trimmed)) {
       senderName = trimmed;
+    }
+  }
+
+  // Safety Rule: Exclude customer / wallet owner / recipient fields from being treated as senderName
+  if (senderName) {
+    const normSender = senderName.toLowerCase().trim();
+    const customerName = data.customer?.name || data.customer_name || data.customerName;
+    const accountName = data.account_name || data.accountName || data.virtual_account_name || data.virtualAccountName;
+    const beneficiaryName = data.beneficiary_name || data.beneficiaryName || data.recipient_name || data.recipientName || data.receiver_name;
+
+    const matchesRecipientField = (candidate: any) => {
+      if (typeof candidate === "string" && candidate.trim().length > 0) {
+        return candidate.toLowerCase().trim() === normSender;
+      }
+      return false;
+    };
+
+    if (matchesRecipientField(customerName) || matchesRecipientField(accountName) || matchesRecipientField(beneficiaryName)) {
+      senderName = null;
     }
   }
 

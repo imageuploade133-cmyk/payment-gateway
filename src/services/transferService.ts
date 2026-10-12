@@ -144,8 +144,11 @@ export class TransferService {
           const walletSnap = await t.get(walletRef);
 
           if (!userSnap.exists && !walletSnap.exists) {
-            logger.warn(`[TransferService] Neither user document nor wallet document found for userId=${cleanUserId}. Skipping local balance deduction.`);
-            return { success: true, alreadyDebited: true };
+            logger.error(`[TransferService] Neither user profile document nor wallet document found for userId=${cleanUserId}. Aborting payout.`);
+            return {
+              success: false,
+              error: `User profile and wallet records for user ${cleanUserId} were not found. Cannot perform balance verification.`,
+            };
           }
           const currentWalletBal = walletSnap.exists ? Number(walletSnap.data()?.balance || 0) : 0;
           const currentUserBal = Number(userSnap.data()?.balance || 0);

@@ -2,6 +2,8 @@ import { adminDb } from "../config/firebase";
 import { IdempotencyProvider, InMemoryIdempotency } from "./transferService";
 import logger from "../config/logger";
 
+const WEBHOOK_LEASE_DURATION_MS = 60 * 1000; // 60-second processing lease
+
 export class FirestoreIdempotency implements IdempotencyProvider {
   private static instance: FirestoreIdempotency;
   private memoryFallback = InMemoryIdempotency.getInstance();
@@ -96,8 +98,9 @@ export class FirestoreIdempotency implements IdempotencyProvider {
   }
 
   /**
-   * Atomically claims a webhook event before processing it.
-   * The existing controller contract is preserved: false means this request owns it.
+   * Atomically claims or reclaims a webhook event before processing it.
+   * Returns false when this process successfully claims/reclaims the event reservation.
+   * Returns true when the event is already PROCESSED or currently locked under an active lease.
    */
   public async isWebhookDuplicate(transactionId: string): Promise<boolean> {
     if (!adminDb) {
@@ -111,22 +114,77 @@ export class FirestoreIdempotency implements IdempotencyProvider {
 
       await adminDb.runTransaction(async (transaction) => {
         const doc = await transaction.get(docRef);
-        if (doc.exists) return;
+        const now = Date.now();
+        const nowIso = new Date(now).toISOString();
+        const leaseExpiresAt = new Date(now + WEBHOOK_LEASE_DURATION_MS).toISOString();
 
-        transaction.create(docRef, {
-          provider: "unknown",
-          transactionId,
-          eventType: "processing",
-          timestamp: new Date().toISOString(),
-          status: "PROCESSING",
-        });
-        duplicate = false;
+        if (!doc.exists) {
+          transaction.create(docRef, {
+            provider: "flutterwave",
+            transactionId,
+            eventType: "processing",
+            timestamp: nowIso,
+            leaseExpiresAt,
+            status: "PROCESSING",
+          });
+          duplicate = false;
+          return;
+        }
+
+        const data = doc.data() || {};
+        const status = data.status || "PROCESSING";
+
+        // Terminal PROCESSED status is permanently duplicate
+        if (status === "PROCESSED") {
+          duplicate = true;
+          return;
+        }
+
+        // Active lease check for PROCESSING or PROCESSING_FAILED
+        const existingLeaseTime = data.leaseExpiresAt ? new Date(data.leaseExpiresAt).getTime() : 0;
+        const isLeaseExpired = now >= existingLeaseTime;
+
+        if (isLeaseExpired) {
+          // Reclaim stale/expired lease atomically
+          transaction.set(docRef, {
+            provider: "flutterwave",
+            transactionId,
+            eventType: "processing",
+            timestamp: nowIso,
+            leaseExpiresAt,
+            status: "PROCESSING",
+            reclaimedAt: nowIso,
+            reclaimCount: (data.reclaimCount || 0) + 1,
+          }, { merge: true });
+          duplicate = false;
+        } else {
+          // Active lease in progress by another worker
+          duplicate = true;
+        }
       });
 
       return duplicate;
     } catch (error: any) {
       logger.error(`[Idempotency] Atomic webhook claim failed: ${error.message}`);
       return true;
+    }
+  }
+
+  /**
+   * Immediately releases an active webhook processing lease if processing failed due to a temporary error.
+   */
+  public async releaseWebhookProcessing(transactionId: string): Promise<void> {
+    if (!adminDb || !transactionId) return;
+
+    try {
+      const docRef = adminDb.collection("gateway_processed_webhooks").doc(transactionId);
+      await docRef.set({
+        status: "PROCESSING_FAILED",
+        leaseExpiresAt: new Date(0).toISOString(), // Expire immediately to allow retry
+        failedAt: new Date().toISOString(),
+      }, { merge: true });
+    } catch (error: any) {
+      logger.error(`[Idempotency] Release webhook processing failed: ${error.message}`);
     }
   }
 
@@ -144,6 +202,7 @@ export class FirestoreIdempotency implements IdempotencyProvider {
         transactionId,
         eventType,
         timestamp: new Date().toISOString(),
+        leaseExpiresAt: null,
         status: "PROCESSED",
       }, { merge: true });
     } catch (error: any) {

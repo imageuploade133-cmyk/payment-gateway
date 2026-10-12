@@ -4,6 +4,46 @@ import { getFlutterwaveClient } from "../providers/flutterwave";
 import { InMemoryIdempotency } from "../services/transferService";
 import { env } from "../config/env";
 
+// Mock Firebase Admin SDK to capture Firestore writes
+const mockFirestoreStore: Record<string, any> = {};
+
+jest.mock("../config/firebase", () => ({
+  adminDb: {
+    collection: (colName: string) => ({
+      doc: (docId: string) => ({
+        get: jest.fn().mockImplementation(async () => {
+          const data = mockFirestoreStore[`${colName}/${docId}`];
+          return {
+            exists: !!data,
+            data: () => data,
+          };
+        }),
+        set: jest.fn().mockImplementation(async (data: any, opts: any) => {
+          if (opts?.merge && mockFirestoreStore[`${colName}/${docId}`]) {
+            mockFirestoreStore[`${colName}/${docId}`] = { ...mockFirestoreStore[`${colName}/${docId}`], ...data };
+          } else {
+            mockFirestoreStore[`${colName}/${docId}`] = data;
+          }
+        }),
+        update: jest.fn().mockImplementation(async (data: any) => {
+          mockFirestoreStore[`${colName}/${docId}`] = { ...mockFirestoreStore[`${colName}/${docId}`], ...data };
+        }),
+      }),
+      where: () => ({
+        get: jest.fn().mockResolvedValue({ empty: true, docs: [] }),
+      }),
+    }),
+    runTransaction: jest.fn().mockImplementation(async (cb: any) => {
+      const fakeTx = {
+        get: async (docRef: any) => docRef.get(),
+        set: async (docRef: any, data: any, opts: any) => docRef.set(data, opts),
+        update: async (docRef: any, data: any) => docRef.update(data),
+      };
+      return cb(fakeTx);
+    }),
+  },
+}));
+
 // Mock the Flutterwave client singleton helper
 jest.mock("../providers/flutterwave", () => {
   const mClient = {
@@ -11,6 +51,23 @@ jest.mock("../providers/flutterwave", () => {
   };
   return {
     getFlutterwaveClient: () => mClient,
+  };
+});
+
+jest.mock("../services/firestoreIdempotency", () => {
+  const mCache = new Set<string>();
+  return {
+    FirestoreIdempotency: {
+      getInstance: jest.fn().mockReturnValue({
+        isDuplicate: jest.fn().mockImplementation(async (ref: string) => mCache.has(ref)),
+        saveReference: jest.fn().mockImplementation(async (ref: string) => { mCache.add(ref); }),
+        claimReference: jest.fn().mockImplementation(async (ref: string) => {
+          if (mCache.has(ref)) return false;
+          mCache.add(ref);
+          return true;
+        }),
+      }),
+    },
   };
 });
 
@@ -22,6 +79,10 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockFirestoreStore["users/test-user-id"] = { balance: 100000 };
+    mockFirestoreStore["wallets/test-user-id_NGN"] = { balance: 100000 };
+    mockFirestoreStore["users/SYSTEM"] = { balance: 1000000 };
+    mockFirestoreStore["wallets/SYSTEM_NGN"] = { balance: 1000000 };
     // Clear in-memory idempotency cache for test isolation
     const idempotency = InMemoryIdempotency.getInstance();
     (idempotency as any).cache.clear();
@@ -125,6 +186,54 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
       });
     });
 
+    it("should explicitly persist custom narration and remark on transfer documents", async () => {
+      mockFlwClient.request.mockResolvedValue({
+        status: "success",
+        message: "Transfer queued",
+        data: {
+          id: 998877,
+          status: "NEW",
+          amount: 5000,
+          reference: validPayload.reference,
+        },
+      });
+
+      const customNarration = "Monthly Consulting Fee Payment";
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("X-API-Key", testApiKey)
+        .send({
+          ...validPayload,
+          narration: customNarration,
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      // Verify that Flutterwave was called with the exact narration
+      expect(mockFlwClient.request).toHaveBeenCalledWith(
+        "post",
+        "/transfers",
+        expect.objectContaining({
+          narration: customNarration,
+        })
+      );
+
+      // Inspect mock Firestore store for transfers and transactions
+      const transferDoc = mockFirestoreStore[`transfers/${validPayload.reference}`];
+      const transactionDoc = mockFirestoreStore[`transactions/tx-${validPayload.reference}`];
+
+      expect(transferDoc).toBeDefined();
+      expect(transferDoc.narration).toBe(customNarration);
+      expect(transferDoc.remark).toBe(customNarration);
+      expect(transferDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
+
+      expect(transactionDoc).toBeDefined();
+      expect(transactionDoc.narration).toBe(customNarration);
+      expect(transactionDoc.remark).toBe(customNarration);
+      expect(transactionDoc.description).toBe("Transfer to SARAH SMITH CONNOR");
+    });
+
     it("should reject with duplicate reference warning if reference is sent twice (Idempotency check)", async () => {
       mockFlwClient.request.mockResolvedValue({
         status: "success",
@@ -159,7 +268,7 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
-      expect(res.body.message).toContain("Transfer could not be processed");
+      expect(res.body.message).toContain("Unable to execute transfer");
     });
   });
 

@@ -298,9 +298,9 @@ export class ReconciliationService {
               failureReason: failureReason || null,
               updatedAt: new Date().toISOString()
             });
-          } else {
+          } else if (freshData.userId && typeof freshData.userId === "string" && freshData.userId.trim() && freshData.userId !== "N/A") {
             transaction.set(unifiedTxRef, {
-              userId: freshData.userId || "N/A",
+              userId: freshData.userId.trim(),
               amount: Number(freshData.amount) || 0,
               currency: freshData.currency || "NGN",
               reference,
@@ -321,6 +321,9 @@ export class ReconciliationService {
               createdAt: freshData.createdAt || new Date().toISOString(),
               updatedAt: new Date().toISOString()
             }, { merge: true });
+          } else {
+            logger.warn(`[Reconciliation Service] Skipping unified transaction creation for ${reference}: missing authenticated userId. Flagged for admin review.`);
+            updatePayload.unresolvedUserIdFlag = true;
           }
         });
 

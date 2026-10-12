@@ -82,6 +82,13 @@ export function extractSanitizedAxiosError(err: any) {
   return { status, body, headers, code, message };
 }
 
+const DEFAULT_CLUBKONNECT_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/html, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Connection": "keep-alive",
+};
+
 export class ClubkonnectService {
   /**
    * Refreshes the dynamic network code mappings from Clubkonnect API.
@@ -97,15 +104,11 @@ export class ClubkonnectService {
     try {
       const response: AxiosResponse = await axios.get(url, {
         timeout: 10000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-          "Accept": "application/json, text/plain, */*",
-        },
+        headers: DEFAULT_CLUBKONNECT_HEADERS,
       });
       if (!response) {
         throw new Error("Empty response received from Clubkonnect API");
       }
-      logger.info(`[Clubkonnect Service] Dynamic network response | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`);
 
       let data = response.data;
       if (typeof data === "string") {
@@ -145,7 +148,6 @@ export class ClubkonnectService {
       throw new Error("Invalid or empty response format received for network codes");
     } catch (error: any) {
       logger.error(`[Clubkonnect Service] Failed to fetch dynamic network codes: ${error.message} | reqId=${requestId}`);
-      // Fallback is already initialized in networkCache.mappings, do not overwrite if fetch fails
     }
   }
 
@@ -154,7 +156,7 @@ export class ClubkonnectService {
    */
   static async getNetworkCode(networkName: string, requestId?: string): Promise<string> {
     const now = Date.now();
-    const cacheDuration = 12 * 60 * 60 * 1000; // 12 hours cache
+    const cacheDuration = 12 * 60 * 60 * 1000;
     const normalizedInput = networkName.trim().toUpperCase();
 
     if (now - networkCache.lastFetched > cacheDuration) {
@@ -163,6 +165,10 @@ export class ClubkonnectService {
 
     const code = networkCache.mappings[normalizedInput];
     if (!code) {
+      if (normalizedInput.includes("MTN") || normalizedInput === "01") return "01";
+      if (normalizedInput.includes("GLO") || normalizedInput === "02") return "02";
+      if (normalizedInput.includes("9MOBILE") || normalizedInput.includes("ETISALAT") || normalizedInput === "03") return "03";
+      if (normalizedInput.includes("AIRTEL") || normalizedInput === "04") return "04";
       throw new Error(`Unsupported network: ${networkName}`);
     }
     return code;
@@ -170,28 +176,23 @@ export class ClubkonnectService {
 
   /**
    * Refreshes dynamic mobile data plan codes from Clubkonnect API.
-   * Calls: GET https://www.nellobytesystems.com/APIDatasharePlansV1.asp
+   * Calls: GET https://www.nellobytesystems.com/APIDatabundlePlansV2.asp
    */
   static async refreshDataPlanCache(requestId?: string): Promise<void> {
     const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
     if (!USER_ID || !API_KEY) return;
 
-    // Call the correct verified Clubkonnect API endpoint: APIDatabundlePlansV2.asp
     const url = `${BASE_URL}/APIDatabundlePlansV2.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}`;
     logger.info(`[Clubkonnect Service] Refreshing dynamic mobile data plans cache via APIDatabundlePlansV2.asp | reqId=${requestId}`);
 
     try {
       const response: AxiosResponse = await axios.get(url, {
         timeout: 10000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-          "Accept": "application/json, text/plain, */*",
-        },
+        headers: DEFAULT_CLUBKONNECT_HEADERS,
       });
       if (!response) {
         throw new Error("Empty response received from Clubkonnect API");
       }
-      logger.info(`[Clubkonnect Service] Dynamic data plans response received | status=s${response.status} | reqId=${requestId}`);
 
       let data = response.data;
       if (typeof data === "string") {
@@ -202,9 +203,6 @@ export class ClubkonnectService {
         }
       }
 
-      // Log the exact raw response body so we can see it in VM logs!
-      logger.info(`[Clubkonnect Service] Dynamic data plans response raw body: ${JSON.stringify(data)}`);
-
       if (data && typeof data === "object") {
         const plansGrouped: Record<string, any[]> = {
           "MTN": [],
@@ -213,7 +211,6 @@ export class ClubkonnectService {
           "9MOBILE": []
         };
 
-        // 1. Resolve core payload (unpack wrappers e.g. "MOBILE_NETWORK" or "MOBILE_DATABUNDLE" which wraps network grouped objects!)
         let payload = data;
         const possibleWrappers = ["MOBILE_NETWORK", "MOBILE_DATABUNDLE", "DATABUNDLE", "DATA", "MOBILE_DATA"];
         for (const wrapper of possibleWrappers) {
@@ -223,9 +220,7 @@ export class ClubkonnectService {
           }
         }
 
-        // 2. Map payload dynamically supporting BOTH flat array and network object schemas
         if (Array.isArray(payload)) {
-          // Flat list of products across all networks
           for (const item of payload) {
             if (!item || typeof item !== "object") continue;
 
@@ -262,7 +257,6 @@ export class ClubkonnectService {
             }
           }
         } else {
-          // Grouped by network name
           for (const [key, val] of Object.entries(payload)) {
             const normNet = key.trim().toUpperCase();
             let targetNet = "";
@@ -276,7 +270,6 @@ export class ClubkonnectService {
               for (const item of itemsList) {
                 if (!item || typeof item !== "object") continue;
 
-                // Resolve products array supporting nested PRODUCT array or flat list directly
                 let productsArray: any[] = [];
                 if (Array.isArray(item.PRODUCT)) {
                   productsArray = item.PRODUCT;
@@ -312,27 +305,19 @@ export class ClubkonnectService {
           }
         }
 
-        // Only overwrite cache if we successfully retrieved some records
         const planCount = Object.values(plansGrouped).reduce((acc, curr) => acc + curr.length, 0);
         if (planCount > 0) {
           dataPlanCache.plans = plansGrouped;
           dataPlanCache.lastFetched = Date.now();
-          
-          const mtnCount = plansGrouped.MTN.length;
-          const gloCount = plansGrouped.GLO.length;
-          const airtelCount = plansGrouped.AIRTEL.length;
-          const mobile9Count = plansGrouped["9MOBILE"].length;
-          logger.info(`[Clubkonnect Service] Successfully parsed dynamic data plans | MTN=${mtnCount} | GLO=${gloCount} | 9MOBILE=${mobile9Count} | AIRTEL=s${airtelCount} | TOTAL=s${planCount}\n`);
-          
+
           if (adminDb) {
             try {
               await adminDb.collection("config").doc("vtu_data_plans_cache").set({
                 plans: plansGrouped,
                 lastFetched: Date.now()
               }, { merge: true });
-              logger.info(`[Clubkonnect Service] Persistent Firestore cache updated with s${planCount} plans.`);
             } catch (dbErr: any) {
-              logger.error(`[Clubkonnect Service] Failed to update Firestore plans cache: s${dbErr.message}`);
+              logger.error(`[Clubkonnect Service] Failed to update Firestore plans cache: ${dbErr.message}`);
             }
           }
           return;
@@ -341,19 +326,17 @@ export class ClubkonnectService {
       throw new Error("Invalid or empty response format received for data plans.");
     } catch (error: any) {
       logger.error(`[Clubkonnect Service] Failed to fetch dynamic data plans: ${error.message} | reqId=${requestId}`);
-      // Fallback is already initialized in dataPlanCache.plans, do not overwrite if fetch fails
     }
   }
 
   static async getDataPlans(networkName?: string, requestId?: string): Promise<any[]> {
     const now = Date.now();
-    const cacheDuration = 12 * 60 * 60 * 1000; // 12 hours cache
+    const cacheDuration = 12 * 60 * 60 * 1000;
 
     if (now - dataPlanCache.lastFetched > cacheDuration) {
       await this.refreshDataPlanCache(requestId);
     }
 
-    // Fallback: If memory cache is empty/expired (e.g. after restart or api error), load from Firestore
     const hasPlans = Object.values(dataPlanCache.plans).some(arr => arr.length > 0);
     if (!hasPlans && adminDb) {
       try {
@@ -363,7 +346,6 @@ export class ClubkonnectService {
           if (docData && docData.plans) {
             dataPlanCache.plans = docData.plans;
             dataPlanCache.lastFetched = docData.lastFetched || Date.now();
-            logger.info(`[Clubkonnect Service] Primed memory plans cache from persistent Firestore document.`);
           }
         }
       } catch (dbErr: any) {
@@ -381,7 +363,7 @@ export class ClubkonnectService {
 
   /**
    * Fetches the wallet balance from Clubkonnect with timeout, logging, and automatic retries.
-   * Calls: GET https://www.nellobytesystems.com/APIWalletBalanceV1.asp?UserID={USER_ID}&APIKey={API_KEY}
+   * Calls: GET https://www.nellobytesystems.com/APIWalletBalanceV1.asp
    */
   static async getWalletBalance(requestId?: string): Promise<ClubkonnectBalanceResponse> {
     const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
@@ -391,8 +373,8 @@ export class ClubkonnectService {
     }
 
     const url = `${BASE_URL}/APIWalletBalanceV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}`;
-    const timeout = 10000; // 10 seconds timeout
-    const maxRetries = 2; // 2 retries (3 total attempts)
+    const timeout = 10000;
+    const maxRetries = 2;
 
     let attempt = 0;
     while (true) {
@@ -406,10 +388,7 @@ export class ClubkonnectService {
 
         response = await axios.get(url, {
           timeout,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "application/json, text/plain, */*",
-          },
+          headers: DEFAULT_CLUBKONNECT_HEADERS,
         });
       } catch (requestError: any) {
         attempt++;
@@ -420,12 +399,8 @@ export class ClubkonnectService {
         if (attempt > maxRetries) {
           throw new Error(`Failed to retrieve wallet balance from Clubkonnect after ${attempt} attempts. Original error: ${requestError.message}`);
         }
-        continue; // Retry the request
+        continue;
       }
-
-      logger.info(
-        `[Clubkonnect Service] Received response from Clubkonnect | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`
-      );
 
       const data = response.data;
       if (!data || typeof data !== "object") {
@@ -465,8 +440,8 @@ export class ClubkonnectService {
     const cbParam = params.callbackUrl ? `&CallBackURL=${encodeURIComponent(params.callbackUrl)}` : "";
     const url = `${BASE_URL}/APIAirtimeV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&Amount=${params.amount}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
 
-    const timeout = 10000; // 10 seconds
-    const maxRetries = 2; // 2 retries (3 attempts total)
+    const timeout = 10000;
+    const maxRetries = 2;
 
     let attempt = 0;
     while (true) {
@@ -480,30 +455,17 @@ export class ClubkonnectService {
 
         response = await axios.get(url, {
           timeout,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "application/json, text/plain, */*",
-          },
+          headers: DEFAULT_CLUBKONNECT_HEADERS,
         });
       } catch (requestError: any) {
         attempt++;
         const errStatus = requestError.response?.status || "NO_STATUS";
-        const errData = requestError.response?.data ? JSON.stringify(requestError.response.data) : "NO_BODY";
-        const errHeaders = requestError.response?.headers ? JSON.stringify(requestError.response.headers) : "NO_HEADERS";
-
-        logger.error(
-          `[Clubkonnect Service Diagnostic] Airtime purchase HTTP/Network Error | attempt=${attempt}/${maxRetries + 1} | HTTP Status=${errStatus} | Response Body=${errData} | Response Headers=${errHeaders} | Params={UserID: "${USER_ID}", MobileNetwork: "${networkCode}", Amount: "${params.amount}", MobileNumber: "${params.phone}", RequestID: "${params.requestId}"} | error=${requestError.message} | reqId=${requestId}`
-        );
 
         if (attempt > maxRetries) {
           throw new Error(`Failed to complete airtime purchase from Clubkonnect after ${attempt} attempts. Provider status: ${errStatus}. Original error: ${requestError.message}`);
         }
         continue;
       }
-
-      logger.info(
-        `[Clubkonnect Service] Airtime purchase response received | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`
-      );
 
       const data = response.data;
       if (!data || typeof data !== "object") {
@@ -529,8 +491,7 @@ export class ClubkonnectService {
   }
 
   /**
-   * Executes a mobile data plan purchase on Clubkonnect API.
-   * Calls: GET https://www.nellobytesystems.com/APIDatabundleV1.asp
+   * Executes a mobile data plan purchase on Clubkonnect API via canonical verified APIDatabundleV1.asp with retries.
    */
   static async purchaseData(params: PurchaseDataParams, requestId?: string): Promise<DataResponse> {
     const { BASE_URL, USER_ID, API_KEY } = clubkonnectConfig;
@@ -541,69 +502,59 @@ export class ClubkonnectService {
 
     const networkCode = await this.getNetworkCode(params.network, requestId);
     const cbParam = params.callbackUrl ? `&CallBackURL=${encodeURIComponent(params.callbackUrl)}` : "";
+
     const url = `${BASE_URL}/APIDatabundleV1.asp?UserID=${encodeURIComponent(USER_ID)}&APIKey=${encodeURIComponent(API_KEY)}&MobileNetwork=${encodeURIComponent(networkCode)}&DataPlan=${encodeURIComponent(params.planCode)}&MobileNumber=${encodeURIComponent(params.phone)}&RequestID=${encodeURIComponent(params.requestId)}${cbParam}`;
 
-    const timeout = 10000; // 10 seconds
-    const maxRetries = 2; // 2 retries (3 attempts total)
+    const maxRetries = 2;
+    let lastErrorMessage = "";
 
-    let attempt = 0;
-    while (true) {
-      let response: AxiosResponse;
-
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
       try {
         const maskedKey = API_KEY.length > 5 ? `${API_KEY.slice(0, 3)}***${API_KEY.slice(-2)}` : "***";
         logger.info(
-          `[Clubkonnect Service] Sending mobile data purchase request | URL=${BASE_URL}/APIDatabundleV1.asp?UserID=${USER_ID}&APIKey=${maskedKey}&MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | attempt=${attempt + 1}/${maxRetries + 1} | reqId=${requestId}`
+          `[Clubkonnect Service] Sending mobile data purchase request via APIDatabundleV1.asp (attempt ${attempt}/${maxRetries + 1}) | MobileNetwork=${networkCode}&DataPlan=${params.planCode}&MobileNumber=${params.phone}&RequestID=${params.requestId} | reqId=${requestId}`
         );
 
-        response = await axios.get(url, {
-          timeout,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "application/json, text/plain, */*",
-          },
+        const response: AxiosResponse = await axios.get(url, {
+          timeout: 10000,
+          headers: DEFAULT_CLUBKONNECT_HEADERS,
         });
-      } catch (requestError: any) {
-        attempt++;
-        const errStatus = requestError.response?.status || "NO_STATUS";
-        const errData = requestError.response?.data ? JSON.stringify(requestError.response.data) : "NO_BODY";
-        const errHeaders = requestError.response?.headers ? JSON.stringify(requestError.response.headers) : "NO_HEADERS";
 
+        const data = response.data;
+        if (data && typeof data === "object") {
+          const status = String(data.status || "").trim().toUpperCase();
+          if (status === "ORDER_RECEIVED") {
+            logger.info(`[Clubkonnect Service] Mobile data order received successfully via APIDatabundleV1.asp | orderId=${data.orderid}`);
+            return {
+              success: true,
+              orderId: data.orderid ? String(data.orderid) : undefined,
+              status: "Pending",
+              message: data.remark || "Data order accepted successfully.",
+            };
+          } else {
+            lastErrorMessage = data.remark || data.remark_desc || `Rejected by APIDatabundleV1.asp with status: ${data.status}`;
+            logger.warn(`[Clubkonnect Service] APIDatabundleV1.asp returned status: ${status} | message=${lastErrorMessage}`);
+          }
+        }
+      } catch (requestError: any) {
+        const errStatus = requestError.response?.status || "NO_STATUS";
+        lastErrorMessage = `HTTP ${errStatus}: ${requestError.message}`;
         logger.error(
-          `[Clubkonnect Service Diagnostic] Mobile data purchase HTTP/Network Error | attempt=${attempt}/${maxRetries + 1} | HTTP Status=${errStatus} | Response Body=${errData} | Response Headers=${errHeaders} | Params={UserID: "${USER_ID}", MobileNetwork: "${networkCode}", DataPlan: "${params.planCode}", MobileNumber: "${params.phone}", RequestID: "${params.requestId}"} | error=${requestError.message} | reqId=${requestId}`
+          `[Clubkonnect Service] Error calling APIDatabundleV1.asp (attempt ${attempt}/${maxRetries + 1}) | HTTP Status=${errStatus} | error=${requestError.message}`
         );
 
-        if (attempt > maxRetries) {
-          throw new Error(`Failed to complete mobile data purchase from Clubkonnect after ${attempt} attempts. Provider status: ${errStatus}. Original error: ${requestError.message}`);
+        if (attempt <= maxRetries) {
+          const backoffMs = attempt * 1000;
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
         }
-        continue;
       }
-
-      logger.info(
-        `[Clubkonnect Service] Mobile data purchase response received | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`
-      );
-
-      const data = response.data;
-      if (!data || typeof data !== "object") {
-        throw new Error("Invalid response format received from Clubkonnect API during data purchase.");
-      }
-
-      const status = String(data.status || "").trim().toUpperCase();
-      if (status === "ORDER_RECEIVED") {
-        return {
-          success: true,
-          orderId: data.orderid ? String(data.orderid) : undefined,
-          status: "Pending",
-          message: data.remark || "Data order accepted successfully.",
-        };
-      }
-
-      return {
-        success: false,
-        status: "Failed",
-        message: data.remark || data.remark_desc || `Clubkonnect rejected request with status: ${data.status}`,
-      };
     }
+
+    return {
+      success: false,
+      status: "Failed",
+      message: lastErrorMessage || "Clubkonnect mobile data request failed.",
+    };
   }
 
   /**
@@ -630,21 +581,10 @@ export class ClubkonnectService {
     const timeout = 10000;
 
     try {
-      const maskedKey = API_KEY.length > 5 ? `${API_KEY.slice(0, 3)}***${API_KEY.slice(-2)}` : "***";
-      logger.info(
-        `[Clubkonnect Service] Sending transaction query | URL=${BASE_URL}/APIQueryV1.asp?UserID=${USER_ID}&APIKey=${maskedKey}${queryParam} | reqId=${requestId}`
-      );
-
       const response: AxiosResponse = await axios.get(url, {
         timeout,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-          "Accept": "application/json, text/plain, */*",
-        },
+        headers: DEFAULT_CLUBKONNECT_HEADERS,
       });
-      logger.info(
-        `[Clubkonnect Service] Transaction query response received | status=${response.status} | body=${JSON.stringify(response.data)} | reqId=${requestId}`
-      );
 
       const data = response.data;
       if (!data || typeof data !== "object") {

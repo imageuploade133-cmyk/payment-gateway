@@ -257,7 +257,51 @@ describe("Pending Transfer Reconciliation & History Visibility Tests", () => {
     expect(result.message).toContain("userId is required");
   });
 
-  it("4. Should update both transfers and transactions to SUCCESS when provider confirms eventual success", async () => {
+  it("4. Should fail safely without initiating provider payout when both user and wallet documents are missing", async () => {
+    const transferService = new TransferService({
+      isDuplicate: jest.fn().mockResolvedValue(false),
+      saveReference: jest.fn().mockResolvedValue(undefined),
+    } as any);
+
+    // Non-existent user and wallet in mock db
+    const result = await transferService.executeTransfer({
+      amount: 1000,
+      account_number: "0123456789",
+      bank_code: "044",
+      account_name: "Test Recipient",
+      currency: "NGN",
+      narration: "Missing User/Wallet",
+      reference: "trf-missing-user-wallet",
+      requestId: "req-3",
+      userId: "non-existent-user-id",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("not found");
+  });
+
+  it("5. Should keep transfer status PENDING when provider returns ambiguous or pending response", async () => {
+    const reference = "trf-ambiguous-response";
+    mockTransfers[reference] = {
+      reference,
+      userId: "user-555",
+      amount: 2000,
+      status: "PENDING",
+      createdAt: new Date().toISOString(),
+    };
+
+    // Provider returns ambiguous/pending response
+    mockFlwResponseData = [{ status: "PROCESSING", id: 334455 }];
+
+    const reconService = ReconciliationService.getInstance();
+    const result = await reconService.reconcileSingleTransfer(reference);
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe("PENDING");
+    expect(mockTransfers[reference].status).toBe("PENDING");
+  });
+
+  it("6. Should update both transfers and transactions to SUCCESS when provider confirms eventual success", async () => {
     const reference = "trf-eventual-success-100";
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
@@ -289,7 +333,7 @@ describe("Pending Transfer Reconciliation & History Visibility Tests", () => {
     expect(mockTransactions[`tx-${reference}`].status).toBe("SUCCESS");
   });
 
-  it("5. Should update both transfers and transactions to FAILED and execute single atomic refund when provider confirms failure", async () => {
+  it("7. Should update both transfers and transactions to FAILED and execute single atomic refund when provider confirms failure", async () => {
     const reference = "trf-eventual-failure-200";
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
@@ -332,7 +376,7 @@ describe("Pending Transfer Reconciliation & History Visibility Tests", () => {
     expect(mockUsers["user-200"].balance).toBe(30025); // balance stays unchanged
   });
 
-  it("6. Should safely reconcile existing EXPIRED transfers with trustworthy provider identifiers without initiating new payouts", async () => {
+  it("8. Should safely reconcile existing EXPIRED transfers with trustworthy provider identifiers without initiating new payouts", async () => {
     const reference = "trf-1791663087371-3HaWM2";
     mockTransfers[reference] = {
       reference,
