@@ -135,9 +135,47 @@ export async function gatewayAuthMiddleware(
     }
 
     try {
-      const decoded = jwt.verify(providedToken, env.JWT_SECRET);
+      const decoded = jwt.verify(providedToken, env.JWT_SECRET) as jwt.JwtPayload & { uid?: string };
       req.user = decoded;
-      logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).sub || "unknown"} | reqId=${reqId}`);
+
+      // Transfer execution must enforce the same server-side session check on the
+      // JWT fallback path as it does for Firebase ID tokens.
+      const path = req.originalUrl || req.path || req.url || "";
+      if (path.split("?")[0] === "/api/flutterwave/transfer") {
+        const uid = typeof decoded.uid === "string" ? decoded.uid.trim() : "";
+        const providedSessionId = req.headers["x-session-id"] as string | undefined;
+
+        if (!uid || !providedSessionId || !adminDb) {
+          res.status(401).json({
+            success: false,
+            code: "REVOKED_SESSION",
+            message: "Session validation failed. Please sign in again.",
+          });
+          return;
+        }
+
+        const userDoc = await adminDb.collection("users").doc(uid).get();
+        if (!userDoc.exists) {
+          res.status(401).json({
+            success: false,
+            code: "REVOKED_SESSION",
+            message: "Account record not found.",
+          });
+          return;
+        }
+
+        const activeSessionId = userDoc.data()?.activeSessionId;
+        if (activeSessionId && providedSessionId !== activeSessionId) {
+          res.status(401).json({
+            success: false,
+            code: "REVOKED_SESSION",
+            message: "Your account was signed in on another device. You have been logged out on this device.",
+          });
+          return;
+        }
+      }
+
+      logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).uid || (decoded as any).sub || "unknown"} | reqId=${reqId}`);
       return next();
     } catch (error: any) {
       logger.warn(`[Auth] JWT verification failed | error=${error.message} | reqId=${reqId}`);
