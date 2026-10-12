@@ -1300,9 +1300,19 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
   }
 };
 
-export const initiateBulkTransfer = async (req: Request, res: Response, next: NextFunction) => {
+export const initiateBulkTransfer = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Flutterwave Controller] Received initiateBulkTransfer request | reqId=${reqId}`);
+
+  const authenticatedUserId = req.user?.uid;
+  if (!authenticatedUserId || typeof authenticatedUserId !== "string" || !authenticatedUserId.trim() || req.user?.firebaseAuth !== true) {
+    logger.warn(`[Flutterwave Controller] Bulk transfer rejected: unauthenticated request or non-Firebase token | reqId=${reqId}`);
+    res.status(401).json({
+      success: false,
+      message: "Authentication Error: Verified user authentication is required to execute transfers.",
+    });
+    return;
+  }
 
   try {
     const { title, bulk_data } = req.body;

@@ -4,6 +4,7 @@ import logger from "../config/logger";
 import { PaystackService } from "../services/paystackService";
 import { getPaystackClient } from "../providers/paystack";
 import { FirestoreIdempotency } from "../services/firestoreIdempotency";
+import { AuthenticatedRequest } from "../middleware/auth";
 
 // Zod Schemas
 const resolveAccountSchema = z.object({
@@ -78,9 +79,20 @@ export const resolveAccount = async (req: Request, res: Response, next: NextFunc
   }
 };
 
-export const initiateTransfer = async (req: Request, res: Response, next: NextFunction) => {
+export const initiateTransfer = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   const reqId = req.requestId;
   logger.info(`[Paystack Controller] Received initiateTransfer request | reqId=${reqId}`);
+
+  const authenticatedUserId = req.user?.uid;
+  if (!authenticatedUserId || typeof authenticatedUserId !== "string" || !authenticatedUserId.trim() || req.user?.firebaseAuth !== true) {
+    logger.warn(`[Paystack Controller] Transfer rejected: unauthenticated request or non-Firebase token | reqId=${reqId}`);
+    res.status(401).json({
+      success: false,
+      message: "Authentication Error: Verified user authentication is required to execute transfers.",
+    });
+    return;
+  }
+  const userId = authenticatedUserId.trim();
 
   try {
     const validationResult = transferSchema.safeParse(req.body);
@@ -95,6 +107,7 @@ export const initiateTransfer = async (req: Request, res: Response, next: NextFu
 
     const result = await PaystackService.executeTransfer({
       ...payload,
+      userId,
       requestId: reqId,
     });
 
