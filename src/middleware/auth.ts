@@ -179,6 +179,30 @@ export async function gatewayAuthMiddleware(
     return;
   }
 
+  // Verify server-supplied user ID header if present for S2S calls
+  const s2sUid = (
+    req.headers["x-authenticated-user-id"] ||
+    req.headers["x-user-uid"] ||
+    req.headers["x-user-id"]
+  ) as string;
+
+  if (s2sUid && typeof s2sUid === "string" && s2sUid.trim()) {
+    const cleanUid = s2sUid.trim();
+    if (adminDb) {
+      try {
+        const userDoc = await adminDb.collection("users").doc(cleanUid).get();
+        if (userDoc.exists) {
+          req.user = { uid: cleanUid, ...userDoc.data() };
+          logger.info(`[Auth] S2S API Key verified user ID ${cleanUid} via Firestore | reqId=${reqId}`);
+        } else {
+          logger.warn(`[Auth] S2S API Key user ID ${cleanUid} not found in Firestore | reqId=${reqId}`);
+        }
+      } catch (dbErr: any) {
+        logger.error(`[Auth] S2S user verification Firestore error: ${dbErr.message} | reqId=${reqId}`);
+      }
+    }
+  }
+
   logger.debug(`[Auth] API Key authenticated successfully | reqId=${reqId}`);
   next();
 }
