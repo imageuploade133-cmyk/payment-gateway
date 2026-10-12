@@ -316,4 +316,20 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.body.code).toBe("REVOKED_SESSION");
     expect(mockFlwClient.request).not.toHaveBeenCalled();
   });
+
+  it("9. Proxy request attempting to dispatch payout/transfer via POST /proxy should be rejected with HTTP 403 Forbidden", async () => {
+    const res = await request(app)
+      .post("/api/flutterwave/proxy")
+      .set("X-API-Key", testApiKey)
+      .send({
+        method: "POST",
+        endpoint: "/transfers",
+        body: validPayload,
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toContain("Forbidden");
+    expect(mockFlwClient.request).not.toHaveBeenCalled();
+  });
 });
