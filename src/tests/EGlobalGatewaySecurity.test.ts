@@ -95,6 +95,12 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
   const validSessionId = "session-token-abc-123";
   const mockFirebaseToken = "header.payload.signature_mock_firebase_id_token";
 
+  const expectNoTransferSideEffects = (reference: string) => {
+    expect(mockFirestoreStore[`users/${targetUid}`]?.balance).toBe(500000);
+    expect(mockFirestoreStore[`wallets/${targetUid}_NGN`]?.balance).toBe(500000);
+    expect(mockFirestoreStore[`transfers/${reference}`]).toBeUndefined();
+    expect(mockFirestoreStore[`transactions/tx-${reference}`]).toBeUndefined();
+  };
   beforeEach(() => {
     jest.clearAllMocks();
     mockFirestoreStore[`users/${targetUid}`] = {
@@ -114,8 +120,8 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     validPayload = {
       amount: 25000,
       account_number: "0123456789",
-      bank_code: "044",
-      account_name: "Ahmadu Bello",
+      account_bank: "044",
+      beneficiary_name: "Ahmadu Bello",
       currency: "NGN",
       narration: "E-Global Vendor Payment",
       reference: uniqueRef,
@@ -138,7 +144,9 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
       .post("/api/flutterwave/transfer")
       .set("Authorization", `Bearer ${mockFirebaseToken}`)
       .set("X-Session-ID", validSessionId)
-      .send(validPayload);
+      .set("X-User-UID", "attacker-controlled-uid")
+      .set("X-Authenticated-User-ID", "attacker-controlled-uid")
+      .send({ ...validPayload, uid: "attacker-controlled-uid", userId: "attacker-controlled-uid" });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -166,6 +174,7 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);
     expect(mockFlwClient.request).not.toHaveBeenCalled();
+    expectNoTransferSideEffects(validPayload.reference);
   });
 
   it("3. Invalid/Expired Firebase ID token should return HTTP 401 Unauthorized and NEVER call Flutterwave", async () => {
@@ -180,6 +189,7 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.status).toBe(401);
     expect(res.body.code).toBe("REVOKED_SESSION");
     expect(mockFlwClient.request).not.toHaveBeenCalled();
+    expectNoTransferSideEffects(validPayload.reference);
   });
 
   it("4. Missing X-Session-ID header on transfer request should return HTTP 401 REVOKED_SESSION and NEVER call Flutterwave", async () => {
@@ -196,6 +206,7 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.body.code).toBe("REVOKED_SESSION");
     expect(res.body.message).toContain("Missing session ID");
     expect(mockFlwClient.request).not.toHaveBeenCalled();
+    expectNoTransferSideEffects(validPayload.reference);
   });
 
   it("5. Session mismatch in Firestore should return HTTP 401 REVOKED_SESSION and NEVER call Flutterwave", async () => {
@@ -213,9 +224,20 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.body.code).toBe("REVOKED_SESSION");
     expect(res.body.message).toContain("signed in on another device");
     expect(mockFlwClient.request).not.toHaveBeenCalled();
+    expectNoTransferSideEffects(validPayload.reference);
   });
 
-  it("6. Forged client-supplied body userId/uid on API key request should be rejected with HTTP 401 and NEVER call Flutterwave", async () => {
+  it("6. Invalid API key should be rejected with HTTP 401 before transfer side effects", async () => {
+    const res = await request(app)
+      .post("/api/flutterwave/transfer")
+      .set("X-API-Key", "invalid-api-key")
+      .send(validPayload);
+
+    expect(res.status).toBe(401);
+    expect(mockFlwClient.request).not.toHaveBeenCalled();
+    expectNoTransferSideEffects(validPayload.reference);
+  });
+  it("7. Forged client-supplied body userId/uid on API key request should be rejected with HTTP 401 and NEVER call Flutterwave", async () => {
     const forgedPayload = {
       ...validPayload,
       userId: targetUid,
@@ -230,5 +252,6 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.status).toBe(401);
     expect(res.body.message).toContain("Authentication Error");
     expect(mockFlwClient.request).not.toHaveBeenCalled();
+    expectNoTransferSideEffects(validPayload.reference);
   });
 });
