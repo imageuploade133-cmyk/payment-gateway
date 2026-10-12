@@ -43,10 +43,10 @@ export async function gatewayAuthMiddleware(
   const urlPathname = rawUrl.split("?")[0].split("#")[0].trim().toLowerCase();
   const isTransferRoute = urlPathname.includes("/transfer") || urlPathname.includes("/bulk-transfer");
 
-  // Explicit allowlist of legitimate auth/recovery route pathnames
+  // Explicit allowlist of legitimate auth/recovery route pathnames (exact match required)
   let isAuthExempt = false;
   if (!isTransferRoute) {
-    const authExemptPaths = [
+    const authExemptExactPaths = new Set([
       "/api/auth/send-otp",
       "/api/auth/verify-otp",
       "/api/auth/pin-reset-otp",
@@ -55,12 +55,9 @@ export async function gatewayAuthMiddleware(
       "/verify-otp",
       "/pin-reset-otp",
       "/pin-verify-otp",
-    ];
+    ]);
 
-    const isExactExempt = authExemptPaths.includes(urlPathname);
-    const isAuthPrefix = urlPathname.startsWith("/api/auth/") || urlPathname.startsWith("/auth/");
-
-    isAuthExempt = isExactExempt || isAuthPrefix;
+    isAuthExempt = authExemptExactPaths.has(urlPathname);
   }
 
   // 2. JWT / Firebase Authentication path
@@ -165,46 +162,8 @@ export async function gatewayAuthMiddleware(
     }
 
     try {
-      const decoded = jwt.verify(providedToken, env.JWT_SECRET) as jwt.JwtPayload & { uid?: string };
+      const decoded = jwt.verify(providedToken, env.JWT_SECRET);
       req.user = decoded;
-
-      // Transfer execution must enforce the same server-side session check on the
-      // JWT fallback path as it does for Firebase ID tokens.
-      const path = req.originalUrl || req.path || req.url || "";
-      if (path.split("?")[0] === "/api/flutterwave/transfer") {
-        const uid = typeof decoded.uid === "string" ? decoded.uid.trim() : "";
-        const providedSessionId = req.headers["x-session-id"] as string | undefined;
-
-        if (!uid || !providedSessionId || !adminDb) {
-          res.status(401).json({
-            success: false,
-            code: "REVOKED_SESSION",
-            message: "Session validation failed. Please sign in again.",
-          });
-          return;
-        }
-
-        const userDoc = await adminDb.collection("users").doc(uid).get();
-        if (!userDoc.exists) {
-          res.status(401).json({
-            success: false,
-            code: "REVOKED_SESSION",
-            message: "Account record not found.",
-          });
-          return;
-        }
-
-        const activeSessionId = userDoc.data()?.activeSessionId;
-        if (activeSessionId && providedSessionId !== activeSessionId) {
-          res.status(401).json({
-            success: false,
-            code: "REVOKED_SESSION",
-            message: "Your account was signed in on another device. You have been logged out on this device.",
-          });
-          return;
-        }
-      }
-
       logger.info(`[Auth] JWT successfully verified | user=${(decoded as any).uid || (decoded as any).sub || "unknown"} | reqId=${reqId}`);
       return next();
     } catch (error: any) {

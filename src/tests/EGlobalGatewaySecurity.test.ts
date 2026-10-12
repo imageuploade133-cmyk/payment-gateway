@@ -403,4 +403,37 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(mockFlwClient.request).not.toHaveBeenCalled();
     expectNoTransferSideEffects(validPayload.reference);
   });
+
+  it("12. Non-exempt protected routes MUST enforce active session validation, while legitimate allowlisted recovery routes work", async () => {
+    mockVerifyIdToken.mockResolvedValue({
+      uid: targetUid,
+    });
+
+    // Non-exempt protected endpoints without valid X-Session-ID header
+    const protectedRoutes = [
+      "/api/profile/verify-kyc",
+      "/api/fcm/register",
+      "/api/flutterwave/cards",
+      "/api/accounts/resolve",
+    ];
+
+    for (const route of protectedRoutes) {
+      const res = await request(app)
+        .post(route)
+        .set("Authorization", `Bearer ${mockFirebaseToken}`)
+        .send({ test: true });
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("REVOKED_SESSION");
+    }
+
+    // Legitimate allowlisted auth/recovery route (e.g. /api/auth/send-otp) does not require X-Session-ID
+    const resAllowlisted = await request(app)
+      .post("/api/auth/send-otp")
+      .set("Authorization", `Bearer ${mockFirebaseToken}`)
+      .send({ phone: "+2348012345678" });
+
+    // The request should pass session middleware and reach route handler (status not 401 REVOKED_SESSION)
+    expect(resAllowlisted.body?.code).not.toBe("REVOKED_SESSION");
+  });
 });
