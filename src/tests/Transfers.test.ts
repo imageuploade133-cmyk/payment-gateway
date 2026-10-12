@@ -79,6 +79,10 @@ describe("Flutterwave Outward Bank Transfer Endpoint Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockFirestoreStore["users/test-user-id"] = { balance: 100000 };
+    mockFirestoreStore["wallets/test-user-id_NGN"] = { balance: 100000 };
+    mockFirestoreStore["users/SYSTEM"] = { balance: 1000000 };
+    mockFirestoreStore["wallets/SYSTEM_NGN"] = { balance: 1000000 };
     // Clear in-memory idempotency cache for test isolation
     const idempotency = InMemoryIdempotency.getInstance();
     (idempotency as any).cache.clear();
