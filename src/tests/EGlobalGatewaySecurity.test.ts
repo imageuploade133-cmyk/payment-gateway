@@ -365,4 +365,42 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
 
     expect(mockFlwClient.request).not.toHaveBeenCalled();
   });
+
+  it("11. Transfer request with query string containing /auth/, send-otp, or verify-otp must STILL enforce session validation and return HTTP 401 REVOKED_SESSION if session is missing or mismatched", async () => {
+    mockVerifyIdToken.mockResolvedValue({
+      uid: targetUid,
+    });
+
+    const maliciousQueryRoutes = [
+      "/api/flutterwave/transfer?next=/auth/",
+      "/api/flutterwave/transfer?redirect=send-otp",
+      "/api/flutterwave/transfer?bypass=verify-otp",
+      "/api/flutterwave/transfer?ref=pin-reset-otp",
+      "/api/flutterwave/bulk-transfer?next=/auth/",
+    ];
+
+    for (const route of maliciousQueryRoutes) {
+      // Test missing session header
+      const resMissing = await request(app)
+        .post(route)
+        .set("Authorization", `Bearer ${mockFirebaseToken}`)
+        .send(validPayload);
+
+      expect(resMissing.status).toBe(401);
+      expect(resMissing.body.code).toBe("REVOKED_SESSION");
+
+      // Test mismatched session header
+      const resMismatch = await request(app)
+        .post(route)
+        .set("Authorization", `Bearer ${mockFirebaseToken}`)
+        .set("X-Session-ID", "attacker-forged-session-id")
+        .send(validPayload);
+
+      expect(resMismatch.status).toBe(401);
+      expect(resMismatch.body.code).toBe("REVOKED_SESSION");
+    }
+
+    expect(mockFlwClient.request).not.toHaveBeenCalled();
+    expectNoTransferSideEffects(validPayload.reference);
+  });
 });
