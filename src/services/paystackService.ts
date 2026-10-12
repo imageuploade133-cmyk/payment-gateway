@@ -17,6 +17,7 @@ export interface PaystackTransferParams {
   narration: string;
   reference: string;
   requestId: string;
+  userId?: string;
 }
 
 export interface PaystackVerifyParams {
@@ -59,8 +60,18 @@ export class PaystackService {
    * Executes outward bank transfers with multi-step recipient creation and idempotency protection.
    */
   public static async executeTransfer(params: PaystackTransferParams) {
-    const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId } = params;
+    const { amount, account_number, bank_code, account_name, currency, narration, reference, requestId, userId } = params;
     logger.info(`[PaystackService] Executing transfer | reference=${reference} | amount=${amount} | reqId=${requestId}`);
+
+    if (!userId || typeof userId !== "string" || !userId.trim() || userId === "N/A" || userId === "SYSTEM") {
+      logger.error(`[PaystackService] Aborting transfer: missing authenticated userId for reference=${reference}`);
+      return {
+        success: false,
+        reference,
+        status: "failed",
+        message: "Authentication Error: Verified user identity is required for transfers.",
+      };
+    }
 
     const idempotency = FirestoreIdempotency.getInstance();
     const claimed = await idempotency.claimReference(reference, "paystack");
