@@ -82,6 +82,17 @@ export class TransferService {
     const totalDebited = amount + fee + markup + vat;
     let localDebitPerformed = false;
 
+    if (!userId || typeof userId !== "string" || !userId.trim() || userId === "N/A") {
+      logger.error(`[TransferService] Aborting transfer: missing authenticated userId for reference=${reference}`);
+      return {
+        success: false,
+        reference,
+        status: "failed",
+        message: "Authenticated userId is required to initiate a transfer.",
+      };
+    }
+    const cleanUserId = userId.trim();
+
     logger.info(
       `[TransferService] Starting transfer process | reference=${reference} | amount=${amount} | fee=${fee} | markup=${markup} | totalDebited=${totalDebited} | account=${account_number} | reqId=${requestId}`
     );
@@ -111,7 +122,7 @@ export class TransferService {
     }
 
     // 1. Atomically verify wallet balance and deduct totalDebited (amount + fee + markup + vat) if not already debited by caller
-    if (adminDb && userId && userId !== "N/A") {
+    if (adminDb && cleanUserId) {
       const db = adminDb;
       try {
         const unifiedTxRef = db.collection("transactions").doc(`tx-${reference}`);
@@ -130,11 +141,15 @@ export class TransferService {
           }
 
           const userSnap = await t.get(userRef);
-          if (!userSnap.exists) {
-            return { success: false, error: "User profile document not found." };
-          }
-
           const walletSnap = await t.get(walletRef);
+
+          if (!userSnap.exists && !walletSnap.exists) {
+            logger.error(`[TransferService] Neither user profile document nor wallet document found for userId=${cleanUserId}. Aborting payout.`);
+            return {
+              success: false,
+              error: `User profile and wallet records for user ${cleanUserId} were not found. Cannot perform balance verification.`,
+            };
+          }
           const currentWalletBal = walletSnap.exists ? Number(walletSnap.data()?.balance || 0) : 0;
           const currentUserBal = Number(userSnap.data()?.balance || 0);
           const availableBal = walletSnap.exists ? currentWalletBal : currentUserBal;
@@ -254,7 +269,7 @@ export class TransferService {
               providerTransferId: flwId || null,
               providerReference: flwId || null,
               reference,
-              userId: userId || "N/A",
+              userId: cleanUserId,
               amount,
               currency: currency || "NGN",
               fee,
@@ -288,7 +303,7 @@ export class TransferService {
 
             const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
             await unifiedTxRef.set({
-              userId: userId || "N/A",
+              userId: cleanUserId,
               createdAt: createdAtIso,
               reference,
               providerReference: flwId || null,
@@ -322,7 +337,7 @@ export class TransferService {
           }
         }
 
-        if (userId && userId !== "N/A") {
+        if (cleanUserId) {
           try {
             await NotificationService.sendPushNotification(userId, {
               title: "Transfer To",
@@ -352,7 +367,7 @@ export class TransferService {
       }
 
       // Provider explicitly rejected the request -> Roll back local debit if executed in this method
-      if (localDebitPerformed && adminDb && userId && userId !== "N/A") {
+      if (localDebitPerformed && adminDb && cleanUserId) {
         const db = adminDb;
         try {
           const userRef = db.collection("users").doc(userId);
@@ -387,7 +402,7 @@ export class TransferService {
       };
     } catch (error: any) {
       // On provider transport exception, if local debit was performed, roll back if failure is immediate
-      if (localDebitPerformed && adminDb && userId && userId !== "N/A") {
+      if (localDebitPerformed && adminDb && cleanUserId) {
         const db = adminDb;
         try {
           const userRef = db.collection("users").doc(userId);
