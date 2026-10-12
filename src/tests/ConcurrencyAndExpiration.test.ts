@@ -1,5 +1,6 @@
 import { handleWebhook, verifyPayment } from "../controllers/flutterwaveController";
 import { adminDb } from "../config/firebase";
+import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 
 jest.mock("../config/firebase", () => ({
   adminDb: {
@@ -44,6 +45,7 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    FirestoreIdempotency.getInstance().clearCache();
     res = {
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),
@@ -85,16 +87,16 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
     (adminDb!.runTransaction as jest.Mock).mockImplementation(async (cb: any) => {
       const mockT = {
         get: jest.fn().mockImplementation((ref: any) => {
-          if (ref === mockUserRef) return Promise.resolve(mockUserDoc);
-          if (ref === mockWalletRef) return Promise.resolve(mockWalletDoc);
-          if (ref === mockLedgerRef) return Promise.resolve(mockExpiredLedgerDoc);
+          if (ref === mockUserRef || ref?.id === mockUserRef.id) return Promise.resolve(mockUserDoc);
+          if (ref === mockWalletRef || ref?.id === mockWalletRef.id) return Promise.resolve(mockWalletDoc);
+          if (ref === mockLedgerRef || ref?.id === mockLedgerRef.id || ref?.id?.includes("tx-FUNDING-")) return Promise.resolve(mockExpiredLedgerDoc);
           return Promise.resolve({ exists: false });
         }),
         update: jest.fn().mockImplementation(() => {
           transactionUpdateCalled = true;
         }),
         set: jest.fn().mockImplementation((ref: any, data: any) => {
-          if (ref === mockLedgerRef && data.unmatched) {
+          if ((ref === mockLedgerRef || ref?.id === mockLedgerRef.id || ref?.id?.includes("tx-FUNDING-")) && data.unmatched) {
             transactionSetCalled = true;
           }
         }),
@@ -212,9 +214,9 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
     (adminDb!.runTransaction as jest.Mock).mockImplementation(async (cb: any) => {
       const mockT = {
         get: jest.fn().mockImplementation((ref: any) => {
-          if (ref === mockUserRef) return Promise.resolve(mockUserDoc);
-          if (ref === mockWalletRef) return Promise.resolve(mockWalletDoc);
-          if (ref === mockLedgerRef) {
+          if (ref === mockUserRef || ref?.id === mockUserRef.id) return Promise.resolve(mockUserDoc);
+          if (ref === mockWalletRef || ref?.id === mockWalletRef.id) return Promise.resolve(mockWalletDoc);
+          if (ref === mockLedgerRef || ref?.id === mockLedgerRef.id || ref?.id?.includes("tx-FUNDING-")) {
             return Promise.resolve({
               exists: true,
               data: () => sharedLedgerState,
@@ -223,12 +225,12 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
           return Promise.resolve({ exists: false });
         }),
         update: jest.fn().mockImplementation((ref: any) => {
-          if (ref === mockUserRef || ref === mockWalletRef) {
+          if (ref === mockUserRef || ref?.id === mockUserRef.id || ref === mockWalletRef || ref?.id === mockWalletRef.id) {
             creditIncrementCount++;
           }
         }),
         set: jest.fn().mockImplementation((ref: any, data: any) => {
-          if (ref === mockLedgerRef) {
+          if (ref === mockLedgerRef || ref?.id === mockLedgerRef.id || ref?.id?.includes("tx-FUNDING-")) {
             sharedLedgerState = {
               ...sharedLedgerState,
               ...data,
@@ -317,9 +319,9 @@ describe("Funding Concurrency & Expiration Security Tests", () => {
       }
       const mockT = {
         get: jest.fn().mockImplementation((ref: any) => {
-          if (ref === mockUserRef) return Promise.resolve(mockUserDoc);
-          if (ref === mockWalletRef) return Promise.resolve(mockWalletDoc);
-          if (ref === mockLedgerRef) {
+          if (ref === mockUserRef || ref?.id === mockUserRef.id) return Promise.resolve(mockUserDoc);
+          if (ref === mockWalletRef || ref?.id === mockWalletRef.id) return Promise.resolve(mockWalletDoc);
+          if (ref === mockLedgerRef || ref?.id === mockLedgerRef.id || ref?.id?.includes("tx-FUNDING-")) {
             return Promise.resolve({
               exists: true,
               data: () => sharedLedgerState,
