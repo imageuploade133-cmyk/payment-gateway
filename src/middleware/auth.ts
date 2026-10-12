@@ -39,8 +39,29 @@ export async function gatewayAuthMiddleware(
     }
   }
 
-  const path = req.originalUrl || req.path || req.url || "";
-  const isTransferRoute = path.includes("/transfer") || path.includes("/bulk-transfer");
+  const rawUrl = req.originalUrl || req.path || req.url || "";
+  const urlPathname = rawUrl.split("?")[0].split("#")[0].trim().toLowerCase();
+  const isTransferRoute = urlPathname.includes("/transfer") || urlPathname.includes("/bulk-transfer");
+
+  // Explicit allowlist of legitimate auth/recovery route pathnames
+  let isAuthExempt = false;
+  if (!isTransferRoute) {
+    const authExemptPaths = [
+      "/api/auth/send-otp",
+      "/api/auth/verify-otp",
+      "/api/auth/pin-reset-otp",
+      "/api/auth/pin-verify-otp",
+      "/send-otp",
+      "/verify-otp",
+      "/pin-reset-otp",
+      "/pin-verify-otp",
+    ];
+
+    const isExactExempt = authExemptPaths.includes(urlPathname);
+    const isAuthPrefix = urlPathname.startsWith("/api/auth/") || urlPathname.startsWith("/auth/");
+
+    isAuthExempt = isExactExempt || isAuthPrefix;
+  }
 
   // 2. JWT / Firebase Authentication path
   if (providedToken) {
@@ -60,9 +81,6 @@ export async function gatewayAuthMiddleware(
         }
 
         req.user = { ...decoded, firebaseAuth: true };
-
-        // Check if route is an auth/recovery endpoint (PIN reset, OTP send/verify, session setup)
-        const isAuthExempt = path.includes("/auth/") || path.includes("pin-reset-otp") || path.includes("pin-verify-otp") || path.includes("send-otp") || path.includes("verify-otp");
 
         if (!isAuthExempt) {
           // Server-authoritative session enforcement
