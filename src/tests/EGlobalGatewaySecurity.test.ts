@@ -69,25 +69,7 @@ jest.mock("../providers/flutterwave", () => {
   return {
     getFlutterwaveClient: () => mClient,
   };
-  it("8. JWT fallback must reject an invalid transfer session before any side effects", async () => {
-    const originalFirebaseApp = firebase.app;
-    (firebase as any).app = null;
-    try {
-      const jwtToken = jwt.sign({ uid: targetUid }, env.JWT_SECRET, { expiresIn: "1h" });
-      const res = await request(app)
-        .post("/api/flutterwave/transfer")
-        .set("Authorization", `Bearer ${jwtToken}`)
-        .set("X-Session-ID", "invalid-mismatched-session-id")
-        .send(validPayload);
 
-      expect(res.status).toBe(401);
-      expect(res.body.code).toBe("REVOKED_SESSION");
-      expect(mockFlwClient.request).not.toHaveBeenCalled();
-      expectNoTransferSideEffects(validPayload.reference);
-    } finally {
-      (firebase as any).app = originalFirebaseApp;
-    }
-  });
 
 });
 
@@ -276,5 +258,25 @@ describe("E-Global to Payment Gateway Transfer Security Integration Tests", () =
     expect(res.body.message).toContain("Authentication Error");
     expect(mockFlwClient.request).not.toHaveBeenCalled();
     expectNoTransferSideEffects(validPayload.reference);
+  });
+
+  it("8. JWT fallback must reject an invalid transfer session before any side effects", async () => {
+    const originalFirebaseApp = firebase.app;
+    (firebase as any).app = null;
+    try {
+      const jwtToken = jwt.sign({ uid: targetUid }, env.JWT_SECRET, { expiresIn: "1h" });
+      const res = await request(app)
+        .post("/api/flutterwave/transfer")
+        .set("Authorization", `Bearer ${jwtToken}`)
+        .set("X-Session-ID", "invalid-mismatched-session-id")
+        .send(validPayload);
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("REVOKED_SESSION");
+      expect(mockFlwClient.request).not.toHaveBeenCalled();
+      expectNoTransferSideEffects(validPayload.reference);
+    } finally {
+      (firebase as any).app = originalFirebaseApp;
+    }
   });
 });
