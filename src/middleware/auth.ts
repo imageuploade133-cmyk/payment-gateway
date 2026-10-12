@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { getAuth } from "firebase-admin/auth";
 import { env } from "../config/env";
 import logger from "../config/logger";
 import { firebase, adminDb } from "../config/firebase";
@@ -45,7 +46,6 @@ export async function gatewayAuthMiddleware(
   if (providedToken) {
     if (firebase.app) {
       try {
-        const { getAuth } = require("firebase-admin/auth");
         const decoded = await getAuth(firebase.app).verifyIdToken(providedToken);
         const uid = decoded?.uid;
 
