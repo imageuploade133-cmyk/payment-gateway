@@ -1369,6 +1369,18 @@ export const proxy = async (req: Request, res: Response, next: NextFunction) => 
       targetUrl = "/" + targetUrl;
     }
 
+    const lowerEndpoint = targetUrl.toLowerCase();
+    const isPayoutEndpoint = lowerEndpoint.includes("/transfer") || lowerEndpoint.includes("/bulk-transfer") || lowerEndpoint.includes("/transfers") || lowerEndpoint.includes("/payout");
+
+    if (isPayoutEndpoint) {
+      logger.warn(`[Flutterwave Controller] Blocked unauthorized payout dispatch attempt through proxy | endpoint=${endpoint} | reqId=${reqId}`);
+      res.status(403).json({
+        success: false,
+        message: "Forbidden: Direct payout and transfer operations are prohibited through the proxy endpoint. Use dedicated authenticated transfer routes.",
+      });
+      return;
+    }
+
     const client = getFlutterwaveClient();
     const response = await client.request(
       (method || "get").toLowerCase() as any,
