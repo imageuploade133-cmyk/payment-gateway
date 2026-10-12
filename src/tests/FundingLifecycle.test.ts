@@ -1,6 +1,7 @@
 import { handleWebhook, verifyPayment, initializePayment } from "../controllers/flutterwaveController";
 import { adminDb } from "../config/firebase";
 import { parseUserIdFromTxRef } from "../utils/userIdParser";
+import { FirestoreIdempotency } from "../services/firestoreIdempotency";
 
 jest.mock("../config/firebase", () => ({
   adminDb: {
@@ -55,6 +56,7 @@ jest.mock("../services/firestoreIdempotency", () => ({
     getInstance: jest.fn().mockReturnValue({
       isWebhookDuplicate: jest.fn().mockResolvedValue(false),
       saveWebhookProcessed: jest.fn().mockResolvedValue(undefined),
+      clearCache: jest.fn(),
     }),
   },
 }));
@@ -66,6 +68,7 @@ describe("Comprehensive Wallet Funding Lifecycle Tests", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    FirestoreIdempotency.getInstance().clearCache();
     res = {
       status: jest.fn().mockReturnThis(),
       json: jest.fn().mockReturnThis(),

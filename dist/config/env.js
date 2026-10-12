@@ -12,6 +12,14 @@ function validateEnv() {
     const NODE_ENV = process.env.NODE_ENV || "development";
     const FLW_BASE_URL = process.env.FLW_BASE_URL || "https://api.flutterwave.com/v3";
     const PAYSTACK_BASE_URL = process.env.PAYSTACK_BASE_URL || "https://api.paystack.co";
+    if (NODE_ENV !== "production") {
+        if (!process.env.FLW_SECRET_KEY)
+            process.env.FLW_SECRET_KEY = "FLWSECK-mock-test-key";
+        if (!process.env.FLW_PUBLIC_KEY)
+            process.env.FLW_PUBLIC_KEY = "FLWPUBK-mock-test-key";
+        if (!process.env.FLW_WEBHOOK_SECRET)
+            process.env.FLW_WEBHOOK_SECRET = "mock-webhook-secret";
+    }
     const missingFlwVars = [];
     if (!process.env.FLW_SECRET_KEY)
         missingFlwVars.push("FLW_SECRET_KEY");

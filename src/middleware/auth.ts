@@ -38,13 +38,16 @@ export async function gatewayAuthMiddleware(
     }
   }
 
-  // 2. JWT Authentication path (Can be enabled/toggled)
+  const path = req.originalUrl || req.path || req.url || "";
+  const isTransferRoute = path.includes("/transfer") || path.includes("/bulk-transfer");
+
+  // 2. JWT / Firebase Authentication path
   if (providedToken) {
     if (firebase.app) {
       try {
         const { getAuth } = require("firebase-admin/auth");
         const decoded = await getAuth(firebase.app).verifyIdToken(providedToken);
-        const uid = decoded.uid;
+        const uid = decoded?.uid;
 
         if (!uid) {
           logger.warn(`[Auth] Firebase token missing UID claim | reqId=${reqId}`);
@@ -56,10 +59,9 @@ export async function gatewayAuthMiddleware(
           return;
         }
 
-        req.user = decoded;
+        req.user = { ...decoded, firebaseAuth: true };
 
         // Check if route is an auth/recovery endpoint (PIN reset, OTP send/verify, session setup)
-        const path = req.originalUrl || req.path || req.url || "";
         const isAuthExempt = path.includes("/auth/") || path.includes("pin-reset-otp") || path.includes("pin-verify-otp") || path.includes("send-otp") || path.includes("verify-otp");
 
         if (!isAuthExempt) {
@@ -101,12 +103,12 @@ export async function gatewayAuthMiddleware(
 
             const activeSessionId = userDoc.data()?.activeSessionId;
 
-            if (activeSessionId && providedSessionId !== activeSessionId) {
-              logger.warn(`[Auth] REVOKED_SESSION: Session mismatch for user ${uid}. Provided '${providedSessionId}', Active '${activeSessionId}' | reqId=${reqId}`);
+            if (!activeSessionId || providedSessionId !== activeSessionId) {
+              logger.warn(`[Auth] REVOKED_SESSION: Session mismatch or missing activeSessionId for user ${uid}. Provided '${providedSessionId}', Active '${activeSessionId}' | reqId=${reqId}`);
               res.status(401).json({
                 success: false,
                 code: "REVOKED_SESSION",
-                message: "Your account was signed in on another device. You have been logged out on this device.",
+                message: "Your account was signed in on another device or has no active session. You have been logged out on this device.",
               });
               return;
             }
@@ -132,6 +134,16 @@ export async function gatewayAuthMiddleware(
         });
         return;
       }
+    }
+
+    if (isTransferRoute) {
+      logger.warn(`[Auth] Transfer rejected: Firebase authentication service unavailable | reqId=${reqId}`);
+      res.status(401).json({
+        success: false,
+        code: "REVOKED_SESSION",
+        message: "Unauthorized: Firebase authentication service is unavailable for transfers.",
+      });
+      return;
     }
 
     try {

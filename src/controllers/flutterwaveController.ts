@@ -489,8 +489,8 @@ export const initiateTransfer = async (req: AuthenticatedRequest, res: Response,
   logger.info(`[Flutterwave Controller] Received initiateTransfer request | reqId=${reqId} | body:`, req.body);
 
   const authenticatedUserId = req.user?.uid;
-  if (!authenticatedUserId || typeof authenticatedUserId !== "string" || !authenticatedUserId.trim()) {
-    logger.warn(`[Flutterwave Controller] Transfer rejected: unauthenticated request (missing req.user.uid) | reqId=${reqId}`);
+  if (!authenticatedUserId || typeof authenticatedUserId !== "string" || !authenticatedUserId.trim() || req.user?.firebaseAuth !== true) {
+    logger.warn(`[Flutterwave Controller] Transfer rejected: unauthenticated request or non-Firebase token | reqId=${reqId}`);
     res.status(401).json({
       success: false,
       message: "Authentication Error: Verified user authentication is required to execute transfers.",
@@ -1257,7 +1257,11 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
           source: "webhook",
         });
 
-        if (!creditResult.success && !creditResult.alreadyCredited && !creditResult.unmatched) {
+        if (!adminDb || creditResult.success || creditResult.alreadyCredited || creditResult.unmatched) {
+          if (transactionId) {
+            await idempotency.saveWebhookProcessed(transactionId);
+          }
+        } else {
           // Release processing lease on temporary credit error so webhook can be retried by provider
           await idempotency.releaseWebhookProcessing(transactionId);
         }
@@ -1279,12 +1283,12 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
               reason: payload.data?.processor_response || payload.data?.narration || "Payment declined or canceled",
               updatedAt: new Date().toISOString(),
             }, { merge: true });
-            if (flwId) {
-              await idempotency.saveWebhookProcessed(flwId);
-            }
           } catch (uErr: any) {
             logger.warn(`[Webhook charge.completed] Failed to update pending funding doc: ${uErr.message}`);
           }
+        }
+        if (flwId) {
+          await idempotency.saveWebhookProcessed(flwId);
         }
       }
 
