@@ -67,7 +67,6 @@ export interface TransferResult {
   flutterwaveStatus?: string;
 }
 
-const TRANSFER_PENDING_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 export class TransferService {
   private idempotencyProvider: IdempotencyProvider;
@@ -259,7 +258,6 @@ export class TransferService {
 
         const createdAt = new Date();
         const createdAtIso = createdAt.toISOString();
-        const expiresAt = new Date(createdAt.getTime() + TRANSFER_PENDING_EXPIRY_MS).toISOString();
 
         if (adminDb) {
           try {
@@ -298,7 +296,6 @@ export class TransferService {
               narration: narration || null,
               remark: narration || null,
               createdAt: createdAtIso,
-              expiresAt,
             }, { merge: true });
 
             const unifiedTxRef = adminDb.collection("transactions").doc(`tx-${reference}`);
